@@ -11,8 +11,9 @@ ziggystarspider --help
 
 - `chat send <message>` - Send a message to the AI
 - `chat history` - Show recent chat history
+- `chat resume [job_id]` - Resume/inspect queued chat jobs
 - `fs ls <path>` - List entries for a virtual filesystem path
-- `fs tree <path>` - Alias of `fs ls` for directory-style browsing
+- `fs tree [path] [--max-depth N] [--files-only|--dirs-only]` - Recursive directory walk
 - `fs read <path>` - Read a virtual filesystem file
 - `fs write <path> <content>` - Write text to a virtual filesystem file
 - `fs stat <path>` - Show file metadata for a virtual filesystem path
@@ -20,6 +21,8 @@ ziggystarspider --help
 - `project use <project_id> [project_token]` - Select/activate a project
 - `project info <project_id>` - Show project details
 - `project create <name> [vision]` - Create a project and store selection/token locally
+- `project up <name>` - One-shot project + mount bootstrap
+- `project doctor` - Readiness checks with actionable failures
 - `node list` - List registered nodes
 - `node info <node_id>` - Show node details
 - `workspace status [project_id]` - Show active workspace mounts

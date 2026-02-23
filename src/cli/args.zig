@@ -40,9 +40,12 @@ pub const Verb = enum {
     ls,
     status,
     history,
+    resume_job,
     list,
     use,
     create,
+    up,
+    doctor,
     info,
     complete,
     logs,
@@ -160,6 +163,7 @@ fn parseVerb(noun: Noun, arg: []const u8) ?Verb {
         .chat => {
             if (std.mem.eql(u8, arg, "send")) return .send;
             if (std.mem.eql(u8, arg, "history")) return .history;
+            if (std.mem.eql(u8, arg, "resume")) return .resume_job;
         },
         .fs => {
             if (std.mem.eql(u8, arg, "ls")) return .ls;
@@ -172,6 +176,8 @@ fn parseVerb(noun: Noun, arg: []const u8) ?Verb {
             if (std.mem.eql(u8, arg, "list")) return .list;
             if (std.mem.eql(u8, arg, "use")) return .use;
             if (std.mem.eql(u8, arg, "create")) return .create;
+            if (std.mem.eql(u8, arg, "up")) return .up;
+            if (std.mem.eql(u8, arg, "doctor")) return .doctor;
             if (std.mem.eql(u8, arg, "info")) return .info;
         },
         .node => {
@@ -304,10 +310,10 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Options {
                 if (verb) |v| {
                     i += 1;
 
-                    // Find where command args end (next flag or end)
+                    // Command-specific args consume the remainder of argv.
                     const arg_start = i + 1;
                     var arg_end = arg_start;
-                    while (arg_end < args.len and !std.mem.startsWith(u8, args[arg_end], "--")) {
+                    while (arg_end < args.len) {
                         arg_end += 1;
                     }
 

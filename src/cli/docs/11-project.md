@@ -69,3 +69,23 @@ Project proj-1
     - /src <= node-a:work
     - /cache <= node-b:cache
 ```
+
+## project up <name>
+
+Create/update and activate a project with desired mounts in one command.
+
+**Examples:**
+```bash
+ziggystarspider project up "Distributed Workspace"
+ziggystarspider project up "Distributed Workspace" --mount /workspace=node-1:work
+```
+
+## project doctor
+
+Run readiness checks for nodes, project selection, and active mounts.
+
+**Examples:**
+```bash
+ziggystarspider project doctor
+ziggystarspider --project proj-1 project doctor
+```

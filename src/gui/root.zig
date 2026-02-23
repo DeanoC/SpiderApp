@@ -75,8 +75,46 @@ const AsyncChatWorkerState = struct {
     done: bool = false,
     response: ?[]u8 = null,
     error_text: ?[]u8 = null,
+    job_id: ?[]u8 = null,
+    correlation_id: ?[]u8 = null,
     pending_debug_frames: std.ArrayListUnmanaged([]u8) = .{},
     worker_thread: ?std.Thread = null,
+};
+
+const PendingJobMetadata = struct {
+    job_id: ?[]u8 = null,
+    correlation_id: ?[]u8 = null,
+
+    fn deinit(self: *PendingJobMetadata, allocator: std.mem.Allocator) void {
+        if (self.job_id) |value| allocator.free(value);
+        if (self.correlation_id) |value| allocator.free(value);
+        self.* = .{};
+    }
+};
+
+const FilesystemEntry = struct {
+    name: []u8,
+    path: []u8,
+    is_dir: bool,
+
+    fn deinit(self: *FilesystemEntry, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.path);
+        self.* = undefined;
+    }
+};
+
+const JobStatusInfo = struct {
+    state: []u8,
+    error_text: ?[]u8 = null,
+    correlation_id: ?[]u8 = null,
+
+    fn deinit(self: *JobStatusInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.state);
+        if (self.error_text) |value| allocator.free(value);
+        if (self.correlation_id) |value| allocator.free(value);
+        self.* = undefined;
+    }
 };
 
 const AsyncChatWorkerContext = struct {
@@ -278,6 +316,7 @@ fn sendChatViaFsrpcBlocking(
     text: []const u8,
     debug_state: ?*AsyncChatWorkerState,
     subscribe_debug: bool,
+    job_meta: ?*PendingJobMetadata,
 ) ![]u8 {
     var next_tag: u32 = 1;
     var next_fid: u32 = 2;
@@ -328,6 +367,18 @@ fn sendChatViaFsrpcBlocking(
     const job_value = write_payload.get("job") orelse return error.InvalidResponse;
     if (job_value != .string) return error.InvalidResponse;
     const job_name = job_value.string;
+
+    if (job_meta) |meta| {
+        if (meta.job_id) |value| allocator.free(value);
+        if (meta.correlation_id) |value| allocator.free(value);
+        meta.job_id = try allocator.dupe(u8, job_name);
+        meta.correlation_id = null;
+        if (write_payload.get("correlation_id")) |corr_value| {
+            if (corr_value == .string) {
+                meta.correlation_id = try allocator.dupe(u8, corr_value.string);
+            }
+        }
+    }
 
     const escaped_job = try jsonEscape(allocator, job_name);
     defer allocator.free(escaped_job);
@@ -463,13 +514,25 @@ fn runAsyncChatSendWorker(ctx: *AsyncChatWorkerContext) void {
         }
     }
 
-    response = sendChatViaFsrpcBlocking(allocator, &client, ctx.message, ctx.state, ctx.subscribe_debug) catch |err| blk: {
+    var job_meta = PendingJobMetadata{};
+    defer job_meta.deinit(allocator);
+
+    response = sendChatViaFsrpcBlocking(allocator, &client, ctx.message, ctx.state, ctx.subscribe_debug, &job_meta) catch |err| blk: {
         error_text = std.fmt.allocPrint(allocator, "Send failed: {s}", .{@errorName(err)}) catch null;
         break :blk null;
     };
 
+    const final_job_id = job_meta.job_id;
+    const final_corr = job_meta.correlation_id;
+    job_meta.job_id = null;
+    job_meta.correlation_id = null;
+
     ctx.state.mutex.lock();
     defer ctx.state.mutex.unlock();
+    if (ctx.state.job_id) |value| allocator.free(value);
+    if (ctx.state.correlation_id) |value| allocator.free(value);
+    ctx.state.job_id = final_job_id;
+    ctx.state.correlation_id = final_corr;
     ctx.state.response = response;
     ctx.state.error_text = error_text;
     ctx.state.done = true;
@@ -544,11 +607,13 @@ const DebugEventEntry = struct {
     id: u64,
     timestamp_ms: i64,
     category: []u8,
+    correlation_id: ?[]u8 = null,
     payload_json: []u8,
     payload_lines: std.ArrayList(DebugPayloadLine) = .empty,
 
     fn deinit(self: *DebugEventEntry, allocator: std.mem.Allocator) void {
         allocator.free(self.category);
+        if (self.correlation_id) |value| allocator.free(value);
         allocator.free(self.payload_json);
         self.payload_lines.deinit(allocator);
     }
@@ -687,6 +752,10 @@ const App = struct {
     pending_send_request_id: ?[]const u8 = null,
     pending_send_message_id: ?[]const u8 = null,
     pending_send_session_key: ?[]const u8 = null,
+    pending_send_job_id: ?[]u8 = null,
+    pending_send_correlation_id: ?[]u8 = null,
+    pending_send_resume_notified: bool = false,
+    pending_send_last_resume_attempt_ms: i64 = 0,
     awaiting_reply: bool = false,
     debug_stream_enabled: bool = false,
     debug_stream_pending: bool = false,
@@ -708,6 +777,12 @@ const App = struct {
     workspace_state: ?workspace_types.WorkspaceStatus = null,
     workspace_last_error: ?[]u8 = null,
     workspace_last_refresh_ms: i64 = 0,
+    filesystem_panel_id: ?workspace.PanelId = null,
+    filesystem_path: std.ArrayList(u8) = .empty,
+    filesystem_entries: std.ArrayListUnmanaged(FilesystemEntry) = .{},
+    filesystem_preview_path: ?[]u8 = null,
+    filesystem_preview_text: ?[]u8 = null,
+    filesystem_error: ?[]u8 = null,
 
     ws_client: ?ws_client_mod.WebSocketClient = null,
     async_chat_worker: AsyncChatWorkerState = .{},
@@ -859,6 +934,7 @@ const App = struct {
         errdefer app.manager.deinit();
 
         app.captureWorkspaceSnapshot(&app.manager);
+        try app.filesystem_path.appendSlice(allocator, "/");
 
         if (app.config.default_session) |default_session| {
             const seed = if (default_session.len > 0) default_session else "main";
@@ -920,6 +996,10 @@ const App = struct {
         if (self.pending_send_request_id) |request_id| self.allocator.free(request_id);
         if (self.pending_send_message_id) |message_id| self.allocator.free(message_id);
         if (self.pending_send_session_key) |session_key| self.allocator.free(session_key);
+        if (self.pending_send_job_id) |job_id| self.allocator.free(job_id);
+        if (self.pending_send_correlation_id) |corr| self.allocator.free(corr);
+        self.clearFilesystemData();
+        self.filesystem_path.deinit(self.allocator);
 
         zui.ChatView(ChatMessage).deinit(&self.chat_panel_state.view, self.allocator);
 
@@ -1027,6 +1107,9 @@ const App = struct {
 
             try self.pollWebSocket();
             try self.pollAsyncChatSendCompletion();
+            if (self.pending_send_job_id != null and self.ws_client != null) {
+                _ = self.tryResumePendingSendJob() catch {};
+            }
             self.frame_clock.endFrame();
         }
     }
@@ -2830,17 +2913,31 @@ const App = struct {
     fn pollWebSocket(self: *App) !void {
         if (self.ws_client) |*client| {
             if (!client.isAlive()) {
-                if (self.pending_send_message_id) |message_id| {
-                    try self.setMessageFailed(message_id);
-                }
-                self.clearPendingSend();
+                const has_pending_send = self.pending_send_message_id != null;
                 self.debug_stream_pending = false;
                 self.clearPendingDebugRequest();
 
                 client.deinit();
                 self.ws_client = null;
                 self.setConnectionState(.error_state, "Connection lost. Please reconnect.");
-                try self.appendMessage("system", "Connection lost. Please reconnect.", null);
+                if (has_pending_send) {
+                    if (!self.pending_send_resume_notified) {
+                        if (self.pending_send_job_id) |job_id| {
+                            const msg = try std.fmt.allocPrint(
+                                self.allocator,
+                                "Connection lost while waiting for job {s}. Reconnect to resume.",
+                                .{job_id},
+                            );
+                            defer self.allocator.free(msg);
+                            try self.appendMessage("system", msg, null);
+                        } else {
+                            try self.appendMessage("system", "Connection lost while waiting for assistant response. Reconnect to resume.", null);
+                        }
+                        self.pending_send_resume_notified = true;
+                    }
+                } else {
+                    try self.appendMessage("system", "Connection lost. Please reconnect.", null);
+                }
                 return;
             }
 
@@ -3125,6 +3222,39 @@ const App = struct {
             self.workspace_last_error = null;
         }
         self.workspace_last_refresh_ms = 0;
+    }
+
+    fn clearFilesystemData(self: *App) void {
+        for (self.filesystem_entries.items) |*entry| entry.deinit(self.allocator);
+        self.filesystem_entries.deinit(self.allocator);
+        self.filesystem_entries = .{};
+        if (self.filesystem_preview_path) |value| {
+            self.allocator.free(value);
+            self.filesystem_preview_path = null;
+        }
+        if (self.filesystem_preview_text) |value| {
+            self.allocator.free(value);
+            self.filesystem_preview_text = null;
+        }
+        if (self.filesystem_error) |value| {
+            self.allocator.free(value);
+            self.filesystem_error = null;
+        }
+    }
+
+    fn setFilesystemError(self: *App, message: []const u8) void {
+        if (self.filesystem_error) |value| {
+            self.allocator.free(value);
+            self.filesystem_error = null;
+        }
+        self.filesystem_error = self.allocator.dupe(u8, message) catch null;
+    }
+
+    fn clearFilesystemError(self: *App) void {
+        if (self.filesystem_error) |value| {
+            self.allocator.free(value);
+            self.filesystem_error = null;
+        }
     }
 
     fn setWorkspaceError(self: *App, message: []const u8) void {
@@ -3749,6 +3879,8 @@ const App = struct {
             .ToolOutput => {
                 if (self.debug_panel_id != null and self.debug_panel_id.? == panel.id) {
                     self.drawDebugPanel(manager, rect);
+                } else if (self.filesystem_panel_id != null and self.filesystem_panel_id.? == panel.id) {
+                    self.drawFilesystemPanel(manager, rect);
                 } else {
                     self.drawText(
                         rect.min[0] + 20,
@@ -3858,6 +3990,93 @@ const App = struct {
         if (project_token_focused) self.settings_panel.focused_field = .project_token;
 
         y += input_height + pad * 0.5;
+        const wizard_connected = self.connection_state == .connected;
+        const wizard_project_selected = self.settings_panel.project_id.items.len > 0;
+        const wizard_has_mounts = if (self.workspace_state) |*status|
+            status.mounts.items.len > 0
+        else
+            false;
+        const wizard_activated = if (self.workspace_state) |*status|
+            status.project_id != null and
+                wizard_project_selected and
+                std.mem.eql(u8, status.project_id.?, self.settings_panel.project_id.items)
+        else
+            false;
+
+        self.drawLabel(rect.min[0] + pad, y, "Onboarding Wizard", self.theme.colors.text_primary);
+        y += 18.0 * self.ui_scale;
+
+        const line1 = if (wizard_connected) "[x] 1. Connect" else "[ ] 1. Connect";
+        const line2 = if (wizard_project_selected) "[x] 2. Select project" else "[ ] 2. Select project";
+        const line3 = if (wizard_has_mounts) "[x] 3. Verify mounts" else "[ ] 3. Verify mounts";
+        const line4 = if (wizard_activated) "[x] 4. Activate project" else "[ ] 4. Activate project";
+        self.drawLabel(rect.min[0] + pad, y, line1, self.theme.colors.text_secondary);
+        y += 16.0 * self.ui_scale;
+        self.drawLabel(rect.min[0] + pad, y, line2, self.theme.colors.text_secondary);
+        y += 16.0 * self.ui_scale;
+        self.drawLabel(rect.min[0] + pad, y, line3, self.theme.colors.text_secondary);
+        y += 16.0 * self.ui_scale;
+        self.drawLabel(rect.min[0] + pad, y, line4, self.theme.colors.text_secondary);
+        y += 18.0 * self.ui_scale;
+
+        const wizard_btn_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            @max(220.0, rect_width * 0.5),
+            input_height,
+        );
+        if (!wizard_connected) {
+            if (self.drawButtonWidget(wizard_btn_rect, "Run Step 1: Connect", .{ .variant = .secondary })) {
+                self.tryConnect(manager) catch {};
+            }
+        } else if (!wizard_project_selected) {
+            if (self.projects.items.len > 0) {
+                if (self.drawButtonWidget(wizard_btn_rect, "Run Step 2: Use First Project", .{ .variant = .secondary })) {
+                    self.selectProjectInSettings(self.projects.items[0].id) catch |err| {
+                        const msg = std.fmt.allocPrint(self.allocator, "Project selection failed: {s}", .{@errorName(err)}) catch null;
+                        if (msg) |text| {
+                            defer self.allocator.free(text);
+                            self.setWorkspaceError(text);
+                        }
+                    };
+                }
+            } else {
+                if (self.drawButtonWidget(wizard_btn_rect, "Run Step 2: Refresh Projects", .{ .variant = .secondary })) {
+                    self.refreshWorkspaceData() catch |err| {
+                        const msg = std.fmt.allocPrint(self.allocator, "Workspace refresh failed: {s}", .{@errorName(err)}) catch null;
+                        if (msg) |text| {
+                            defer self.allocator.free(text);
+                            self.setWorkspaceError(text);
+                        }
+                    };
+                }
+            }
+        } else if (!wizard_has_mounts) {
+            if (self.drawButtonWidget(wizard_btn_rect, "Run Step 3: Refresh Mounts", .{ .variant = .secondary })) {
+                self.refreshWorkspaceData() catch |err| {
+                    const msg = std.fmt.allocPrint(self.allocator, "Workspace refresh failed: {s}", .{@errorName(err)}) catch null;
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setWorkspaceError(text);
+                    }
+                };
+            }
+        } else if (!wizard_activated) {
+            if (self.drawButtonWidget(wizard_btn_rect, "Run Step 4: Activate Project", .{ .variant = .secondary })) {
+                self.activateSelectedProject() catch |err| {
+                    const msg = std.fmt.allocPrint(self.allocator, "Project activate failed: {s}", .{@errorName(err)}) catch null;
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setWorkspaceError(text);
+                    }
+                };
+            }
+        } else {
+            _ = self.drawButtonWidget(wizard_btn_rect, "Wizard Complete", .{ .variant = .secondary, .disabled = true });
+        }
+
+        y += input_height + pad;
+
         const workspace_refresh_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
@@ -4111,7 +4330,34 @@ const App = struct {
             };
         }
 
-        const actions_bottom = @max(action_row_y + button_height, debug_button_y + button_height);
+        const fs_button_width = button_width * 1.55;
+        var fs_button_x = debug_button_rect.max[0] + pad;
+        var fs_button_y = debug_button_y;
+        if (fs_button_x + fs_button_width > action_max_x) {
+            fs_button_x = rect.min[0] + pad;
+            fs_button_y = debug_button_y + button_height + pad;
+        }
+        const fs_button_rect = Rect.fromXYWH(
+            fs_button_x,
+            fs_button_y,
+            fs_button_width,
+            button_height,
+        );
+        const open_fs_clicked = self.drawButtonWidget(
+            fs_button_rect,
+            "Open Filesystem Panel",
+            .{ .variant = .secondary },
+        );
+        if (open_fs_clicked) {
+            _ = self.ensureFilesystemPanel(manager) catch |err| {
+                std.log.err("Failed to open filesystem panel: {s}", .{@errorName(err)});
+            };
+        }
+
+        const actions_bottom = @max(
+            @max(action_row_y + button_height, debug_button_y + button_height),
+            fs_button_y + button_height,
+        );
         y = actions_bottom + pad;
 
         // Status row
@@ -4300,6 +4546,282 @@ const App = struct {
         const max_scroll = if (total_height > viewport_h) total_height - viewport_h else 0.0;
         if (self.settings_panel.scroll_y < 0.0) self.settings_panel.scroll_y = 0.0;
         if (self.settings_panel.scroll_y > max_scroll) self.settings_panel.scroll_y = max_scroll;
+    }
+
+    fn pathWithinMount(path: []const u8, mount_path: []const u8) bool {
+        if (std.mem.eql(u8, mount_path, "/")) return std.mem.startsWith(u8, path, "/");
+        if (!std.mem.startsWith(u8, path, mount_path)) return false;
+        if (path.len == mount_path.len) return true;
+        return path.len > mount_path.len and path[mount_path.len] == '/';
+    }
+
+    fn findMountForPath(self: *App, path: []const u8) ?*const workspace_types.MountView {
+        if (self.workspace_state) |*status| {
+            var best: ?*const workspace_types.MountView = null;
+            var best_len: usize = 0;
+            for (status.mounts.items) |*mount| {
+                if (!pathWithinMount(path, mount.mount_path)) continue;
+                if (mount.mount_path.len > best_len) {
+                    best = mount;
+                    best_len = mount.mount_path.len;
+                }
+            }
+            return best;
+        }
+        return null;
+    }
+
+    fn setFilesystemPath(self: *App, path: []const u8) !void {
+        self.filesystem_path.clearRetainingCapacity();
+        if (path.len == 0) {
+            try self.filesystem_path.appendSlice(self.allocator, "/");
+        } else {
+            try self.filesystem_path.appendSlice(self.allocator, path);
+        }
+    }
+
+    fn refreshFilesystemBrowser(self: *App) !void {
+        const client = self.ws_client orelse return error.NotConnected;
+        self.clearFilesystemData();
+        self.clearFilesystemError();
+        if (self.filesystem_path.items.len == 0) {
+            try self.filesystem_path.appendSlice(self.allocator, "/");
+        }
+
+        try self.fsrpcBootstrapGui(client);
+        const current_path = self.filesystem_path.items;
+        const fid = try self.fsrpcWalkPathGui(client, current_path);
+        defer self.fsrpcClunkBestEffort(client, fid);
+        const is_dir = try self.fsrpcFidIsDirGui(client, fid);
+        if (!is_dir) return error.NotDir;
+        try self.fsrpcOpenGui(client, fid, "r");
+        const listing = try self.fsrpcReadAllTextGui(client, fid);
+        defer self.allocator.free(listing);
+
+        var iter = std.mem.splitScalar(u8, listing, '\n');
+        while (iter.next()) |raw| {
+            const entry_name = std.mem.trim(u8, raw, " \t\r\n");
+            if (entry_name.len == 0) continue;
+            if (std.mem.eql(u8, entry_name, ".") or std.mem.eql(u8, entry_name, "..")) continue;
+
+            const child_path = try self.joinFilesystemPath(current_path, entry_name);
+            errdefer self.allocator.free(child_path);
+
+            const child_fid = self.fsrpcWalkPathGui(client, child_path) catch |err| {
+                _ = err;
+                self.allocator.free(child_path);
+                continue;
+            };
+            defer self.fsrpcClunkBestEffort(client, child_fid);
+            const child_is_dir = self.fsrpcFidIsDirGui(client, child_fid) catch false;
+
+            try self.filesystem_entries.append(self.allocator, .{
+                .name = try self.allocator.dupe(u8, entry_name),
+                .path = child_path,
+                .is_dir = child_is_dir,
+            });
+        }
+    }
+
+    fn openFilesystemEntry(self: *App, entry: *const FilesystemEntry) !void {
+        if (entry.is_dir) {
+            try self.setFilesystemPath(entry.path);
+            try self.refreshFilesystemBrowser();
+            return;
+        }
+
+        const client = self.ws_client orelse return error.NotConnected;
+        try self.fsrpcBootstrapGui(client);
+        const raw = try self.readFsPathTextGui(client, entry.path);
+        defer self.allocator.free(raw);
+
+        if (self.filesystem_preview_path) |value| self.allocator.free(value);
+        self.filesystem_preview_path = try self.allocator.dupe(u8, entry.path);
+
+        if (self.filesystem_preview_text) |value| self.allocator.free(value);
+        if (raw.len > 16_384) {
+            const suffix = "\n... (truncated)";
+            const limit = 16_384;
+            const buf = try self.allocator.alloc(u8, limit + suffix.len);
+            @memcpy(buf[0..limit], raw[0..limit]);
+            @memcpy(buf[limit .. limit + suffix.len], suffix);
+            self.filesystem_preview_text = buf;
+        } else {
+            self.filesystem_preview_text = try self.allocator.dupe(u8, raw);
+        }
+        self.clearFilesystemError();
+    }
+
+    fn drawFilesystemPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+        _ = manager;
+        const pad = self.theme.spacing.md;
+        var y = rect.min[1] + pad;
+        const width = rect.max[0] - rect.min[0];
+
+        self.drawLabel(rect.min[0] + pad, y, "Filesystem Browser", self.theme.colors.text_primary);
+        y += 24.0 * self.ui_scale;
+
+        const path_label = if (self.filesystem_path.items.len > 0)
+            self.filesystem_path.items
+        else
+            "/";
+        const path_line = std.fmt.allocPrint(self.allocator, "Path: {s}", .{path_label}) catch null;
+        if (path_line) |line| {
+            defer self.allocator.free(line);
+            self.drawTextTrimmed(rect.min[0] + pad, y, width - pad * 2.0, line, self.theme.colors.text_secondary);
+        }
+        y += 20.0 * self.ui_scale;
+
+        const row_h: f32 = 30.0 * self.ui_scale;
+        const action_w: f32 = @max(120.0, width * 0.22);
+        const refresh_rect = Rect.fromXYWH(rect.min[0] + pad, y, action_w, row_h);
+        const up_rect = Rect.fromXYWH(refresh_rect.max[0] + pad, y, action_w, row_h);
+        const root_rect = Rect.fromXYWH(up_rect.max[0] + pad, y, action_w * 1.35, row_h);
+
+        if (self.drawButtonWidget(
+            refresh_rect,
+            "Refresh",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            self.refreshFilesystemBrowser() catch |err| {
+                const msg = std.fmt.allocPrint(self.allocator, "Filesystem refresh failed: {s}", .{@errorName(err)}) catch null;
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setFilesystemError(text);
+                }
+            };
+        }
+        if (self.drawButtonWidget(
+            up_rect,
+            "Up",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            const next_path = self.parentFilesystemPath(path_label) catch null;
+            if (next_path) |value| {
+                defer self.allocator.free(value);
+                self.setFilesystemPath(value) catch {};
+                self.refreshFilesystemBrowser() catch |err| {
+                    const msg = std.fmt.allocPrint(self.allocator, "Filesystem refresh failed: {s}", .{@errorName(err)}) catch null;
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setFilesystemError(text);
+                    }
+                };
+            }
+        }
+        if (self.drawButtonWidget(
+            root_rect,
+            "Use Workspace Root",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            if (self.workspace_state) |*status| {
+                if (status.workspace_root) |root| {
+                    self.setFilesystemPath(root) catch {};
+                } else {
+                    self.setFilesystemPath("/") catch {};
+                }
+            } else {
+                self.setFilesystemPath("/") catch {};
+            }
+            self.refreshFilesystemBrowser() catch |err| {
+                const msg = std.fmt.allocPrint(self.allocator, "Filesystem refresh failed: {s}", .{@errorName(err)}) catch null;
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setFilesystemError(text);
+                }
+            };
+        }
+
+        y += row_h + pad;
+        if (self.filesystem_error) |err_text| {
+            self.drawTextTrimmed(
+                rect.min[0] + pad,
+                y,
+                width - pad * 2.0,
+                err_text,
+                zcolors.rgba(220, 80, 80, 255),
+            );
+            y += 18.0 * self.ui_scale;
+        }
+
+        const listing_height = @max(120.0, (rect.max[1] - y - pad * 2.0) * 0.52);
+        const listing_rect = Rect.fromXYWH(rect.min[0] + pad, y, @max(220.0, width - pad * 2.0), listing_height);
+        self.drawSurfacePanel(listing_rect);
+
+        var list_y = listing_rect.min[1] + 6.0;
+        const max_rows: usize = @min(self.filesystem_entries.items.len, 14);
+        var idx: usize = 0;
+        while (idx < max_rows) : (idx += 1) {
+            const entry = &self.filesystem_entries.items[idx];
+            const row_rect = Rect.fromXYWH(
+                listing_rect.min[0] + 6.0,
+                list_y,
+                listing_rect.width() - 12.0,
+                22.0 * self.ui_scale,
+            );
+            const prefix = if (entry.is_dir) "[dir]" else "[file]";
+            const label = std.fmt.allocPrint(self.allocator, "{s} {s}", .{ prefix, entry.name }) catch null;
+            const clicked = if (label) |text| blk: {
+                defer self.allocator.free(text);
+                break :blk self.drawButtonWidget(row_rect, text, .{ .variant = .secondary });
+            } else false;
+            if (clicked) {
+                self.openFilesystemEntry(entry) catch |err| {
+                    const msg = std.fmt.allocPrint(self.allocator, "Filesystem open failed: {s}", .{@errorName(err)}) catch null;
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setFilesystemError(text);
+                    }
+                };
+            }
+
+            if (self.findMountForPath(entry.path)) |mount| {
+                const badge = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ mount.node_id, mount.export_name }) catch null;
+                if (badge) |text| {
+                    defer self.allocator.free(text);
+                    self.drawTextTrimmed(
+                        row_rect.min[0] + @max(80.0, row_rect.width() * 0.5),
+                        row_rect.min[1] + 5.0 * self.ui_scale,
+                        row_rect.width() * 0.46,
+                        text,
+                        self.theme.colors.primary,
+                    );
+                }
+            }
+
+            list_y += 24.0 * self.ui_scale;
+        }
+
+        y = listing_rect.max[1] + pad;
+        const preview_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            @max(220.0, width - pad * 2.0),
+            @max(100.0, rect.max[1] - y - pad),
+        );
+        self.drawSurfacePanel(preview_rect);
+
+        const preview_title = if (self.filesystem_preview_path) |value|
+            value
+        else
+            "(select a file to preview)";
+        self.drawTextTrimmed(
+            preview_rect.min[0] + 6.0,
+            preview_rect.min[1] + 6.0,
+            preview_rect.width() - 12.0,
+            preview_title,
+            self.theme.colors.text_secondary,
+        );
+
+        if (self.filesystem_preview_text) |text| {
+            _ = self.drawTextWrapped(
+                preview_rect.min[0] + 6.0,
+                preview_rect.min[1] + 26.0,
+                preview_rect.width() - 12.0,
+                text,
+                self.theme.colors.text_primary,
+            );
+        }
     }
 
     fn drawDebugPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
@@ -4650,7 +5172,39 @@ const App = struct {
         if (cursor_x >= max_x) return;
 
         const category_max = @max(0.0, max_x - cursor_x);
+        var category_w = self.measureText(entry.category);
+        if (category_w > category_max) category_w = category_max;
         self.drawTextTrimmed(cursor_x, y, category_max, entry.category, self.debugCategoryColor(entry.category));
+
+        if (entry.correlation_id) |value| {
+            const badge_text = std.fmt.allocPrint(self.allocator, "CID:{s}", .{value}) catch null;
+            if (badge_text) |text| {
+                defer self.allocator.free(text);
+                const badge_x = cursor_x + category_w + 8.0 * self.ui_scale;
+                const remaining = max_x - badge_x;
+                if (remaining > 40.0 * self.ui_scale) {
+                    const badge_w = @min(remaining, self.measureText(text) + 10.0 * self.ui_scale);
+                    const badge_h = 14.0 * self.ui_scale;
+                    const badge_rect = Rect.fromXYWH(
+                        badge_x,
+                        y + 1.0 * self.ui_scale,
+                        badge_w,
+                        badge_h,
+                    );
+                    self.drawFilledRect(
+                        badge_rect,
+                        zcolors.withAlpha(self.theme.colors.primary, 0.22),
+                    );
+                    self.drawTextTrimmed(
+                        badge_rect.min[0] + 4.0 * self.ui_scale,
+                        y,
+                        badge_w - 6.0 * self.ui_scale,
+                        text,
+                        self.theme.colors.text_primary,
+                    );
+                }
+            }
+        }
     }
 
     fn jsonTokenColor(self: *App, kind: JsonTokenKind) [4]f32 {
@@ -5064,8 +5618,16 @@ const App = struct {
             return;
         }
 
+        const had_pending_send = self.pending_send_message_id != null;
         self.setConnectionState(.connecting, "Connecting...");
-        self.disconnect();
+        if (self.ws_client) |*existing| {
+            while (existing.tryReceive()) |msg| self.allocator.free(msg);
+            existing.deinit();
+            self.ws_client = null;
+        }
+        self.debug_stream_enabled = false;
+        self.debug_stream_pending = false;
+        self.clearPendingDebugRequest();
 
         const effective_url = self.settings_panel.server_url.items;
         const connect_token = if (self.config.token.len > 0) self.config.token else self.config.auth_token;
@@ -5116,15 +5678,24 @@ const App = struct {
             }
         };
 
-        self.clearSessions();
-        if (self.config.default_session) |default_session| {
-            const seed = if (default_session.len > 0) default_session else "main";
-            try self.ensureSessionExists(seed, seed);
-        } else {
-            try self.ensureSessionExists("main", "Main");
+        if (self.chat_sessions.items.len == 0) {
+            if (self.config.default_session) |default_session| {
+                const seed = if (default_session.len > 0) default_session else "main";
+                try self.ensureSessionExists(seed, seed);
+            } else {
+                try self.ensureSessionExists("main", "Main");
+            }
+        } else if (self.current_session_key == null) {
+            try self.setCurrentSessionKey(self.chat_sessions.items[0].key);
         }
 
-        try self.appendMessage("system", "Connected to Spiderweb", null);
+        if (had_pending_send and try self.tryResumePendingSendJob()) {
+            try self.appendMessage("system", "Reconnected to Spiderweb and resumed pending job.", null);
+        } else if (had_pending_send) {
+            try self.appendMessage("system", "Reconnected to Spiderweb. Pending job not ready yet.", null);
+        } else {
+            try self.appendMessage("system", "Connected to Spiderweb", null);
+        }
 
         // Switch to chat panel by focusing it
         for (manager.workspace.panels.items) |*panel| {
@@ -5160,6 +5731,7 @@ const App = struct {
         self.debug_stream_pending = false;
         self.clearPendingDebugRequest();
         self.clearWorkspaceData();
+        self.clearFilesystemData();
     }
 
     fn drainAsyncChatWorker(self: *App) void {
@@ -5174,12 +5746,18 @@ const App = struct {
 
         var response: ?[]u8 = null;
         var error_text: ?[]u8 = null;
+        var job_id: ?[]u8 = null;
+        var correlation_id: ?[]u8 = null;
         var pending_debug_frames: [][]u8 = &.{};
         self.async_chat_worker.mutex.lock();
         response = self.async_chat_worker.response;
         error_text = self.async_chat_worker.error_text;
+        job_id = self.async_chat_worker.job_id;
+        correlation_id = self.async_chat_worker.correlation_id;
         self.async_chat_worker.response = null;
         self.async_chat_worker.error_text = null;
+        self.async_chat_worker.job_id = null;
+        self.async_chat_worker.correlation_id = null;
         if (self.async_chat_worker.pending_debug_frames.items.len > 0) {
             pending_debug_frames = self.async_chat_worker.pending_debug_frames.toOwnedSlice(std.heap.page_allocator) catch &.{};
             self.async_chat_worker.pending_debug_frames = .{};
@@ -5190,6 +5768,8 @@ const App = struct {
 
         if (response) |value| std.heap.page_allocator.free(value);
         if (error_text) |value| std.heap.page_allocator.free(value);
+        if (job_id) |value| std.heap.page_allocator.free(value);
+        if (correlation_id) |value| std.heap.page_allocator.free(value);
         if (pending_debug_frames.len > 0) {
             for (pending_debug_frames) |payload| std.heap.page_allocator.free(payload);
             std.heap.page_allocator.free(pending_debug_frames);
@@ -5246,6 +5826,14 @@ const App = struct {
             page_allocator.free(value);
             self.async_chat_worker.error_text = null;
         }
+        if (self.async_chat_worker.job_id) |value| {
+            page_allocator.free(value);
+            self.async_chat_worker.job_id = null;
+        }
+        if (self.async_chat_worker.correlation_id) |value| {
+            page_allocator.free(value);
+            self.async_chat_worker.correlation_id = null;
+        }
         if (self.async_chat_worker.pending_debug_frames.items.len > 0) {
             for (self.async_chat_worker.pending_debug_frames.items) |payload| {
                 page_allocator.free(payload);
@@ -5279,6 +5867,8 @@ const App = struct {
         var worker_thread: ?std.Thread = null;
         var response: ?[]u8 = null;
         var error_text: ?[]u8 = null;
+        var worker_job_id: ?[]u8 = null;
+        var worker_correlation_id: ?[]u8 = null;
         var pending_debug_frames: [][]u8 = &.{};
 
         self.async_chat_worker.mutex.lock();
@@ -5303,8 +5893,12 @@ const App = struct {
         self.async_chat_worker.worker_thread = null;
         response = self.async_chat_worker.response;
         error_text = self.async_chat_worker.error_text;
+        worker_job_id = self.async_chat_worker.job_id;
+        worker_correlation_id = self.async_chat_worker.correlation_id;
         self.async_chat_worker.response = null;
         self.async_chat_worker.error_text = null;
+        self.async_chat_worker.job_id = null;
+        self.async_chat_worker.correlation_id = null;
         self.async_chat_worker.done = false;
         self.async_chat_worker.mutex.unlock();
 
@@ -5321,6 +5915,8 @@ const App = struct {
         if (worker_thread) |thread| thread.join();
         defer if (response) |value| std.heap.page_allocator.free(value);
         defer if (error_text) |value| std.heap.page_allocator.free(value);
+        defer if (worker_job_id) |value| std.heap.page_allocator.free(value);
+        defer if (worker_correlation_id) |value| std.heap.page_allocator.free(value);
 
         if (response) |value| {
             if (self.pending_send_message_id) |message_id| {
@@ -5336,6 +5932,40 @@ const App = struct {
         }
 
         const err_text = error_text orelse "Send failed";
+        if (worker_job_id) |job_id| {
+            if (self.pending_send_job_id) |value| {
+                self.allocator.free(value);
+                self.pending_send_job_id = null;
+            }
+            if (self.pending_send_correlation_id) |value| {
+                self.allocator.free(value);
+                self.pending_send_correlation_id = null;
+            }
+            self.pending_send_job_id = self.allocator.dupe(u8, job_id) catch null;
+            self.pending_send_correlation_id = if (worker_correlation_id) |corr|
+                self.allocator.dupe(u8, corr) catch null
+            else
+                null;
+            self.pending_send_resume_notified = false;
+            self.pending_send_last_resume_attempt_ms = 0;
+
+            if (try self.tryResumePendingSendJob()) return;
+
+            if (!self.pending_send_resume_notified) {
+                const msg = std.fmt.allocPrint(
+                    self.allocator,
+                    "Send interrupted, job {s} is queued. Reconnect to resume result retrieval.",
+                    .{job_id},
+                ) catch null;
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    try self.appendMessage("system", text, null);
+                }
+                self.pending_send_resume_notified = true;
+            }
+            return;
+        }
+
         try self.appendMessage("system", err_text, null);
         if (self.pending_send_message_id) |message_id| {
             try self.setMessageFailed(message_id);
@@ -5627,6 +6257,243 @@ const App = struct {
         return decoded;
     }
 
+    fn splitFsPathSegments(self: *App, path: []const u8) !std.ArrayListUnmanaged([]u8) {
+        var out = std.ArrayListUnmanaged([]u8){};
+        errdefer {
+            for (out.items) |segment| self.allocator.free(segment);
+            out.deinit(self.allocator);
+        }
+
+        const trimmed = std.mem.trim(u8, path, " \t\r\n");
+        if (trimmed.len == 0 or std.mem.eql(u8, trimmed, "/")) return out;
+
+        var iter = std.mem.splitScalar(u8, trimmed, '/');
+        while (iter.next()) |raw| {
+            const part = std.mem.trim(u8, raw, " \t\r\n");
+            if (part.len == 0) continue;
+            try out.append(self.allocator, try self.allocator.dupe(u8, part));
+        }
+        return out;
+    }
+
+    fn freeFsPathSegments(self: *App, segments: *std.ArrayListUnmanaged([]u8)) void {
+        for (segments.items) |segment| self.allocator.free(segment);
+        segments.deinit(self.allocator);
+        segments.* = .{};
+    }
+
+    fn buildPathArrayJsonGui(self: *App, segments: []const []const u8) ![]u8 {
+        var out = std.ArrayListUnmanaged(u8){};
+        defer out.deinit(self.allocator);
+        try out.append(self.allocator, '[');
+        for (segments, 0..) |segment, idx| {
+            if (idx > 0) try out.append(self.allocator, ',');
+            const escaped = try jsonEscape(self.allocator, segment);
+            defer self.allocator.free(escaped);
+            try out.writer(self.allocator).print("\"{s}\"", .{escaped});
+        }
+        try out.append(self.allocator, ']');
+        return out.toOwnedSlice(self.allocator);
+    }
+
+    fn fsrpcWalkPathGui(self: *App, client: *ws_client_mod.WebSocketClient, path: []const u8) !u32 {
+        var segments = try self.splitFsPathSegments(path);
+        defer self.freeFsPathSegments(&segments);
+        const path_json = try self.buildPathArrayJsonGui(segments.items);
+        defer self.allocator.free(path_json);
+
+        const new_fid = self.nextFsrpcFid();
+        const tag = self.nextFsrpcTag();
+        const req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":{s}}}",
+            .{ tag, new_fid, path_json },
+        );
+        defer self.allocator.free(req);
+
+        var response = try self.sendAndAwaitFsrpc(client, req, tag, FSRPC_DEFAULT_TIMEOUT_MS);
+        defer response.deinit(self.allocator);
+        try self.ensureFsrpcOk(&response);
+        return new_fid;
+    }
+
+    fn fsrpcOpenGui(self: *App, client: *ws_client_mod.WebSocketClient, fid: u32, mode: []const u8) !void {
+        const escaped_mode = try jsonEscape(self.allocator, mode);
+        defer self.allocator.free(escaped_mode);
+        const tag = self.nextFsrpcTag();
+        const req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"{s}\"}}",
+            .{ tag, fid, escaped_mode },
+        );
+        defer self.allocator.free(req);
+
+        var response = try self.sendAndAwaitFsrpc(client, req, tag, FSRPC_DEFAULT_TIMEOUT_MS);
+        defer response.deinit(self.allocator);
+        try self.ensureFsrpcOk(&response);
+    }
+
+    fn fsrpcReadAllTextGui(self: *App, client: *ws_client_mod.WebSocketClient, fid: u32) ![]u8 {
+        const tag = self.nextFsrpcTag();
+        const req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_read\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"count\":1048576}}",
+            .{ tag, fid },
+        );
+        defer self.allocator.free(req);
+
+        var response = try self.sendAndAwaitFsrpc(client, req, tag, FSRPC_DEFAULT_TIMEOUT_MS);
+        defer response.deinit(self.allocator);
+        try self.ensureFsrpcOk(&response);
+
+        const payload = try self.getFsrpcPayloadObject(response.parsed.value.object);
+        const data_b64 = payload.get("data_b64") orelse return error.InvalidResponse;
+        if (data_b64 != .string) return error.InvalidResponse;
+
+        const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(data_b64.string) catch return error.InvalidResponse;
+        const decoded = try self.allocator.alloc(u8, decoded_len);
+        errdefer self.allocator.free(decoded);
+        _ = std.base64.standard.Decoder.decode(decoded, data_b64.string) catch return error.InvalidResponse;
+        return decoded;
+    }
+
+    fn fsrpcFidIsDirGui(self: *App, client: *ws_client_mod.WebSocketClient, fid: u32) !bool {
+        const tag = self.nextFsrpcTag();
+        const req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_stat\",\"tag\":{d},\"fid\":{d}}}",
+            .{ tag, fid },
+        );
+        defer self.allocator.free(req);
+
+        var response = try self.sendAndAwaitFsrpc(client, req, tag, FSRPC_DEFAULT_TIMEOUT_MS);
+        defer response.deinit(self.allocator);
+        try self.ensureFsrpcOk(&response);
+
+        const payload = try self.getFsrpcPayloadObject(response.parsed.value.object);
+        const kind = payload.get("kind") orelse return error.InvalidResponse;
+        if (kind != .string) return error.InvalidResponse;
+        return std.mem.eql(u8, kind.string, "dir");
+    }
+
+    fn readFsPathTextGui(self: *App, client: *ws_client_mod.WebSocketClient, path: []const u8) ![]u8 {
+        const fid = try self.fsrpcWalkPathGui(client, path);
+        defer self.fsrpcClunkBestEffort(client, fid);
+        try self.fsrpcOpenGui(client, fid, "r");
+        return self.fsrpcReadAllTextGui(client, fid);
+    }
+
+    fn joinFilesystemPath(self: *App, parent: []const u8, child: []const u8) ![]u8 {
+        _ = self;
+        if (std.mem.eql(u8, parent, "/")) return std.fmt.allocPrint(self.allocator, "/{s}", .{child});
+        if (std.mem.endsWith(u8, parent, "/")) return std.fmt.allocPrint(self.allocator, "{s}{s}", .{ parent, child });
+        return std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ parent, child });
+    }
+
+    fn parentFilesystemPath(self: *App, path: []const u8) ![]u8 {
+        _ = self;
+        const trimmed = std.mem.trimRight(u8, path, "/");
+        if (trimmed.len == 0) return std.fmt.allocPrint(self.allocator, "/", .{});
+        const idx = std.mem.lastIndexOfScalar(u8, trimmed, '/') orelse return std.fmt.allocPrint(self.allocator, "/", .{});
+        if (idx == 0) return std.fmt.allocPrint(self.allocator, "/", .{});
+        return std.fmt.allocPrint(self.allocator, "{s}", .{trimmed[0..idx]});
+    }
+
+    fn parseJobStatusInfo(self: *App, status_json: []const u8) !JobStatusInfo {
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, status_json, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return error.InvalidResponse;
+        const obj = parsed.value.object;
+
+        const state_val = obj.get("state") orelse return error.InvalidResponse;
+        if (state_val != .string) return error.InvalidResponse;
+        var out = JobStatusInfo{
+            .state = try self.allocator.dupe(u8, state_val.string),
+        };
+        errdefer out.deinit(self.allocator);
+
+        if (obj.get("error")) |error_val| {
+            if (error_val == .string and error_val.string.len > 0) {
+                out.error_text = try self.allocator.dupe(u8, error_val.string);
+            }
+        }
+        if (obj.get("correlation_id")) |corr_val| {
+            if (corr_val == .string and corr_val.string.len > 0) {
+                out.correlation_id = try self.allocator.dupe(u8, corr_val.string);
+            }
+        }
+        return out;
+    }
+
+    fn readJobStatusGui(self: *App, client: *ws_client_mod.WebSocketClient, job_id: []const u8) !JobStatusInfo {
+        const status_path = try std.fmt.allocPrint(self.allocator, "/jobs/{s}/status.json", .{job_id});
+        defer self.allocator.free(status_path);
+        const raw = try self.readFsPathTextGui(client, status_path);
+        defer self.allocator.free(raw);
+        return self.parseJobStatusInfo(raw);
+    }
+
+    fn tryResumePendingSendJob(self: *App) !bool {
+        const job_id = self.pending_send_job_id orelse return false;
+        const client = if (self.ws_client) |*value| value else return false;
+
+        var in_flight = false;
+        self.async_chat_worker.mutex.lock();
+        in_flight = self.async_chat_worker.in_flight;
+        self.async_chat_worker.mutex.unlock();
+        if (in_flight) return false;
+
+        const now_ms = std.time.milliTimestamp();
+        if (self.pending_send_last_resume_attempt_ms != 0 and now_ms - self.pending_send_last_resume_attempt_ms < 1_500) {
+            return false;
+        }
+        self.pending_send_last_resume_attempt_ms = now_ms;
+
+        try self.fsrpcBootstrapGui(client);
+        var status = try self.readJobStatusGui(client, job_id);
+        defer status.deinit(self.allocator);
+
+        if (!std.mem.eql(u8, status.state, "done") and !std.mem.eql(u8, status.state, "failed")) {
+            return false;
+        }
+
+        const result_path = try std.fmt.allocPrint(self.allocator, "/jobs/{s}/result.txt", .{job_id});
+        defer self.allocator.free(result_path);
+        const result = self.readFsPathTextGui(client, result_path) catch |err| blk: {
+            const msg = try std.fmt.allocPrint(self.allocator, "resume read failed: {s}", .{@errorName(err)});
+            break :blk msg;
+        };
+        defer self.allocator.free(result);
+
+        if (std.mem.eql(u8, status.state, "failed")) {
+            if (self.pending_send_message_id) |message_id| {
+                try self.setMessageFailed(message_id);
+            }
+            if (status.error_text) |err_text| {
+                const msg = try std.fmt.allocPrint(self.allocator, "Job {s} failed: {s}", .{ job_id, err_text });
+                defer self.allocator.free(msg);
+                try self.appendMessage("system", msg, null);
+            } else {
+                const msg = try std.fmt.allocPrint(self.allocator, "Job {s} failed: {s}", .{ job_id, result });
+                defer self.allocator.free(msg);
+                try self.appendMessage("system", msg, null);
+            }
+            self.clearPendingSend();
+            return true;
+        }
+
+        if (self.pending_send_message_id) |message_id| {
+            try self.setMessageState(message_id, null);
+        }
+        const session_key = if (self.pending_send_session_key) |value|
+            value
+        else
+            try self.currentSessionOrDefault();
+        try self.appendMessageForSession(session_key, "assistant", result, null);
+        self.clearPendingSend();
+        return true;
+    }
+
     fn nextMessageId(self: *App, prefix: []const u8) ![]const u8 {
         self.message_counter += 1;
         return try std.fmt.allocPrint(self.allocator, "{s}-{d}", .{ prefix, self.message_counter });
@@ -5640,8 +6507,18 @@ const App = struct {
     ) !void {
         if (self.pending_send_message_id) |value| allocator.free(value);
         if (self.pending_send_session_key) |value| allocator.free(value);
+        if (self.pending_send_job_id) |value| {
+            allocator.free(value);
+            self.pending_send_job_id = null;
+        }
+        if (self.pending_send_correlation_id) |value| {
+            allocator.free(value);
+            self.pending_send_correlation_id = null;
+        }
         self.pending_send_message_id = try allocator.dupe(u8, message_id);
         self.pending_send_session_key = try allocator.dupe(u8, session_key);
+        self.pending_send_resume_notified = false;
+        self.pending_send_last_resume_attempt_ms = 0;
     }
 
     fn clearPendingSend(self: *App) void {
@@ -5664,6 +6541,16 @@ const App = struct {
             self.allocator.free(value);
             self.pending_send_session_key = null;
         }
+        if (self.pending_send_job_id) |value| {
+            self.allocator.free(value);
+            self.pending_send_job_id = null;
+        }
+        if (self.pending_send_correlation_id) |value| {
+            self.allocator.free(value);
+            self.pending_send_correlation_id = null;
+        }
+        self.pending_send_resume_notified = false;
+        self.pending_send_last_resume_attempt_ms = 0;
         self.awaiting_reply = false;
     }
 
@@ -5738,7 +6625,7 @@ const App = struct {
         }
     }
 
-    fn extractRequestId(root: std.json.ObjectMap, payload: ?std.json.ObjectMap) ?[]const u8 {
+fn extractRequestId(root: std.json.ObjectMap, payload: ?std.json.ObjectMap) ?[]const u8 {
         if (root.get("request_id")) |value| {
             if (value == .string) return value.string;
         }
@@ -6089,7 +6976,7 @@ const App = struct {
         };
         defer self.allocator.free(payload_json);
 
-        try self.appendDebugEvent(std.time.milliTimestamp(), "decode.error", payload_json);
+        try self.appendDebugEvent(std.time.milliTimestamp(), "decode.error", null, payload_json);
     }
 
     fn formatDebugEventLine(self: *App, entry: DebugEventEntry) ![]u8 {
@@ -6220,7 +7107,12 @@ const App = struct {
             }
         }
 
-        try self.appendDebugEvent(timestamp, category, payload_json);
+        const payload_obj = if (root.get("payload")) |payload| switch (payload) {
+            .object => payload.object,
+            else => null,
+        } else null;
+        const correlation_id = extractCorrelationId(root, payload_obj);
+        try self.appendDebugEvent(timestamp, category, correlation_id, payload_json);
     }
 
     fn handleWorkerDebugFrame(self: *App, msg: []const u8) !void {
@@ -6700,7 +7592,7 @@ const App = struct {
         self.debug_next_event_id = 1;
     }
 
-    fn appendDebugEvent(self: *App, timestamp_ms: i64, category: []const u8, payload_json: []const u8) !void {
+    fn appendDebugEvent(self: *App, timestamp_ms: i64, category: []const u8, correlation_id: ?[]const u8, payload_json: []const u8) !void {
         while (self.debug_events.items.len >= MAX_DEBUG_EVENTS) {
             var removed = self.debug_events.orderedRemove(0);
             self.pruneDebugFoldStateForEvent(removed.id);
@@ -6709,6 +7601,11 @@ const App = struct {
 
         const category_copy = try self.allocator.dupe(u8, category);
         errdefer self.allocator.free(category_copy);
+        const correlation_copy = if (correlation_id) |value|
+            try self.allocator.dupe(u8, value)
+        else
+            null;
+        errdefer if (correlation_copy) |value| self.allocator.free(value);
         const payload_copy = try self.allocator.dupe(u8, payload_json);
         errdefer self.allocator.free(payload_copy);
         var payload_lines = try self.buildDebugPayloadLines(payload_copy);
@@ -6722,6 +7619,7 @@ const App = struct {
             .id = event_id,
             .timestamp_ms = timestamp_ms,
             .category = category_copy,
+            .correlation_id = correlation_copy,
             .payload_json = payload_copy,
             .payload_lines = payload_lines,
         });
@@ -6762,6 +7660,45 @@ const App = struct {
             manager.workspace.markDirty();
         }
         manager.focusPanel(panel_id);
+        return panel_id;
+    }
+
+    fn ensureFilesystemPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
+        if (self.filesystem_panel_id) |panel_id| {
+            if (self.findPanelById(manager, panel_id) != null) {
+                manager.focusPanel(panel_id);
+                return panel_id;
+            }
+            self.filesystem_panel_id = null;
+        }
+
+        for (manager.workspace.panels.items) |*panel| {
+            if (panel.kind == .ToolOutput and std.mem.eql(u8, panel.title, "Filesystem Browser")) {
+                self.filesystem_panel_id = panel.id;
+                manager.focusPanel(panel.id);
+                return panel.id;
+            }
+        }
+
+        const tool_name = try self.allocator.dupe(u8, "Filesystem Browser");
+        errdefer self.allocator.free(tool_name);
+        var stdout_buf = try text_buffer.TextBuffer.init(self.allocator, "");
+        errdefer stdout_buf.deinit(self.allocator);
+        var stderr_buf = try text_buffer.TextBuffer.init(self.allocator, "");
+        errdefer stderr_buf.deinit(self.allocator);
+        const panel_data = workspace.PanelData{ .ToolOutput = .{
+            .tool_name = tool_name,
+            .stdout = stdout_buf,
+            .stderr = stderr_buf,
+            .exit_code = 0,
+        } };
+        const panel_id = try manager.openPanel(.ToolOutput, "Filesystem Browser", panel_data);
+        self.filesystem_panel_id = panel_id;
+        if (manager.workspace.syncDockLayout() catch false) {
+            manager.workspace.markDirty();
+        }
+        manager.focusPanel(panel_id);
+        self.refreshFilesystemBrowser() catch {};
         return panel_id;
     }
 
@@ -7091,6 +8028,18 @@ pub export fn zsc_load_icon_rgba_from_memory(data: [*c]const u8, len: c_int, wid
     if (width != null) width[0] = 0;
     if (height != null) height[0] = 0;
     return null;
+}
+
+fn extractCorrelationId(root: std.json.ObjectMap, payload: ?std.json.ObjectMap) ?[]const u8 {
+    if (root.get("correlation_id")) |value| {
+        if (value == .string and value.string.len > 0) return value.string;
+    }
+    if (payload) |obj| {
+        if (obj.get("correlation_id")) |value| {
+            if (value == .string and value.string.len > 0) return value.string;
+        }
+    }
+    return extractRequestId(root, payload);
 }
 
 pub export fn zsc_free_icon(pixels: ?*anyopaque) void {

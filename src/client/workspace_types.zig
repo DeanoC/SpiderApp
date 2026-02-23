@@ -17,6 +17,59 @@ pub const MountView = struct {
     }
 };
 
+pub const DriftItem = struct {
+    mount_path: ?[]u8 = null,
+    kind: ?[]u8 = null,
+    severity: ?[]u8 = null,
+    selected_node_id: ?[]u8 = null,
+    desired_node_id: ?[]u8 = null,
+    message: ?[]u8 = null,
+
+    pub fn deinit(self: *DriftItem, allocator: std.mem.Allocator) void {
+        if (self.mount_path) |value| allocator.free(value);
+        if (self.kind) |value| allocator.free(value);
+        if (self.severity) |value| allocator.free(value);
+        if (self.selected_node_id) |value| allocator.free(value);
+        if (self.desired_node_id) |value| allocator.free(value);
+        if (self.message) |value| allocator.free(value);
+        self.* = undefined;
+    }
+};
+
+pub const ReconcileProjectStatus = struct {
+    project_id: []u8,
+    mounts: usize,
+    drift_count: usize,
+    queue_depth: usize,
+
+    pub fn deinit(self: *ReconcileProjectStatus, allocator: std.mem.Allocator) void {
+        allocator.free(self.project_id);
+        self.* = undefined;
+    }
+};
+
+pub const ReconcileStatus = struct {
+    reconcile_state: ?[]u8 = null,
+    last_reconcile_ms: i64 = 0,
+    last_success_ms: i64 = 0,
+    last_error: ?[]u8 = null,
+    queue_depth: usize = 0,
+    failed_ops_total: u64 = 0,
+    cycles_total: u64 = 0,
+    failed_ops: std.ArrayListUnmanaged([]u8) = .{},
+    projects: std.ArrayListUnmanaged(ReconcileProjectStatus) = .{},
+
+    pub fn deinit(self: *ReconcileStatus, allocator: std.mem.Allocator) void {
+        if (self.reconcile_state) |value| allocator.free(value);
+        if (self.last_error) |value| allocator.free(value);
+        for (self.failed_ops.items) |value| allocator.free(value);
+        self.failed_ops.deinit(allocator);
+        for (self.projects.items) |*project| project.deinit(allocator);
+        self.projects.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
 pub const ProjectSummary = struct {
     id: []u8,
     name: []u8,
@@ -78,6 +131,15 @@ pub const WorkspaceStatus = struct {
     project_id: ?[]u8 = null,
     workspace_root: ?[]u8 = null,
     mounts: std.ArrayListUnmanaged(MountView) = .{},
+    desired_mounts: std.ArrayListUnmanaged(MountView) = .{},
+    actual_mounts: std.ArrayListUnmanaged(MountView) = .{},
+    drift_items: std.ArrayListUnmanaged(DriftItem) = .{},
+    drift_count: usize = 0,
+    reconcile_state: ?[]u8 = null,
+    last_reconcile_ms: i64 = 0,
+    last_success_ms: i64 = 0,
+    last_error: ?[]u8 = null,
+    queue_depth: usize = 0,
 
     pub fn deinit(self: *WorkspaceStatus, allocator: std.mem.Allocator) void {
         allocator.free(self.agent_id);
@@ -85,6 +147,14 @@ pub const WorkspaceStatus = struct {
         if (self.workspace_root) |value| allocator.free(value);
         for (self.mounts.items) |*mount| mount.deinit(allocator);
         self.mounts.deinit(allocator);
+        for (self.desired_mounts.items) |*mount| mount.deinit(allocator);
+        self.desired_mounts.deinit(allocator);
+        for (self.actual_mounts.items) |*mount| mount.deinit(allocator);
+        self.actual_mounts.deinit(allocator);
+        for (self.drift_items.items) |*item| item.deinit(allocator);
+        self.drift_items.deinit(allocator);
+        if (self.reconcile_state) |value| allocator.free(value);
+        if (self.last_error) |value| allocator.free(value);
         self.* = undefined;
     }
 };

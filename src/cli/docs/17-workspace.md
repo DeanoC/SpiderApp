@@ -12,6 +12,9 @@ Show workspace root and mounted node exports.
 **Examples:**
 ```bash
 ziggystarspider workspace status
+ziggystarspider --verbose workspace status
 ziggystarspider workspace status proj-1
 ziggystarspider --project proj-1 workspace status
 ```
+
+`--verbose` also prints reconcile diagnostics (`state`, `queue_depth`, `failed_ops`, totals).

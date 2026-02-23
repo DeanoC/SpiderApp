@@ -75,8 +75,10 @@ Useful options:
 
 - server connect/disconnect
 - project ID + project token selection
+- onboarding wizard (`connect -> project -> mounts -> activate`)
 - workspace refresh + activate project actions
 - live project/node/mount summary in settings
+- filesystem browser panel with path navigation and text preview
 - chat send/receive bound to selected project context
 - debug stream panel
 
@@ -100,8 +102,22 @@ Useful options:
 ## Docs
 
 - `docs/ARCHITECTURE.md`
+- `docs/OPERATOR_RUNBOOK.md`
+- `docs/TROUBLESHOOTING.md`
 - `docs/DATA_MODEL.md`
 - `docs/MILESTONES.md`
+
+## Smoke Matrix
+
+```bash
+./scripts/smoke-matrix.sh
+```
+
+Environment knobs:
+- `SPIDERWEB_URL`
+- `SMOKE_SKIP_BUILD=1`
+- `SMOKE_SKIP_GUI_BUILD=1`
+- `SMOKE_SKIP_CHAT=1`
 
 ## License
 

@@ -268,6 +268,36 @@ pub fn workspaceStatus(
     return parseWorkspaceStatus(allocator, parsed.value.object);
 }
 
+pub fn reconcileStatus(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+    project_id: ?[]const u8,
+) !workspace_types.ReconcileStatus {
+    var payload_req: ?[]u8 = null;
+    defer if (payload_req) |value| allocator.free(value);
+    if (project_id) |value| {
+        const escaped_project = try unified_v2.jsonEscape(allocator, value);
+        defer allocator.free(escaped_project);
+        payload_req = try std.fmt.allocPrint(allocator, "{{\"project_id\":\"{s}\"}}", .{escaped_project});
+    }
+
+    const payload_json = try requestControlPayloadJson(
+        allocator,
+        client,
+        message_counter,
+        "control.reconcile_status",
+        if (payload_req) |value| value else null,
+    );
+    defer allocator.free(payload_json);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResponse;
+
+    return parseReconcileStatus(allocator, parsed.value.object);
+}
+
 fn parseProjectSummary(
     allocator: std.mem.Allocator,
     obj: std.json.ObjectMap,
@@ -333,13 +363,88 @@ fn parseWorkspaceStatus(
     };
     errdefer status.deinit(allocator);
 
-    const mounts_val = obj.get("mounts") orelse return status;
-    if (mounts_val != .array) return error.InvalidResponse;
-    for (mounts_val.array.items) |item| {
-        if (item != .object) return error.InvalidResponse;
-        try status.mounts.append(allocator, try parseMount(allocator, item.object));
+    if (obj.get("mounts")) |mounts_val| {
+        if (mounts_val != .array) return error.InvalidResponse;
+        for (mounts_val.array.items) |item| {
+            if (item != .object) return error.InvalidResponse;
+            try status.mounts.append(allocator, try parseMount(allocator, item.object));
+        }
     }
 
+    if (obj.get("desired_mounts")) |desired_val| {
+        if (desired_val != .array) return error.InvalidResponse;
+        for (desired_val.array.items) |item| {
+            if (item != .object) return error.InvalidResponse;
+            try status.desired_mounts.append(allocator, try parseMount(allocator, item.object));
+        }
+    }
+
+    if (obj.get("actual_mounts")) |actual_val| {
+        if (actual_val != .array) return error.InvalidResponse;
+        for (actual_val.array.items) |item| {
+            if (item != .object) return error.InvalidResponse;
+            try status.actual_mounts.append(allocator, try parseMount(allocator, item.object));
+        }
+    }
+
+    if (obj.get("drift")) |drift_val| {
+        if (drift_val != .object) return error.InvalidResponse;
+        status.drift_count = @intCast(try getOptionalU64(drift_val.object, "count", 0));
+        if (drift_val.object.get("items")) |items_val| {
+            if (items_val != .array) return error.InvalidResponse;
+            for (items_val.array.items) |item| {
+                if (item != .object) return error.InvalidResponse;
+                try status.drift_items.append(allocator, try parseDriftItem(allocator, item.object));
+            }
+        }
+    }
+
+    status.reconcile_state = try dupOptionalNullableString(allocator, obj, "reconcile_state");
+    status.last_reconcile_ms = try getOptionalI64(obj, "last_reconcile_ms", 0);
+    status.last_success_ms = try getOptionalI64(obj, "last_success_ms", 0);
+    status.last_error = try dupOptionalNullableString(allocator, obj, "last_error");
+    status.queue_depth = @intCast(try getOptionalU64(obj, "queue_depth", 0));
+
+    return status;
+}
+
+fn parseReconcileStatus(
+    allocator: std.mem.Allocator,
+    obj: std.json.ObjectMap,
+) !workspace_types.ReconcileStatus {
+    var status = workspace_types.ReconcileStatus{
+        .reconcile_state = try dupOptionalNullableString(allocator, obj, "reconcile_state"),
+        .last_reconcile_ms = try getOptionalI64(obj, "last_reconcile_ms", 0),
+        .last_success_ms = try getOptionalI64(obj, "last_success_ms", 0),
+        .last_error = try dupOptionalNullableString(allocator, obj, "last_error"),
+        .queue_depth = @intCast(try getOptionalU64(obj, "queue_depth", 0)),
+        .failed_ops_total = try getOptionalU64(obj, "failed_ops_total", 0),
+        .cycles_total = try getOptionalU64(obj, "cycles_total", 0),
+    };
+    errdefer status.deinit(allocator);
+
+    if (obj.get("failed_ops")) |failed_val| {
+        if (failed_val != .array) return error.InvalidResponse;
+        for (failed_val.array.items) |item| {
+            if (item != .string) return error.InvalidResponse;
+            try status.failed_ops.append(allocator, try allocator.dupe(u8, item.string));
+        }
+    }
+
+    if (obj.get("projects")) |projects_val| {
+        if (projects_val != .array) return error.InvalidResponse;
+        for (projects_val.array.items) |item| {
+            if (item != .object) return error.InvalidResponse;
+            const project_id = try dupRequiredStringAny(allocator, item.object, &.{ "project_id", "id" });
+            errdefer allocator.free(project_id);
+            try status.projects.append(allocator, .{
+                .project_id = project_id,
+                .mounts = @intCast(try getOptionalU64(item.object, "mounts", 0)),
+                .drift_count = @intCast(try getOptionalU64(item.object, "drift_count", 0)),
+                .queue_depth = @intCast(try getOptionalU64(item.object, "queue_depth", 0)),
+            });
+        }
+    }
     return status;
 }
 
@@ -350,6 +455,17 @@ fn parseMount(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !workspace_
         .node_name = try dupOptionalNullableString(allocator, obj, "node_name"),
         .fs_url = try dupOptionalNullableString(allocator, obj, "fs_url"),
         .export_name = try dupRequiredString(allocator, obj, "export_name"),
+    };
+}
+
+fn parseDriftItem(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !workspace_types.DriftItem {
+    return .{
+        .mount_path = try dupOptionalNullableString(allocator, obj, "mount_path"),
+        .kind = try dupOptionalNullableString(allocator, obj, "kind"),
+        .severity = try dupOptionalNullableString(allocator, obj, "severity"),
+        .selected_node_id = try dupOptionalNullableString(allocator, obj, "selected_node_id"),
+        .desired_node_id = try dupOptionalNullableString(allocator, obj, "desired_node_id"),
+        .message = try dupOptionalNullableString(allocator, obj, "message"),
     };
 }
 

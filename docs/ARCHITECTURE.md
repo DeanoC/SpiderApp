@@ -52,6 +52,7 @@ Typed control-plane operations:
 - `getProject`
 - `createProject`
 - `activateProject`
+- `reconcileStatus`
 - `listNodes`
 - `getNode`
 - `workspaceStatus`
@@ -65,6 +66,8 @@ Shared typed models for CLI and GUI:
 - `NodeInfo`
 - `WorkspaceStatus`
 - `MountView`
+- `DriftItem`
+- `ReconcileStatus`
 
 ### `src/client/config.zig`
 
@@ -95,8 +98,11 @@ Project context handling:
 
 - connection state and handshake lifecycle
 - settings panel project selection/token controls
+- onboarding wizard (`connect -> project -> mounts -> activate`)
 - workspace topology cache (projects, nodes, mounts)
+- filesystem browser panel (path navigation + preview)
 - async chat worker that applies project context before FS-RPC chat IO
+- reconnect-aware chat job resume handling
 
 The GUI refreshes workspace topology from control-plane APIs and shows selected project + mount state alongside chat.
 
@@ -118,9 +124,9 @@ Chat currently uses capability path:
 
 - write prompt to `/capabilities/chat/control/input`
 - read result from `/jobs/<job>/result.txt`
+- resume from `/jobs/<job>/status.json` after reconnect when needed
 
 ## Current Limitations
 
-- CLI `fs tree` currently aliases `fs ls` output.
-- GUI topology is integrated in settings/control surfaces (not a dedicated filesystem dock panel yet).
 - Interactive CLI REPL remains unimplemented.
+- GUI smoke is currently validated by build + scripted workflow checks (not full headless rendering assertions).
