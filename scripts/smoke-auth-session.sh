@@ -166,12 +166,14 @@ fi
 log "session_busy check (background chat + session_attach probes)"
 chat_log="$(mktemp)"
 attach_log="$(mktemp)"
-trap 'rm -f "$tmp_forbidden" "$chat_log" "$attach_log"' EXIT
+chat_pid=""
+trap 'if [[ -n "${chat_pid:-}" ]] && kill -0 "$chat_pid" 2>/dev/null; then kill "$chat_pid" 2>/dev/null || true; fi; rm -f "$tmp_forbidden" "$tmp_forbidden_control" "$chat_log" "$attach_log"' EXIT
 
 "$ZSS_BIN" --url "$SPIDERWEB_URL" --role admin --operator-token "$SMOKE_ADMIN_TOKEN" chat send "$SMOKE_SESSION_BUSY_PROMPT" >"$chat_log" 2>&1 &
 chat_pid=$!
 
 busy_detected=0
+chat_probe_timed_out=0
 attempt=0
 payload="$(printf '{"session_key":"main","agent_id":"%s","project_id":"proj-session-busy-smoke"}' "$SMOKE_SESSION_AGENT_ID")"
 while kill -0 "$chat_pid" 2>/dev/null; do
@@ -185,10 +187,29 @@ while kill -0 "$chat_pid" 2>/dev/null; do
         fi
     fi
     if [[ "$attempt" -ge "$SMOKE_SESSION_BUSY_MAX_ATTEMPTS" ]]; then
+        chat_probe_timed_out=1
         break
     fi
     sleep "$SMOKE_SESSION_BUSY_POLL_SEC"
 done
+
+if [[ "$busy_detected" == "1" || "$chat_probe_timed_out" == "1" ]]; then
+    if kill -0 "$chat_pid" 2>/dev/null; then
+        if [[ "$chat_probe_timed_out" == "1" ]]; then
+            log "session_busy probe attempts exhausted; stopping background chat"
+        fi
+        kill "$chat_pid" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+            if ! kill -0 "$chat_pid" 2>/dev/null; then
+                break
+            fi
+            sleep 0.25
+        done
+        if kill -0 "$chat_pid" 2>/dev/null; then
+            kill -9 "$chat_pid" 2>/dev/null || true
+        fi
+    fi
+fi
 
 wait "$chat_pid" || true
 
