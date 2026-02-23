@@ -229,12 +229,86 @@ fn sendAndAwaitFsrpcBlocking(
     return error.Timeout;
 }
 
-fn ensureFsrpcOkBlocking(envelope: *FsrpcEnvelope) !void {
+fn setOptionalOwnedMessage(
+    allocator: std.mem.Allocator,
+    slot: *?[]u8,
+    message: ?[]const u8,
+) void {
+    if (slot.*) |value| allocator.free(value);
+    slot.* = null;
+    if (message) |value| {
+        slot.* = allocator.dupe(u8, value) catch null;
+    }
+}
+
+fn buildSendFailedErrorText(
+    allocator: std.mem.Allocator,
+    err: anyerror,
+    fsrpc_remote_error: ?[]const u8,
+) ?[]u8 {
+    if (err == error.RemoteError) {
+        if (fsrpc_remote_error) |value| {
+            return std.fmt.allocPrint(allocator, "Send failed: {s}", .{value}) catch null;
+        }
+        if (control_plane.lastRemoteError()) |value| {
+            return std.fmt.allocPrint(allocator, "Send failed: {s}", .{value}) catch null;
+        }
+    }
+    return std.fmt.allocPrint(allocator, "Send failed: {s}", .{@errorName(err)}) catch null;
+}
+
+fn ensureFsrpcOkBlocking(
+    allocator: std.mem.Allocator,
+    envelope: *FsrpcEnvelope,
+    remote_error_detail: *?[]u8,
+) !void {
     if (envelope.parsed.value != .object) return error.InvalidResponse;
     const obj = envelope.parsed.value.object;
     const ok_value = obj.get("ok") orelse return error.InvalidResponse;
     if (ok_value != .bool) return error.InvalidResponse;
-    if (!ok_value.bool) return error.RemoteError;
+    if (ok_value.bool) {
+        setOptionalOwnedMessage(allocator, remote_error_detail, null);
+        return;
+    }
+
+    var detail: ?[]u8 = null;
+    if (obj.get("error")) |err_value| {
+        if (err_value == .object) {
+            const err_obj = err_value.object;
+            const message = if (err_obj.get("message")) |value|
+                if (value == .string) value.string else null
+            else
+                null;
+            const code = if (err_obj.get("code")) |value|
+                if (value == .string) value.string else null
+            else
+                null;
+            const errno = if (err_obj.get("errno")) |value|
+                if (value == .integer) value.integer else null
+            else
+                null;
+
+            if (message != null and code != null and errno != null) {
+                detail = std.fmt.allocPrint(allocator, "{s} [{s}] (errno={d})", .{ message.?, code.?, errno.? }) catch null;
+            } else if (message != null and errno != null) {
+                detail = std.fmt.allocPrint(allocator, "{s} (errno={d})", .{ message.?, errno.? }) catch null;
+            } else if (message != null and code != null) {
+                detail = std.fmt.allocPrint(allocator, "{s} [{s}]", .{ message.?, code.? }) catch null;
+            } else if (message) |value| {
+                detail = allocator.dupe(u8, value) catch null;
+            } else if (code) |value| {
+                detail = std.fmt.allocPrint(allocator, "remote fsrpc error [{s}]", .{value}) catch null;
+            } else if (errno) |value| {
+                detail = std.fmt.allocPrint(allocator, "remote fsrpc error (errno={d})", .{value}) catch null;
+            }
+        } else if (err_value == .string) {
+            detail = allocator.dupe(u8, err_value.string) catch null;
+        }
+    }
+
+    setOptionalOwnedMessage(allocator, remote_error_detail, if (detail) |value| value else "remote fsrpc error");
+    if (detail) |value| allocator.free(value);
+    return error.RemoteError;
 }
 
 fn getFsrpcPayloadObjectBlocking(root: std.json.ObjectMap) !std.json.ObjectMap {
@@ -249,6 +323,7 @@ fn fsrpcBootstrapBlocking(
     next_tag: *u32,
     debug_state: ?*AsyncChatWorkerState,
     subscribe_debug: bool,
+    remote_error_detail: *?[]u8,
 ) !void {
     if (subscribe_debug) {
         const debug_id = try std.fmt.allocPrint(allocator, "debug-worker-{d}", .{std.time.milliTimestamp()});
@@ -271,7 +346,7 @@ fn fsrpcBootstrapBlocking(
     defer allocator.free(version_req);
     var version = try sendAndAwaitFsrpcBlocking(allocator, client, version_req, version_tag, FSRPC_DEFAULT_TIMEOUT_MS, debug_state);
     defer version.deinit(allocator);
-    try ensureFsrpcOkBlocking(&version);
+    try ensureFsrpcOkBlocking(allocator, &version, remote_error_detail);
 
     const attach_tag = nextCounter(next_tag, 1);
     const attach_req = try std.fmt.allocPrint(
@@ -282,7 +357,7 @@ fn fsrpcBootstrapBlocking(
     defer allocator.free(attach_req);
     var attach = try sendAndAwaitFsrpcBlocking(allocator, client, attach_req, attach_tag, FSRPC_DEFAULT_TIMEOUT_MS, debug_state);
     defer attach.deinit(allocator);
-    try ensureFsrpcOkBlocking(&attach);
+    try ensureFsrpcOkBlocking(allocator, &attach, remote_error_detail);
 }
 
 fn fsrpcClunkBestEffortBlocking(
@@ -310,11 +385,12 @@ fn sendChatViaFsrpcBlocking(
     debug_state: ?*AsyncChatWorkerState,
     subscribe_debug: bool,
     job_meta: ?*PendingJobMetadata,
+    remote_error_detail: *?[]u8,
 ) ![]u8 {
     var next_tag: u32 = 1;
     var next_fid: u32 = 2;
 
-    try fsrpcBootstrapBlocking(allocator, client, &next_tag, debug_state, subscribe_debug);
+    try fsrpcBootstrapBlocking(allocator, client, &next_tag, debug_state, subscribe_debug, remote_error_detail);
 
     const input_fid = nextCounter(&next_fid, 2);
     const result_fid = nextCounter(&next_fid, 2);
@@ -330,7 +406,7 @@ fn sendChatViaFsrpcBlocking(
     defer allocator.free(walk_input_req);
     var walk_input = try sendAndAwaitFsrpcBlocking(allocator, client, walk_input_req, walk_input_tag, FSRPC_DEFAULT_TIMEOUT_MS, debug_state);
     defer walk_input.deinit(allocator);
-    try ensureFsrpcOkBlocking(&walk_input);
+    try ensureFsrpcOkBlocking(allocator, &walk_input, remote_error_detail);
 
     const open_input_tag = nextCounter(&next_tag, 1);
     const open_input_req = try std.fmt.allocPrint(
@@ -341,7 +417,7 @@ fn sendChatViaFsrpcBlocking(
     defer allocator.free(open_input_req);
     var open_input = try sendAndAwaitFsrpcBlocking(allocator, client, open_input_req, open_input_tag, FSRPC_DEFAULT_TIMEOUT_MS, debug_state);
     defer open_input.deinit(allocator);
-    try ensureFsrpcOkBlocking(&open_input);
+    try ensureFsrpcOkBlocking(allocator, &open_input, remote_error_detail);
 
     const encoded = try encodeDataB64(allocator, text);
     defer allocator.free(encoded);
@@ -354,7 +430,7 @@ fn sendChatViaFsrpcBlocking(
     defer allocator.free(write_req);
     var write = try sendAndAwaitFsrpcBlocking(allocator, client, write_req, write_tag, FSRPC_CHAT_WRITE_TIMEOUT_MS, debug_state);
     defer write.deinit(allocator);
-    try ensureFsrpcOkBlocking(&write);
+    try ensureFsrpcOkBlocking(allocator, &write, remote_error_detail);
 
     const write_payload = try getFsrpcPayloadObjectBlocking(write.parsed.value.object);
     const job_value = write_payload.get("job") orelse return error.InvalidResponse;
@@ -384,7 +460,7 @@ fn sendChatViaFsrpcBlocking(
     defer allocator.free(walk_result_req);
     var walk_result = try sendAndAwaitFsrpcBlocking(allocator, client, walk_result_req, walk_result_tag, FSRPC_DEFAULT_TIMEOUT_MS, debug_state);
     defer walk_result.deinit(allocator);
-    try ensureFsrpcOkBlocking(&walk_result);
+    try ensureFsrpcOkBlocking(allocator, &walk_result, remote_error_detail);
 
     const open_result_tag = nextCounter(&next_tag, 1);
     const open_result_req = try std.fmt.allocPrint(
@@ -395,7 +471,7 @@ fn sendChatViaFsrpcBlocking(
     defer allocator.free(open_result_req);
     var open_result = try sendAndAwaitFsrpcBlocking(allocator, client, open_result_req, open_result_tag, FSRPC_DEFAULT_TIMEOUT_MS, debug_state);
     defer open_result.deinit(allocator);
-    try ensureFsrpcOkBlocking(&open_result);
+    try ensureFsrpcOkBlocking(allocator, &open_result, remote_error_detail);
 
     const read_tag = nextCounter(&next_tag, 1);
     const read_req = try std.fmt.allocPrint(
@@ -406,7 +482,7 @@ fn sendChatViaFsrpcBlocking(
     defer allocator.free(read_req);
     var read = try sendAndAwaitFsrpcBlocking(allocator, client, read_req, read_tag, FSRPC_DEFAULT_TIMEOUT_MS, debug_state);
     defer read.deinit(allocator);
-    try ensureFsrpcOkBlocking(&read);
+    try ensureFsrpcOkBlocking(allocator, &read, remote_error_detail);
 
     const read_payload = try getFsrpcPayloadObjectBlocking(read.parsed.value.object);
     const data_b64 = read_payload.get("data_b64") orelse return error.InvalidResponse;
@@ -432,9 +508,11 @@ fn runAsyncChatSendWorker(ctx: *AsyncChatWorkerContext) void {
 
     var response: ?[]u8 = null;
     var error_text: ?[]u8 = null;
+    var fsrpc_error_detail: ?[]u8 = null;
+    defer if (fsrpc_error_detail) |value| allocator.free(value);
 
     var client = ws_client_mod.WebSocketClient.init(allocator, ctx.url, ctx.token) catch |err| {
-        error_text = std.fmt.allocPrint(allocator, "Send failed: {s}", .{@errorName(err)}) catch null;
+        error_text = buildSendFailedErrorText(allocator, err, null);
         ctx.state.mutex.lock();
         defer ctx.state.mutex.unlock();
         ctx.state.response = null;
@@ -446,7 +524,7 @@ fn runAsyncChatSendWorker(ctx: *AsyncChatWorkerContext) void {
     defer client.deinit();
 
     client.connect() catch |err| {
-        error_text = std.fmt.allocPrint(allocator, "Send failed: {s}", .{@errorName(err)}) catch null;
+        error_text = buildSendFailedErrorText(allocator, err, null);
         ctx.state.mutex.lock();
         defer ctx.state.mutex.unlock();
         ctx.state.response = null;
@@ -458,7 +536,7 @@ fn runAsyncChatSendWorker(ctx: *AsyncChatWorkerContext) void {
 
     var control_counter: u64 = 0;
     control_plane.ensureUnifiedV2Connection(allocator, &client, &control_counter) catch |err| {
-        error_text = std.fmt.allocPrint(allocator, "Send failed: {s}", .{@errorName(err)}) catch null;
+        error_text = buildSendFailedErrorText(allocator, err, null);
         ctx.state.mutex.lock();
         defer ctx.state.mutex.unlock();
         ctx.state.response = null;
@@ -469,49 +547,30 @@ fn runAsyncChatSendWorker(ctx: *AsyncChatWorkerContext) void {
     };
 
     if (ctx.project_id) |project_id| {
-        if (ctx.project_token) |project_token| {
-            var status = control_plane.activateProject(
-                allocator,
-                &client,
-                &control_counter,
-                project_id,
-                project_token,
-            ) catch |err| {
-                error_text = std.fmt.allocPrint(allocator, "Send failed: {s}", .{@errorName(err)}) catch null;
-                ctx.state.mutex.lock();
-                defer ctx.state.mutex.unlock();
-                ctx.state.response = null;
-                ctx.state.error_text = error_text;
-                ctx.state.done = true;
-                ctx.state.in_flight = false;
-                return;
-            };
-            status.deinit(allocator);
-        } else {
-            var status = control_plane.workspaceStatus(
-                allocator,
-                &client,
-                &control_counter,
-                project_id,
-            ) catch |err| {
-                error_text = std.fmt.allocPrint(allocator, "Send failed: {s}", .{@errorName(err)}) catch null;
-                ctx.state.mutex.lock();
-                defer ctx.state.mutex.unlock();
-                ctx.state.response = null;
-                ctx.state.error_text = error_text;
-                ctx.state.done = true;
-                ctx.state.in_flight = false;
-                return;
-            };
-            status.deinit(allocator);
-        }
+        var status = control_plane.activateProject(
+            allocator,
+            &client,
+            &control_counter,
+            project_id,
+            ctx.project_token,
+        ) catch |err| {
+            error_text = buildSendFailedErrorText(allocator, err, null);
+            ctx.state.mutex.lock();
+            defer ctx.state.mutex.unlock();
+            ctx.state.response = null;
+            ctx.state.error_text = error_text;
+            ctx.state.done = true;
+            ctx.state.in_flight = false;
+            return;
+        };
+        status.deinit(allocator);
     }
 
     var job_meta = PendingJobMetadata{};
     defer job_meta.deinit(allocator);
 
-    response = sendChatViaFsrpcBlocking(allocator, &client, ctx.message, ctx.state, ctx.subscribe_debug, &job_meta) catch |err| blk: {
-        error_text = std.fmt.allocPrint(allocator, "Send failed: {s}", .{@errorName(err)}) catch null;
+    response = sendChatViaFsrpcBlocking(allocator, &client, ctx.message, ctx.state, ctx.subscribe_debug, &job_meta, &fsrpc_error_detail) catch |err| blk: {
+        error_text = buildSendFailedErrorText(allocator, err, fsrpc_error_detail);
         break :blk null;
     };
 
@@ -3400,7 +3459,7 @@ const App = struct {
         else if (self.config.getProjectToken(project_id)) |value|
             value
         else
-            return error.MissingField;
+            null;
 
         var status = try control_plane.activateProject(
             self.allocator,
@@ -3417,7 +3476,9 @@ const App = struct {
         self.clearWorkspaceError();
 
         if (self.settings_panel.project_token.items.len == 0) {
-            try self.settings_panel.project_token.appendSlice(self.allocator, token);
+            if (token) |value| {
+                try self.settings_panel.project_token.appendSlice(self.allocator, value);
+            }
         }
         try self.syncSettingsToConfig();
     }
@@ -3456,9 +3517,7 @@ const App = struct {
         }
         try self.syncSettingsToConfig();
         self.settings_panel.project_create_name.clearRetainingCapacity();
-        if (created.project_token != null) {
-            self.activateSelectedProject() catch {};
-        }
+        self.activateSelectedProject() catch {};
         self.refreshWorkspaceData() catch {};
         self.clearWorkspaceError();
     }
@@ -6127,6 +6186,16 @@ const App = struct {
                 self.pending_send_resume_notified = true;
             }
             return;
+        }
+
+        const escaped_error = jsonEscape(self.allocator, err_text) catch null;
+        defer if (escaped_error) |value| self.allocator.free(value);
+        if (escaped_error) |encoded| {
+            const payload = std.fmt.allocPrint(self.allocator, "{{\"message\":\"{s}\"}}", .{encoded}) catch null;
+            if (payload) |value| {
+                defer self.allocator.free(value);
+                self.appendDebugEvent(std.time.milliTimestamp(), "client.send_error", null, value) catch {};
+            }
         }
 
         try self.appendMessage("system", err_text, null);

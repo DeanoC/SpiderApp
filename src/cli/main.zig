@@ -408,32 +408,17 @@ fn maybeApplyProjectContext(
     try ensureUnifiedV2Control(allocator, client);
 
     const token = if (options.project_token) |value| value else cfg.getProjectToken(project_id);
-    if (token) |project_token| {
-        var activated = try control_plane.activateProject(
-            allocator,
-            client,
-            &g_control_request_counter,
-            project_id,
-            project_token,
-        );
-        defer activated.deinit(allocator);
-        logger.info(
-            "Project context active: {s} ({d} mount(s))",
-            .{ project_id, activated.mounts.items.len },
-        );
-        return;
-    }
-
-    var status = try control_plane.workspaceStatus(
+    var activated = try control_plane.activateProject(
         allocator,
         client,
         &g_control_request_counter,
         project_id,
+        token,
     );
-    defer status.deinit(allocator);
+    defer activated.deinit(allocator);
     logger.info(
-        "Project selected without token: {s} ({d} mount(s))",
-        .{ project_id, status.mounts.items.len },
+        "Project context active: {s} ({d} mount(s))",
+        .{ project_id, activated.mounts.items.len },
     );
 }
 
@@ -594,29 +579,17 @@ fn executeProjectUse(allocator: std.mem.Allocator, options: args.Options, cmd: a
     try ensureUnifiedV2Control(allocator, client);
 
     const effective_token = if (cli_token) |token| token else cfg.getProjectToken(project_id);
-    if (effective_token) |token| {
-        var status = try control_plane.activateProject(
-            allocator,
-            client,
-            &g_control_request_counter,
-            project_id,
-            token,
-        );
-        defer status.deinit(allocator);
-        try stdout.print("Selected and activated project: {s}\n", .{project_id});
-        if (status.workspace_root) |workspace_root| {
-            try stdout.print("Workspace root: {s}\n", .{workspace_root});
-        }
-    } else {
-        var status = try control_plane.workspaceStatus(
-            allocator,
-            client,
-            &g_control_request_counter,
-            project_id,
-        );
-        defer status.deinit(allocator);
-        try stdout.print("Selected project: {s}\n", .{project_id});
-        try stdout.print("Activation skipped (no project token configured)\n", .{});
+    var status = try control_plane.activateProject(
+        allocator,
+        client,
+        &g_control_request_counter,
+        project_id,
+        effective_token,
+    );
+    defer status.deinit(allocator);
+    try stdout.print("Selected and activated project: {s}\n", .{project_id});
+    if (status.workspace_root) |workspace_root| {
+        try stdout.print("Workspace root: {s}\n", .{workspace_root});
     }
 
     try cfg.save();

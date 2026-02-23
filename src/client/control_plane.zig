@@ -4,6 +4,10 @@ pub const workspace_types = @import("workspace_types.zig");
 
 pub const default_timeout_ms: i64 = unified_v2.default_control_timeout_ms;
 
+pub fn lastRemoteError() ?[]const u8 {
+    return unified_v2.lastRemoteError();
+}
+
 pub fn ensureUnifiedV2Connection(
     allocator: std.mem.Allocator,
     client: anytype,
@@ -148,17 +152,22 @@ pub fn activateProject(
     client: anytype,
     message_counter: *u64,
     project_id: []const u8,
-    project_token: []const u8,
+    project_token: ?[]const u8,
 ) !workspace_types.WorkspaceStatus {
     const escaped_project = try unified_v2.jsonEscape(allocator, project_id);
     defer allocator.free(escaped_project);
-    const escaped_token = try unified_v2.jsonEscape(allocator, project_token);
-    defer allocator.free(escaped_token);
-
-    const payload_req = try std.fmt.allocPrint(
+    const payload_req = if (project_token) |token| blk: {
+        const escaped_token = try unified_v2.jsonEscape(allocator, token);
+        defer allocator.free(escaped_token);
+        break :blk try std.fmt.allocPrint(
+            allocator,
+            "{{\"project_id\":\"{s}\",\"project_token\":\"{s}\"}}",
+            .{ escaped_project, escaped_token },
+        );
+    } else try std.fmt.allocPrint(
         allocator,
-        "{{\"project_id\":\"{s}\",\"project_token\":\"{s}\"}}",
-        .{ escaped_project, escaped_token },
+        "{{\"project_id\":\"{s}\"}}",
+        .{escaped_project},
     );
     defer allocator.free(payload_req);
 
