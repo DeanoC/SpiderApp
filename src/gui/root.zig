@@ -4446,8 +4446,8 @@ const App = struct {
         var project_dropdown_rect: ?Rect = null;
         if (self.project_selector_open and self.projects.items.len > 0) {
             const row_height = input_height;
-            const max_dropdown_projects: usize = @min(self.projects.items.len, 10);
-            const dropdown_height = row_height * @as(f32, @floatFromInt(max_dropdown_projects));
+            const dropdown_project_count: usize = self.projects.items.len;
+            const dropdown_height = row_height * @as(f32, @floatFromInt(dropdown_project_count));
             const dropdown_y = y + 2.0 * self.ui_scale;
             const dropdown_rect = Rect.fromXYWH(
                 project_rect.min[0],
@@ -4460,7 +4460,7 @@ const App = struct {
             self.drawRect(dropdown_rect, self.theme.colors.border);
 
             var idx: usize = 0;
-            while (idx < max_dropdown_projects) : (idx += 1) {
+            while (idx < dropdown_project_count) : (idx += 1) {
                 const project = self.projects.items[idx];
                 const row_rect = Rect.fromXYWH(
                     dropdown_rect.min[0],
@@ -4499,19 +4499,6 @@ const App = struct {
             }
 
             y = dropdown_rect.max[1];
-            if (self.projects.items.len > max_dropdown_projects) {
-                const more_count = self.projects.items.len - max_dropdown_projects;
-                const more_line = std.fmt.allocPrint(
-                    self.allocator,
-                    "{d} more project(s)...",
-                    .{more_count},
-                ) catch null;
-                if (more_line) |line| {
-                    defer self.allocator.free(line);
-                    self.drawLabel(rect.min[0] + pad, y + 4.0 * self.ui_scale, line, self.theme.colors.text_secondary);
-                }
-                y += 18.0 * self.ui_scale;
-            }
         }
 
         y += pad * 0.5;
