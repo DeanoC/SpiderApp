@@ -783,6 +783,7 @@ const App = struct {
     workspace_last_error: ?[]u8 = null,
     workspace_last_refresh_ms: i64 = 0,
     project_panel_id: ?workspace.PanelId = null,
+    project_selector_open: bool = false,
     filesystem_panel_id: ?workspace.PanelId = null,
     filesystem_path: std.ArrayList(u8) = .empty,
     filesystem_entries: std.ArrayListUnmanaged(FilesystemEntry) = .{},
@@ -3266,6 +3267,7 @@ const App = struct {
     fn clearWorkspaceData(self: *App) void {
         workspace_types.deinitProjectList(self.allocator, &self.projects);
         workspace_types.deinitNodeList(self.allocator, &self.nodes);
+        self.project_selector_open = false;
         if (self.workspace_state) |*status| {
             status.deinit(self.allocator);
             self.workspace_state = null;
@@ -3354,6 +3356,7 @@ const App = struct {
     fn selectProjectInSettings(self: *App, project_id: []const u8) !void {
         self.settings_panel.project_id.clearRetainingCapacity();
         try self.settings_panel.project_id.appendSlice(self.allocator, project_id);
+        self.project_selector_open = false;
         self.settings_panel.project_token.clearRetainingCapacity();
         if (self.config.getProjectToken(project_id)) |token| {
             try self.settings_panel.project_token.appendSlice(self.allocator, token);
@@ -4258,7 +4261,11 @@ const App = struct {
         self.drawLabel(rect.min[0] + pad, y, "Project Workspace", self.theme.colors.text_primary);
         y += 26.0 * self.ui_scale;
 
-        self.drawLabel(rect.min[0] + pad, y, "Selected Project ID", self.theme.colors.text_primary);
+        if (self.settings_panel.focused_field == .project_id) {
+            self.settings_panel.focused_field = .none;
+        }
+
+        self.drawLabel(rect.min[0] + pad, y, "Selected Project", self.theme.colors.text_primary);
         y += 20.0 * self.ui_scale;
         const project_rect = Rect.fromXYWH(
             rect.min[0] + pad,
@@ -4266,15 +4273,122 @@ const App = struct {
             @max(220.0, rect_width - pad * 2.0),
             input_height,
         );
-        const project_focused = self.drawTextInputWidget(
-            project_rect,
-            self.settings_panel.project_id.items,
-            self.settings_panel.focused_field == .project_id,
-            .{ .placeholder = "proj-1" },
-        );
-        if (project_focused) self.settings_panel.focused_field = .project_id;
+        if (self.projects.items.len == 0) self.project_selector_open = false;
 
-        y += input_height + pad * 0.5;
+        var selected_project_label_buf: ?[]u8 = null;
+        defer if (selected_project_label_buf) |value| self.allocator.free(value);
+        const selected_project_label: []const u8 = blk: {
+            if (self.settings_panel.project_id.items.len == 0) break :blk "Select project";
+            const selected_id = self.settings_panel.project_id.items;
+            for (self.projects.items) |project| {
+                if (std.mem.eql(u8, project.id, selected_id)) {
+                    selected_project_label_buf = std.fmt.allocPrint(
+                        self.allocator,
+                        "{s} ({s})",
+                        .{ project.name, project.id },
+                    ) catch null;
+                    if (selected_project_label_buf) |label| break :blk label;
+                    break :blk selected_id;
+                }
+            }
+            break :blk selected_id;
+        };
+
+        var selector_label_buf: ?[]u8 = null;
+        defer if (selector_label_buf) |value| self.allocator.free(value);
+        const selector_label: []const u8 = blk: {
+            const suffix = if (self.project_selector_open) "[^]" else "[v]";
+            selector_label_buf = std.fmt.allocPrint(
+                self.allocator,
+                "{s} {s}",
+                .{ selected_project_label, suffix },
+            ) catch null;
+            if (selector_label_buf) |value| break :blk value;
+            break :blk selected_project_label;
+        };
+
+        if (self.drawButtonWidget(
+            project_rect,
+            selector_label,
+            .{ .variant = .secondary, .disabled = self.projects.items.len == 0 },
+        )) {
+            self.project_selector_open = !self.project_selector_open;
+            self.settings_panel.focused_field = .none;
+        }
+
+        y += input_height;
+        var project_dropdown_rect: ?Rect = null;
+        if (self.project_selector_open and self.projects.items.len > 0) {
+            const row_height = input_height;
+            const max_dropdown_projects: usize = @min(self.projects.items.len, 10);
+            const dropdown_height = row_height * @as(f32, @floatFromInt(max_dropdown_projects));
+            const dropdown_y = y + 2.0 * self.ui_scale;
+            const dropdown_rect = Rect.fromXYWH(
+                project_rect.min[0],
+                dropdown_y,
+                project_rect.width(),
+                dropdown_height,
+            );
+            project_dropdown_rect = dropdown_rect;
+            self.drawSurfacePanel(dropdown_rect);
+            self.drawRect(dropdown_rect, self.theme.colors.border);
+
+            var idx: usize = 0;
+            while (idx < max_dropdown_projects) : (idx += 1) {
+                const project = self.projects.items[idx];
+                const row_rect = Rect.fromXYWH(
+                    dropdown_rect.min[0],
+                    dropdown_rect.min[1] + row_height * @as(f32, @floatFromInt(idx)),
+                    dropdown_rect.width(),
+                    row_height,
+                );
+                const is_selected = self.settings_panel.project_id.items.len > 0 and
+                    std.mem.eql(u8, self.settings_panel.project_id.items, project.id);
+
+                const row_label_buf: ?[]u8 = std.fmt.allocPrint(
+                    self.allocator,
+                    "{s} ({s})",
+                    .{ project.name, project.id },
+                ) catch null;
+                const row_label = if (row_label_buf) |value| value else project.id;
+                defer if (row_label_buf) |value| self.allocator.free(value);
+
+                if (self.drawButtonWidget(
+                    row_rect,
+                    row_label,
+                    .{
+                        .variant = if (is_selected) .primary else .secondary,
+                        .disabled = false,
+                    },
+                )) {
+                    self.selectProjectInSettings(project.id) catch |err| {
+                        const msg = std.fmt.allocPrint(self.allocator, "Project select failed: {s}", .{@errorName(err)}) catch null;
+                        if (msg) |text| {
+                            defer self.allocator.free(text);
+                            self.setWorkspaceError(text);
+                        }
+                    };
+                    self.project_selector_open = false;
+                }
+            }
+
+            y = dropdown_rect.max[1];
+            if (self.projects.items.len > max_dropdown_projects) {
+                const more_count = self.projects.items.len - max_dropdown_projects;
+                const more_line = std.fmt.allocPrint(
+                    self.allocator,
+                    "{d} more project(s)...",
+                    .{more_count},
+                ) catch null;
+                if (more_line) |line| {
+                    defer self.allocator.free(line);
+                    self.drawLabel(rect.min[0] + pad, y + 4.0 * self.ui_scale, line, self.theme.colors.text_secondary);
+                }
+                y += 18.0 * self.ui_scale;
+            }
+        }
+
+        y += pad * 0.5;
         self.drawLabel(rect.min[0] + pad, y, "Project Token", self.theme.colors.text_primary);
         y += 20.0 * self.ui_scale;
         const project_token_rect = Rect.fromXYWH(
@@ -4540,8 +4654,15 @@ const App = struct {
             }
         }
 
+        const clicked_outside_project_selector = !project_rect.contains(.{ self.mouse_x, self.mouse_y }) and
+            !(project_dropdown_rect != null and project_dropdown_rect.?.contains(.{ self.mouse_x, self.mouse_y }));
+
+        if (self.mouse_clicked and clicked_outside_project_selector) {
+            self.project_selector_open = false;
+        }
+
         if (self.mouse_clicked and
-            !project_rect.contains(.{ self.mouse_x, self.mouse_y }) and
+            clicked_outside_project_selector and
             !project_token_rect.contains(.{ self.mouse_x, self.mouse_y }) and
             !create_name_rect.contains(.{ self.mouse_x, self.mouse_y }) and
             !create_vision_rect.contains(.{ self.mouse_x, self.mouse_y }) and
