@@ -250,13 +250,6 @@ fn fsrpcBootstrapBlocking(
     debug_state: ?*AsyncChatWorkerState,
     subscribe_debug: bool,
 ) !void {
-    var control_counter: u64 = 0;
-    try control_plane.ensureUnifiedV2Connection(
-        allocator,
-        client,
-        &control_counter,
-    );
-
     if (subscribe_debug) {
         const debug_id = try std.fmt.allocPrint(allocator, "debug-worker-{d}", .{std.time.milliTimestamp()});
         defer allocator.free(debug_id);
@@ -3193,7 +3186,7 @@ const App = struct {
             else
                 null,
         );
-        if (self.settings_panel.project_id.items.len > 0 and self.settings_panel.project_token.items.len > 0) {
+        if (self.settings_panel.project_id.items.len > 0) {
             try self.config.setProjectToken(
                 self.settings_panel.project_id.items,
                 self.settings_panel.project_token.items,
@@ -6625,7 +6618,7 @@ const App = struct {
         }
     }
 
-fn extractRequestId(root: std.json.ObjectMap, payload: ?std.json.ObjectMap) ?[]const u8 {
+    fn extractRequestId(root: std.json.ObjectMap, payload: ?std.json.ObjectMap) ?[]const u8 {
         if (root.get("request_id")) |value| {
             if (value == .string) return value.string;
         }

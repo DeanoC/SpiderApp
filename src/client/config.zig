@@ -144,7 +144,11 @@ pub const Config = struct {
     }
 
     pub fn setProjectToken(self: *Config, project_id: []const u8, token: []const u8) !void {
-        if (project_id.len == 0 or token.len == 0) return;
+        if (project_id.len == 0) return;
+        if (token.len == 0) {
+            try self.clearProjectToken(project_id);
+            return;
+        }
 
         if (self.project_tokens) |entries| {
             for (entries) |*entry| {
@@ -172,6 +176,40 @@ pub const Config = struct {
             .token = try self.allocator.dupe(u8, token),
         };
         self.project_tokens = entries;
+    }
+
+    pub fn clearProjectToken(self: *Config, project_id: []const u8) !void {
+        if (project_id.len == 0) return;
+        const entries = self.project_tokens orelse return;
+
+        var remove_idx: ?usize = null;
+        for (entries, 0..) |entry, idx| {
+            if (std.mem.eql(u8, entry.project_id, project_id)) {
+                remove_idx = idx;
+                break;
+            }
+        }
+        const idx = remove_idx orelse return;
+
+        self.allocator.free(entries[idx].project_id);
+        self.allocator.free(entries[idx].token);
+
+        if (entries.len == 1) {
+            self.allocator.free(entries);
+            self.project_tokens = null;
+            return;
+        }
+
+        const compacted = try self.allocator.alloc(ProjectTokenEntry, entries.len - 1);
+        var out_idx: usize = 0;
+        for (entries, 0..) |entry, entry_idx| {
+            if (entry_idx == idx) continue;
+            compacted[out_idx] = entry;
+            out_idx += 1;
+        }
+
+        self.allocator.free(entries);
+        self.project_tokens = compacted;
     }
 
     pub fn setTheme(self: *Config, value: ?[]const u8) !void {
