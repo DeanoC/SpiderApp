@@ -537,6 +537,9 @@ const SettingsFocusField = enum {
     server_url,
     project_id,
     project_token,
+    project_create_name,
+    project_create_vision,
+    project_operator_token,
     default_session,
     ui_theme,
     ui_profile,
@@ -547,6 +550,9 @@ const SettingsPanel = struct {
     server_url: std.ArrayList(u8) = .empty,
     project_id: std.ArrayList(u8) = .empty,
     project_token: std.ArrayList(u8) = .empty,
+    project_create_name: std.ArrayList(u8) = .empty,
+    project_create_vision: std.ArrayList(u8) = .empty,
+    project_operator_token: std.ArrayList(u8) = .empty,
     default_session: std.ArrayList(u8) = .empty,
     ui_theme: std.ArrayList(u8) = .empty,
     ui_profile: std.ArrayList(u8) = .empty,
@@ -562,6 +568,9 @@ const SettingsPanel = struct {
         panel.server_url.appendSlice(allocator, "ws://127.0.0.1:18790") catch {};
         panel.project_id.appendSlice(allocator, "") catch {};
         panel.project_token.appendSlice(allocator, "") catch {};
+        panel.project_create_name.appendSlice(allocator, "") catch {};
+        panel.project_create_vision.appendSlice(allocator, "") catch {};
+        panel.project_operator_token.appendSlice(allocator, "") catch {};
         panel.default_session.appendSlice(allocator, "main") catch {};
         return panel;
     }
@@ -570,6 +579,9 @@ const SettingsPanel = struct {
         self.server_url.deinit(allocator);
         self.project_id.deinit(allocator);
         self.project_token.deinit(allocator);
+        self.project_create_name.deinit(allocator);
+        self.project_create_vision.deinit(allocator);
+        self.project_operator_token.deinit(allocator);
         self.default_session.deinit(allocator);
         self.ui_theme.deinit(allocator);
         self.ui_profile.deinit(allocator);
@@ -770,6 +782,7 @@ const App = struct {
     workspace_state: ?workspace_types.WorkspaceStatus = null,
     workspace_last_error: ?[]u8 = null,
     workspace_last_refresh_ms: i64 = 0,
+    project_panel_id: ?workspace.PanelId = null,
     filesystem_panel_id: ?workspace.PanelId = null,
     filesystem_path: std.ArrayList(u8) = .empty,
     filesystem_entries: std.ArrayListUnmanaged(FilesystemEntry) = .{},
@@ -877,6 +890,13 @@ const App = struct {
                 settings_panel.project_token.appendSlice(allocator, project_token) catch {};
             }
         }
+        if (config.auth_token.len > 0) {
+            settings_panel.project_operator_token.clearRetainingCapacity();
+            settings_panel.project_operator_token.appendSlice(allocator, config.auth_token) catch {};
+        } else if (config.token.len > 0) {
+            settings_panel.project_operator_token.clearRetainingCapacity();
+            settings_panel.project_operator_token.appendSlice(allocator, config.token) catch {};
+        }
         settings_panel.default_session.clearRetainingCapacity();
         if (config.default_session) |value| {
             settings_panel.default_session.appendSlice(allocator, value) catch {};
@@ -925,6 +945,8 @@ const App = struct {
         app.manager = panel_manager.PanelManager.init(allocator, ws, &app.next_panel_id);
         app.bindNextPanelId(&app.manager);
         errdefer app.manager.deinit();
+        _ = app.ensureProjectPanel(&app.manager) catch {};
+        app.focusSettingsPanel(&app.manager);
 
         app.captureWorkspaceSnapshot(&app.manager);
         try app.filesystem_path.appendSlice(allocator, "/");
@@ -2980,6 +3002,9 @@ const App = struct {
                             .server_url => try self.settings_panel.server_url.appendSlice(self.allocator, clip),
                             .project_id => try self.settings_panel.project_id.appendSlice(self.allocator, clip),
                             .project_token => try self.settings_panel.project_token.appendSlice(self.allocator, clip),
+                            .project_create_name => try self.settings_panel.project_create_name.appendSlice(self.allocator, clip),
+                            .project_create_vision => try self.settings_panel.project_create_vision.appendSlice(self.allocator, clip),
+                            .project_operator_token => try self.settings_panel.project_operator_token.appendSlice(self.allocator, clip),
                             .default_session => try self.settings_panel.default_session.appendSlice(self.allocator, clip),
                             .ui_theme => try self.settings_panel.ui_theme.appendSlice(self.allocator, clip),
                             .ui_profile => try self.settings_panel.ui_profile.appendSlice(self.allocator, clip),
@@ -3036,6 +3061,12 @@ const App = struct {
                     _ = self.settings_panel.project_id.pop();
                 } else if (self.settings_panel.focused_field == .project_token and self.settings_panel.project_token.items.len > 0) {
                     _ = self.settings_panel.project_token.pop();
+                } else if (self.settings_panel.focused_field == .project_create_name and self.settings_panel.project_create_name.items.len > 0) {
+                    _ = self.settings_panel.project_create_name.pop();
+                } else if (self.settings_panel.focused_field == .project_create_vision and self.settings_panel.project_create_vision.items.len > 0) {
+                    _ = self.settings_panel.project_create_vision.pop();
+                } else if (self.settings_panel.focused_field == .project_operator_token and self.settings_panel.project_operator_token.items.len > 0) {
+                    _ = self.settings_panel.project_operator_token.pop();
                 } else if (self.settings_panel.focused_field == .default_session and self.settings_panel.default_session.items.len > 0) {
                     _ = self.settings_panel.default_session.pop();
                 } else if (self.settings_panel.focused_field == .ui_theme and self.settings_panel.ui_theme.items.len > 0) {
@@ -3053,6 +3084,12 @@ const App = struct {
                     _ = self.settings_panel.project_id.pop();
                 } else if (self.settings_panel.focused_field == .project_token and self.settings_panel.project_token.items.len > 0) {
                     _ = self.settings_panel.project_token.pop();
+                } else if (self.settings_panel.focused_field == .project_create_name and self.settings_panel.project_create_name.items.len > 0) {
+                    _ = self.settings_panel.project_create_name.pop();
+                } else if (self.settings_panel.focused_field == .project_create_vision and self.settings_panel.project_create_vision.items.len > 0) {
+                    _ = self.settings_panel.project_create_vision.pop();
+                } else if (self.settings_panel.focused_field == .project_operator_token and self.settings_panel.project_operator_token.items.len > 0) {
+                    _ = self.settings_panel.project_operator_token.pop();
                 } else if (self.settings_panel.focused_field == .default_session and self.settings_panel.default_session.items.len > 0) {
                     _ = self.settings_panel.default_session.pop();
                 } else if (self.settings_panel.focused_field == .ui_theme and self.settings_panel.ui_theme.items.len > 0) {
@@ -3143,6 +3180,27 @@ const App = struct {
                 for (text) |ch| {
                     if (ch >= 32 and ch < 127) {
                         try self.settings_panel.project_token.append(self.allocator, ch);
+                    }
+                }
+            },
+            .project_create_name => {
+                for (text) |ch| {
+                    if (ch >= 32 and ch < 127) {
+                        try self.settings_panel.project_create_name.append(self.allocator, ch);
+                    }
+                }
+            },
+            .project_create_vision => {
+                for (text) |ch| {
+                    if (ch >= 32 and ch < 127) {
+                        try self.settings_panel.project_create_vision.append(self.allocator, ch);
+                    }
+                }
+            },
+            .project_operator_token => {
+                for (text) |ch| {
+                    if (ch >= 32 and ch < 127) {
+                        try self.settings_panel.project_operator_token.append(self.allocator, ch);
                     }
                 }
             },
@@ -3336,6 +3394,47 @@ const App = struct {
             try self.settings_panel.project_token.appendSlice(self.allocator, token);
         }
         try self.syncSettingsToConfig();
+    }
+
+    fn resolveProjectOperatorToken(self: *App) ?[]const u8 {
+        if (self.settings_panel.project_operator_token.items.len > 0) return self.settings_panel.project_operator_token.items;
+        if (self.config.auth_token.len > 0) return self.config.auth_token;
+        if (self.config.token.len > 0) return self.config.token;
+        return null;
+    }
+
+    fn createProjectFromPanel(self: *App) !void {
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        if (self.settings_panel.project_create_name.items.len == 0) return error.MissingField;
+        try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
+
+        const vision = if (self.settings_panel.project_create_vision.items.len > 0)
+            self.settings_panel.project_create_vision.items
+        else
+            null;
+        var created = try control_plane.createProject(
+            self.allocator,
+            client,
+            &self.message_counter,
+            self.settings_panel.project_create_name.items,
+            vision,
+            self.resolveProjectOperatorToken(),
+        );
+        defer created.deinit(self.allocator);
+
+        self.settings_panel.project_id.clearRetainingCapacity();
+        try self.settings_panel.project_id.appendSlice(self.allocator, created.id);
+        self.settings_panel.project_token.clearRetainingCapacity();
+        if (created.project_token) |token| {
+            try self.settings_panel.project_token.appendSlice(self.allocator, token);
+        }
+        try self.syncSettingsToConfig();
+        self.settings_panel.project_create_name.clearRetainingCapacity();
+        if (created.project_token != null) {
+            self.activateSelectedProject() catch {};
+        }
+        self.refreshWorkspaceData() catch {};
+        self.clearWorkspaceError();
     }
 
     fn applyThemeFromSettings(self: *App) void {
@@ -3872,6 +3971,8 @@ const App = struct {
             .ToolOutput => {
                 if (self.debug_panel_id != null and self.debug_panel_id.? == panel.id) {
                     self.drawDebugPanel(manager, rect);
+                } else if (self.project_panel_id != null and self.project_panel_id.? == panel.id) {
+                    self.drawProjectPanel(manager, rect);
                 } else if (self.filesystem_panel_id != null and self.filesystem_panel_id.? == panel.id) {
                     self.drawFilesystemPanel(manager, rect);
                 } else {
@@ -3897,20 +3998,18 @@ const App = struct {
 
     fn drawSettingsPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         const pad = self.theme.spacing.md;
-        // Apply vertical scroll offset
         var y = rect.min[1] + pad - self.settings_panel.scroll_y;
         const rect_width = rect.max[0] - rect.min[0];
+        const input_height: f32 = 32.0 * self.ui_scale;
 
-        // Title
         self.drawLabel(
             rect.min[0] + pad,
             y,
             "ZiggyStarSpider - Settings",
             self.theme.colors.text_primary,
         );
-        y += 30;
+        y += 30.0 * self.ui_scale;
 
-        // Server URL label
         self.drawLabel(
             rect.min[0] + pad,
             y,
@@ -3918,16 +4017,12 @@ const App = struct {
             self.theme.colors.text_primary,
         );
         y += 20.0 * self.ui_scale;
-
-        // URL Input
-        const input_height: f32 = 32.0 * self.ui_scale;
         const input_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
-            @max(200, rect_width - pad * 2.0),
+            @max(200.0, rect_width - pad * 2.0),
             input_height,
         );
-
         const url_focused = self.drawTextInputWidget(
             input_rect,
             self.settings_panel.server_url.items,
@@ -3937,185 +4032,6 @@ const App = struct {
         if (url_focused) self.settings_panel.focused_field = .server_url;
 
         y += input_height + pad;
-
-        // Project selection
-        self.drawLabel(
-            rect.min[0] + pad,
-            y,
-            "Project ID",
-            self.theme.colors.text_primary,
-        );
-        y += 20.0 * self.ui_scale;
-        const project_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            @max(200, rect_width - pad * 2.0),
-            input_height,
-        );
-        const project_focused = self.drawTextInputWidget(
-            project_rect,
-            self.settings_panel.project_id.items,
-            self.settings_panel.focused_field == .project_id,
-            .{ .placeholder = "proj-1" },
-        );
-        if (project_focused) self.settings_panel.focused_field = .project_id;
-
-        y += input_height + pad * 0.5;
-        self.drawLabel(
-            rect.min[0] + pad,
-            y,
-            "Project Token (for activate)",
-            self.theme.colors.text_primary,
-        );
-        y += 20.0 * self.ui_scale;
-        const project_token_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            @max(200, rect_width - pad * 2.0),
-            input_height,
-        );
-        const project_token_focused = self.drawTextInputWidget(
-            project_token_rect,
-            self.settings_panel.project_token.items,
-            self.settings_panel.focused_field == .project_token,
-            .{ .placeholder = "proj-..." },
-        );
-        if (project_token_focused) self.settings_panel.focused_field = .project_token;
-
-        y += input_height + pad * 0.5;
-        const wizard_connected = self.connection_state == .connected;
-        const wizard_project_selected = self.settings_panel.project_id.items.len > 0;
-        const wizard_has_mounts = if (self.workspace_state) |*status|
-            status.mounts.items.len > 0
-        else
-            false;
-        const wizard_activated = if (self.workspace_state) |*status|
-            status.project_id != null and
-                wizard_project_selected and
-                std.mem.eql(u8, status.project_id.?, self.settings_panel.project_id.items)
-        else
-            false;
-
-        self.drawLabel(rect.min[0] + pad, y, "Onboarding Wizard", self.theme.colors.text_primary);
-        y += 18.0 * self.ui_scale;
-
-        const line1 = if (wizard_connected) "[x] 1. Connect" else "[ ] 1. Connect";
-        const line2 = if (wizard_project_selected) "[x] 2. Select project" else "[ ] 2. Select project";
-        const line3 = if (wizard_has_mounts) "[x] 3. Verify mounts" else "[ ] 3. Verify mounts";
-        const line4 = if (wizard_activated) "[x] 4. Activate project" else "[ ] 4. Activate project";
-        self.drawLabel(rect.min[0] + pad, y, line1, self.theme.colors.text_secondary);
-        y += 16.0 * self.ui_scale;
-        self.drawLabel(rect.min[0] + pad, y, line2, self.theme.colors.text_secondary);
-        y += 16.0 * self.ui_scale;
-        self.drawLabel(rect.min[0] + pad, y, line3, self.theme.colors.text_secondary);
-        y += 16.0 * self.ui_scale;
-        self.drawLabel(rect.min[0] + pad, y, line4, self.theme.colors.text_secondary);
-        y += 18.0 * self.ui_scale;
-
-        const wizard_btn_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            @max(220.0, rect_width * 0.5),
-            input_height,
-        );
-        if (!wizard_connected) {
-            if (self.drawButtonWidget(wizard_btn_rect, "Run Step 1: Connect", .{ .variant = .secondary })) {
-                self.tryConnect(manager) catch {};
-            }
-        } else if (!wizard_project_selected) {
-            if (self.projects.items.len > 0) {
-                if (self.drawButtonWidget(wizard_btn_rect, "Run Step 2: Use First Project", .{ .variant = .secondary })) {
-                    self.selectProjectInSettings(self.projects.items[0].id) catch |err| {
-                        const msg = std.fmt.allocPrint(self.allocator, "Project selection failed: {s}", .{@errorName(err)}) catch null;
-                        if (msg) |text| {
-                            defer self.allocator.free(text);
-                            self.setWorkspaceError(text);
-                        }
-                    };
-                }
-            } else {
-                if (self.drawButtonWidget(wizard_btn_rect, "Run Step 2: Refresh Projects", .{ .variant = .secondary })) {
-                    self.refreshWorkspaceData() catch |err| {
-                        const msg = std.fmt.allocPrint(self.allocator, "Workspace refresh failed: {s}", .{@errorName(err)}) catch null;
-                        if (msg) |text| {
-                            defer self.allocator.free(text);
-                            self.setWorkspaceError(text);
-                        }
-                    };
-                }
-            }
-        } else if (!wizard_has_mounts) {
-            if (self.drawButtonWidget(wizard_btn_rect, "Run Step 3: Refresh Mounts", .{ .variant = .secondary })) {
-                self.refreshWorkspaceData() catch |err| {
-                    const msg = std.fmt.allocPrint(self.allocator, "Workspace refresh failed: {s}", .{@errorName(err)}) catch null;
-                    if (msg) |text| {
-                        defer self.allocator.free(text);
-                        self.setWorkspaceError(text);
-                    }
-                };
-            }
-        } else if (!wizard_activated) {
-            if (self.drawButtonWidget(wizard_btn_rect, "Run Step 4: Activate Project", .{ .variant = .secondary })) {
-                self.activateSelectedProject() catch |err| {
-                    const msg = std.fmt.allocPrint(self.allocator, "Project activate failed: {s}", .{@errorName(err)}) catch null;
-                    if (msg) |text| {
-                        defer self.allocator.free(text);
-                        self.setWorkspaceError(text);
-                    }
-                };
-            }
-        } else {
-            _ = self.drawButtonWidget(wizard_btn_rect, "Wizard Complete", .{ .variant = .secondary, .disabled = true });
-        }
-
-        y += input_height + pad;
-
-        const workspace_refresh_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            @max(180.0, rect_width * 0.45),
-            input_height,
-        );
-        const refresh_workspace_clicked = self.drawButtonWidget(
-            workspace_refresh_rect,
-            "Refresh Workspace",
-            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
-        );
-        if (refresh_workspace_clicked) {
-            self.refreshWorkspaceData() catch |err| {
-                const msg = std.fmt.allocPrint(self.allocator, "Workspace refresh failed: {s}", .{@errorName(err)}) catch null;
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setWorkspaceError(text);
-                }
-            };
-        }
-
-        const activate_project_rect = Rect.fromXYWH(
-            workspace_refresh_rect.max[0] + pad,
-            y,
-            @max(180.0, rect_width * 0.45),
-            input_height,
-        );
-        const activate_clicked = self.drawButtonWidget(
-            activate_project_rect,
-            "Activate Project",
-            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
-        );
-        if (activate_clicked) {
-            self.activateSelectedProject() catch |err| {
-                const msg = std.fmt.allocPrint(self.allocator, "Project activate failed: {s}", .{@errorName(err)}) catch null;
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setWorkspaceError(text);
-                }
-            };
-            self.refreshWorkspaceData() catch {};
-        }
-
-        y += input_height + pad;
-
-        // Default Session label
         self.drawLabel(
             rect.min[0] + pad,
             y,
@@ -4123,11 +4039,10 @@ const App = struct {
             self.theme.colors.text_primary,
         );
         y += 20.0 * self.ui_scale;
-
         const default_session_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
-            @max(200, rect_width - pad * 2.0),
+            @max(200.0, rect_width - pad * 2.0),
             input_height,
         );
         const default_session_focused = self.drawTextInputWidget(
@@ -4149,7 +4064,7 @@ const App = struct {
         const ui_theme_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
-            @max(200, rect_width - pad * 2.0),
+            @max(200.0, rect_width - pad * 2.0),
             input_height,
         );
         const ui_theme_focused = self.drawTextInputWidget(
@@ -4171,7 +4086,7 @@ const App = struct {
         const ui_profile_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
-            @max(200, rect_width - pad * 2.0),
+            @max(200.0, rect_width - pad * 2.0),
             input_height,
         );
         const ui_profile_focused = self.drawTextInputWidget(
@@ -4193,7 +4108,7 @@ const App = struct {
         const ui_theme_pack_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
-            @max(200, rect_width - pad * 2.0),
+            @max(200.0, rect_width - pad * 2.0),
             input_height,
         );
         const ui_theme_pack_focused = self.drawTextInputWidget(
@@ -4212,19 +4127,17 @@ const App = struct {
         const watch_button_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
-            @max(200, rect_width * 0.65),
+            @max(200.0, rect_width * 0.65),
             input_height,
         );
-        const watch_pack_clicked = self.drawButtonWidget(
+        if (self.drawButtonWidget(
             watch_button_rect,
             watch_button_label,
             .{ .variant = .secondary },
-        );
-        if (watch_pack_clicked) {
+        )) {
             self.settings_panel.watch_theme_pack = !self.settings_panel.watch_theme_pack;
         }
 
-        // Auto connect toggle
         y += input_height + pad;
         const button_height: f32 = 32.0 * self.ui_scale;
         const auto_connect_label = if (self.settings_panel.auto_connect_on_launch)
@@ -4234,23 +4147,19 @@ const App = struct {
         const auto_connect_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
-            @max(200, rect_width * 0.55),
+            @max(200.0, rect_width * 0.55),
             button_height,
         );
-        const auto_connect_clicked = self.drawButtonWidget(
+        if (self.drawButtonWidget(
             auto_connect_rect,
             auto_connect_label,
             .{ .variant = .secondary },
-        );
-        if (auto_connect_clicked) {
+        )) {
             self.settings_panel.auto_connect_on_launch = !self.settings_panel.auto_connect_on_launch;
         }
 
-        // Handle click outside text fields
         if (self.mouse_clicked and
             !input_rect.contains(.{ self.mouse_x, self.mouse_y }) and
-            !project_rect.contains(.{ self.mouse_x, self.mouse_y }) and
-            !project_token_rect.contains(.{ self.mouse_x, self.mouse_y }) and
             !default_session_rect.contains(.{ self.mouse_x, self.mouse_y }) and
             !ui_theme_rect.contains(.{ self.mouse_x, self.mouse_y }) and
             !ui_profile_rect.contains(.{ self.mouse_x, self.mouse_y }) and
@@ -4259,113 +4168,234 @@ const App = struct {
             self.settings_panel.focused_field = .none;
         }
 
-        // Action buttons
-        const button_width: f32 = 120.0 * self.ui_scale;
+        const button_width: f32 = 140.0 * self.ui_scale;
         const action_row_y = y + button_height + pad;
-        const button_rect = Rect.fromXYWH(
+        const connect_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             action_row_y,
             button_width,
             button_height,
         );
-
-        const connect_clicked = self.drawButtonWidget(
-            button_rect,
+        if (self.drawButtonWidget(
+            connect_rect,
             "Connect",
             .{ .variant = .primary, .disabled = self.connection_state == .connecting },
-        );
-        if (connect_clicked) {
+        )) {
             self.tryConnect(manager) catch {};
         }
 
-        // Save Config button
-        const save_button_x = button_rect.max[0] + pad;
-        const save_button_rect = Rect.fromXYWH(
-            save_button_x,
+        const save_rect = Rect.fromXYWH(
+            connect_rect.max[0] + pad,
             action_row_y,
             button_width,
             button_height,
         );
-        const save_clicked = self.drawButtonWidget(
-            save_button_rect,
+        if (self.drawButtonWidget(
+            save_rect,
             "Save Config",
             .{ .variant = .secondary },
-        );
-        if (save_clicked) {
+        )) {
             self.saveConfig() catch |err| {
                 self.setConnectionState(.error_state, "Failed to save config");
                 std.log.err("Save config failed: {s}", .{@errorName(err)});
             };
         }
 
-        const debug_button_width = button_width * 1.35;
-        const action_max_x = rect.min[0] + rect_width - pad;
-        var debug_button_x = save_button_rect.max[0] + pad;
-        var debug_button_y = action_row_y;
-        if (debug_button_x + debug_button_width > action_max_x) {
-            debug_button_x = rect.min[0] + pad;
-            debug_button_y = action_row_y + button_height + pad;
-        }
-        const debug_button_rect = Rect.fromXYWH(
-            debug_button_x,
-            debug_button_y,
-            debug_button_width,
+        const open_project_rect = Rect.fromXYWH(
+            save_rect.max[0] + pad,
+            action_row_y,
+            @max(button_width, 190.0 * self.ui_scale),
             button_height,
         );
-        const open_debug_clicked = self.drawButtonWidget(
-            debug_button_rect,
-            "Open Debug Panel",
+        if (self.drawButtonWidget(
+            open_project_rect,
+            "Open Project Panel",
             .{ .variant = .secondary },
+        )) {
+            _ = self.ensureProjectPanel(manager) catch |err| {
+                std.log.err("Failed to open project panel: {s}", .{@errorName(err)});
+            };
+        }
+
+        const content_bottom_scrolled = action_row_y + button_height + pad;
+        const content_bottom = content_bottom_scrolled + self.settings_panel.scroll_y;
+        const total_height = content_bottom - (rect.min[1] + pad);
+        const viewport_h = @max(0.0, rect.max[1] - rect.min[1] - pad * 2.0);
+        const max_scroll = if (total_height > viewport_h) total_height - viewport_h else 0.0;
+        if (self.settings_panel.scroll_y < 0.0) self.settings_panel.scroll_y = 0.0;
+        if (self.settings_panel.scroll_y > max_scroll) self.settings_panel.scroll_y = max_scroll;
+    }
+
+    fn drawProjectPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+        const pad = self.theme.spacing.md;
+        var y = rect.min[1] + pad - self.settings_panel.scroll_y;
+        const rect_width = rect.max[0] - rect.min[0];
+        const input_height: f32 = 32.0 * self.ui_scale;
+
+        self.drawLabel(rect.min[0] + pad, y, "Project Workspace", self.theme.colors.text_primary);
+        y += 26.0 * self.ui_scale;
+
+        self.drawLabel(rect.min[0] + pad, y, "Selected Project ID", self.theme.colors.text_primary);
+        y += 20.0 * self.ui_scale;
+        const project_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            @max(220.0, rect_width - pad * 2.0),
+            input_height,
         );
-        if (open_debug_clicked) {
+        const project_focused = self.drawTextInputWidget(
+            project_rect,
+            self.settings_panel.project_id.items,
+            self.settings_panel.focused_field == .project_id,
+            .{ .placeholder = "proj-1" },
+        );
+        if (project_focused) self.settings_panel.focused_field = .project_id;
+
+        y += input_height + pad * 0.5;
+        self.drawLabel(rect.min[0] + pad, y, "Project Token", self.theme.colors.text_primary);
+        y += 20.0 * self.ui_scale;
+        const project_token_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            @max(220.0, rect_width - pad * 2.0),
+            input_height,
+        );
+        const project_token_focused = self.drawTextInputWidget(
+            project_token_rect,
+            self.settings_panel.project_token.items,
+            self.settings_panel.focused_field == .project_token,
+            .{ .placeholder = "proj-..." },
+        );
+        if (project_token_focused) self.settings_panel.focused_field = .project_token;
+
+        y += input_height + pad;
+        self.drawLabel(rect.min[0] + pad, y, "Create Project Name", self.theme.colors.text_primary);
+        y += 20.0 * self.ui_scale;
+        const create_name_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            @max(220.0, rect_width - pad * 2.0),
+            input_height,
+        );
+        const create_name_focused = self.drawTextInputWidget(
+            create_name_rect,
+            self.settings_panel.project_create_name.items,
+            self.settings_panel.focused_field == .project_create_name,
+            .{ .placeholder = "Distributed Workspace" },
+        );
+        if (create_name_focused) self.settings_panel.focused_field = .project_create_name;
+
+        y += input_height + pad * 0.5;
+        self.drawLabel(rect.min[0] + pad, y, "Create Vision (optional)", self.theme.colors.text_primary);
+        y += 20.0 * self.ui_scale;
+        const create_vision_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            @max(220.0, rect_width - pad * 2.0),
+            input_height,
+        );
+        const create_vision_focused = self.drawTextInputWidget(
+            create_vision_rect,
+            self.settings_panel.project_create_vision.items,
+            self.settings_panel.focused_field == .project_create_vision,
+            .{ .placeholder = "unified node mounts" },
+        );
+        if (create_vision_focused) self.settings_panel.focused_field = .project_create_vision;
+
+        y += input_height + pad * 0.5;
+        self.drawLabel(rect.min[0] + pad, y, "Operator Token (optional)", self.theme.colors.text_primary);
+        y += 20.0 * self.ui_scale;
+        const operator_token_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            @max(220.0, rect_width - pad * 2.0),
+            input_height,
+        );
+        const operator_token_focused = self.drawTextInputWidget(
+            operator_token_rect,
+            self.settings_panel.project_operator_token.items,
+            self.settings_panel.focused_field == .project_operator_token,
+            .{ .placeholder = "(fallback: config auth token)" },
+        );
+        if (operator_token_focused) self.settings_panel.focused_field = .project_operator_token;
+
+        y += input_height + pad;
+        const button_height: f32 = 32.0 * self.ui_scale;
+        const button_width: f32 = @max(140.0, rect_width * 0.3);
+        const create_rect = Rect.fromXYWH(rect.min[0] + pad, y, button_width, button_height);
+        const refresh_rect = Rect.fromXYWH(create_rect.max[0] + pad, y, button_width, button_height);
+        const activate_rect = Rect.fromXYWH(refresh_rect.max[0] + pad, y, button_width, button_height);
+
+        if (self.drawButtonWidget(
+            create_rect,
+            "Create Project",
+            .{
+                .variant = .primary,
+                .disabled = self.connection_state != .connected or self.settings_panel.project_create_name.items.len == 0,
+            },
+        )) {
+            self.createProjectFromPanel() catch |err| {
+                const msg = std.fmt.allocPrint(self.allocator, "Project create failed: {s}", .{@errorName(err)}) catch null;
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setWorkspaceError(text);
+                }
+            };
+        }
+
+        if (self.drawButtonWidget(
+            refresh_rect,
+            "Refresh Workspace",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            self.refreshWorkspaceData() catch |err| {
+                const msg = std.fmt.allocPrint(self.allocator, "Workspace refresh failed: {s}", .{@errorName(err)}) catch null;
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setWorkspaceError(text);
+                }
+            };
+        }
+
+        if (self.drawButtonWidget(
+            activate_rect,
+            "Activate Project",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected or self.settings_panel.project_id.items.len == 0 },
+        )) {
+            self.activateSelectedProject() catch |err| {
+                const msg = std.fmt.allocPrint(self.allocator, "Project activate failed: {s}", .{@errorName(err)}) catch null;
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setWorkspaceError(text);
+                }
+            };
+        }
+
+        y += button_height + pad;
+        const fs_rect = Rect.fromXYWH(rect.min[0] + pad, y, button_width, button_height);
+        const debug_rect = Rect.fromXYWH(fs_rect.max[0] + pad, y, button_width, button_height);
+        if (self.drawButtonWidget(fs_rect, "Open Filesystem", .{ .variant = .secondary })) {
+            _ = self.ensureFilesystemPanel(manager) catch |err| {
+                std.log.err("Failed to open filesystem panel: {s}", .{@errorName(err)});
+            };
+        }
+        if (self.drawButtonWidget(debug_rect, "Open Debug", .{ .variant = .secondary })) {
             _ = self.ensureDebugPanel(manager) catch |err| {
                 std.log.err("Failed to open debug panel: {s}", .{@errorName(err)});
             };
         }
 
-        const fs_button_width = button_width * 1.55;
-        var fs_button_x = debug_button_rect.max[0] + pad;
-        var fs_button_y = debug_button_y;
-        if (fs_button_x + fs_button_width > action_max_x) {
-            fs_button_x = rect.min[0] + pad;
-            fs_button_y = debug_button_y + button_height + pad;
-        }
-        const fs_button_rect = Rect.fromXYWH(
-            fs_button_x,
-            fs_button_y,
-            fs_button_width,
-            button_height,
-        );
-        const open_fs_clicked = self.drawButtonWidget(
-            fs_button_rect,
-            "Open Filesystem Panel",
-            .{ .variant = .secondary },
-        );
-        if (open_fs_clicked) {
-            _ = self.ensureFilesystemPanel(manager) catch |err| {
-                std.log.err("Failed to open filesystem panel: {s}", .{@errorName(err)});
-            };
-        }
-
-        const actions_bottom = @max(
-            @max(action_row_y + button_height, debug_button_y + button_height),
-            fs_button_y + button_height,
-        );
-        y = actions_bottom + pad;
-
-        // Status row
+        y += button_height + pad;
         const status_height: f32 = 32.0 * self.ui_scale;
         const status_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
-            @max(200, rect_width - pad * 2.0),
+            @max(220.0, rect_width - pad * 2.0),
             status_height,
         );
         self.drawStatusRow(status_rect);
-
         y += status_height + pad;
 
-        // Workspace summary
         if (self.workspace_last_error) |err_text| {
             self.drawLabel(
                 rect.min[0] + pad,
@@ -4373,7 +4403,7 @@ const App = struct {
                 err_text,
                 zcolors.rgba(220, 80, 80, 255),
             );
-            y += 20.0 * self.ui_scale;
+            y += 18.0 * self.ui_scale;
         }
 
         const selected_project_text = if (self.settings_panel.project_id.items.len > 0)
@@ -4416,32 +4446,10 @@ const App = struct {
             y += 18.0 * self.ui_scale;
         }
 
-        if (self.workspace_state) |*status| {
-            if (status.mounts.items.len > 0) {
-                self.drawLabel(rect.min[0] + pad, y, "Mounted exports:", self.theme.colors.text_primary);
-                y += 18.0 * self.ui_scale;
-                const max_mounts: usize = @min(status.mounts.items.len, 8);
-                var mount_idx: usize = 0;
-                while (mount_idx < max_mounts) : (mount_idx += 1) {
-                    const mount = status.mounts.items[mount_idx];
-                    const line = std.fmt.allocPrint(
-                        self.allocator,
-                        "  - {s} <= {s}:{s}",
-                        .{ mount.mount_path, mount.node_id, mount.export_name },
-                    ) catch null;
-                    if (line) |value| {
-                        defer self.allocator.free(value);
-                        self.drawLabel(rect.min[0] + pad, y, value, self.theme.colors.text_secondary);
-                        y += 16.0 * self.ui_scale;
-                    }
-                }
-            }
-        }
-
         if (self.projects.items.len > 0) {
             self.drawLabel(rect.min[0] + pad, y, "Project List:", self.theme.colors.text_primary);
             y += 18.0 * self.ui_scale;
-            const max_projects: usize = @min(self.projects.items.len, 6);
+            const max_projects: usize = @min(self.projects.items.len, 8);
             var idx: usize = 0;
             while (idx < max_projects) : (idx += 1) {
                 const project = self.projects.items[idx];
@@ -4452,69 +4460,47 @@ const App = struct {
                 ) catch null;
                 if (line) |value| {
                     defer self.allocator.free(value);
-                    const project_row_height: f32 = 20.0 * self.ui_scale;
-                    const project_button_width: f32 = 84.0 * self.ui_scale;
-                    const project_text_max_w = @max(
-                        120.0,
-                        rect_width - (pad * 2.0) - project_button_width - pad,
-                    );
+                    const row_h: f32 = 20.0 * self.ui_scale;
+                    const button_w: f32 = 84.0 * self.ui_scale;
+                    const text_max_w = @max(120.0, rect_width - (pad * 2.0) - button_w - pad);
                     self.drawTextTrimmed(
                         rect.min[0] + pad,
                         y,
-                        project_text_max_w,
+                        text_max_w,
                         value,
                         self.theme.colors.text_secondary,
                     );
-
                     const project_selected = self.settings_panel.project_id.items.len > 0 and
                         std.mem.eql(u8, self.settings_panel.project_id.items, project.id);
-                    const project_button_rect = Rect.fromXYWH(
-                        rect.min[0] + pad + project_text_max_w + pad,
+                    const use_rect = Rect.fromXYWH(
+                        rect.min[0] + pad + text_max_w + pad,
                         y - 2.0 * self.ui_scale,
-                        project_button_width,
-                        project_row_height,
+                        button_w,
+                        row_h,
                     );
-                    const project_button_clicked = self.drawButtonWidget(
-                        project_button_rect,
+                    if (self.drawButtonWidget(
+                        use_rect,
                         if (project_selected) "Selected" else "Use",
                         .{ .variant = .secondary, .disabled = project_selected },
-                    );
-                    if (project_button_clicked) {
+                    )) {
                         self.selectProjectInSettings(project.id) catch |err| {
-                            const msg = std.fmt.allocPrint(
-                                self.allocator,
-                                "Project select failed: {s}",
-                                .{@errorName(err)},
-                            ) catch null;
+                            const msg = std.fmt.allocPrint(self.allocator, "Project select failed: {s}", .{@errorName(err)}) catch null;
                             if (msg) |text| {
                                 defer self.allocator.free(text);
                                 self.setWorkspaceError(text);
                             }
                         };
-                        if (self.connection_state == .connected) {
-                            self.refreshWorkspaceData() catch |err| {
-                                const msg = std.fmt.allocPrint(
-                                    self.allocator,
-                                    "Workspace refresh failed: {s}",
-                                    .{@errorName(err)},
-                                ) catch null;
-                                if (msg) |text| {
-                                    defer self.allocator.free(text);
-                                    self.setWorkspaceError(text);
-                                }
-                            };
-                        }
                     }
-                    y += project_row_height;
+                    y += row_h;
                 }
             }
         }
 
         if (self.nodes.items.len > 0) {
             y += 6.0 * self.ui_scale;
-            self.drawLabel(rect.min[0] + pad, y, "Node List:", self.theme.colors.text_primary);
+            self.drawLabel(rect.min[0] + pad, y, "Nodes:", self.theme.colors.text_primary);
             y += 18.0 * self.ui_scale;
-            const max_nodes: usize = @min(self.nodes.items.len, 6);
+            const max_nodes: usize = @min(self.nodes.items.len, 8);
             var idx: usize = 0;
             while (idx < max_nodes) : (idx += 1) {
                 const node = self.nodes.items[idx];
@@ -4531,7 +4517,16 @@ const App = struct {
             }
         }
 
-        // Update scroll bounds based on total content height
+        if (self.mouse_clicked and
+            !project_rect.contains(.{ self.mouse_x, self.mouse_y }) and
+            !project_token_rect.contains(.{ self.mouse_x, self.mouse_y }) and
+            !create_name_rect.contains(.{ self.mouse_x, self.mouse_y }) and
+            !create_vision_rect.contains(.{ self.mouse_x, self.mouse_y }) and
+            !operator_token_rect.contains(.{ self.mouse_x, self.mouse_y }))
+        {
+            self.settings_panel.focused_field = .none;
+        }
+
         const content_bottom_scrolled = y;
         const content_bottom = content_bottom_scrolled + self.settings_panel.scroll_y;
         const total_height = content_bottom - (rect.min[1] + pad);
@@ -4743,8 +4738,8 @@ const App = struct {
         var list_y = listing_rect.min[1] + 6.0;
         const max_rows: usize = @min(self.filesystem_entries.items.len, 14);
         var idx: usize = 0;
-        while (idx < max_rows) : (idx += 1) {
-            const entry = &self.filesystem_entries.items[idx];
+        while (idx < max_rows and idx < self.filesystem_entries.items.len) : (idx += 1) {
+            const entry = self.filesystem_entries.items[idx];
             const row_rect = Rect.fromXYWH(
                 listing_rect.min[0] + 6.0,
                 list_y,
@@ -4758,13 +4753,15 @@ const App = struct {
                 break :blk self.drawButtonWidget(row_rect, text, .{ .variant = .secondary });
             } else false;
             if (clicked) {
-                self.openFilesystemEntry(entry) catch |err| {
+                self.openFilesystemEntry(&entry) catch |err| {
                     const msg = std.fmt.allocPrint(self.allocator, "Filesystem open failed: {s}", .{@errorName(err)}) catch null;
                     if (msg) |text| {
                         defer self.allocator.free(text);
                         self.setFilesystemError(text);
                     }
                 };
+                // Opening a directory can replace filesystem_entries; stop iterating stale indices.
+                break;
             }
 
             if (self.findMountForPath(entry.path)) |mount| {
@@ -7646,6 +7643,44 @@ const App = struct {
         } };
         const panel_id = try manager.openPanel(.ToolOutput, "Debug Stream", panel_data);
         self.debug_panel_id = panel_id;
+        if (manager.workspace.syncDockLayout() catch false) {
+            manager.workspace.markDirty();
+        }
+        manager.focusPanel(panel_id);
+        return panel_id;
+    }
+
+    fn ensureProjectPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
+        if (self.project_panel_id) |panel_id| {
+            if (self.findPanelById(manager, panel_id) != null) {
+                manager.focusPanel(panel_id);
+                return panel_id;
+            }
+            self.project_panel_id = null;
+        }
+
+        for (manager.workspace.panels.items) |*panel| {
+            if (panel.kind == .ToolOutput and std.mem.eql(u8, panel.title, "Projects")) {
+                self.project_panel_id = panel.id;
+                manager.focusPanel(panel.id);
+                return panel.id;
+            }
+        }
+
+        const tool_name = try self.allocator.dupe(u8, "Project Workspace");
+        errdefer self.allocator.free(tool_name);
+        var stdout_buf = try text_buffer.TextBuffer.init(self.allocator, "");
+        errdefer stdout_buf.deinit(self.allocator);
+        var stderr_buf = try text_buffer.TextBuffer.init(self.allocator, "");
+        errdefer stderr_buf.deinit(self.allocator);
+        const panel_data = workspace.PanelData{ .ToolOutput = .{
+            .tool_name = tool_name,
+            .stdout = stdout_buf,
+            .stderr = stderr_buf,
+            .exit_code = 0,
+        } };
+        const panel_id = try manager.openPanel(.ToolOutput, "Projects", panel_data);
+        self.project_panel_id = panel_id;
         if (manager.workspace.syncDockLayout() catch false) {
             manager.workspace.markDirty();
         }
