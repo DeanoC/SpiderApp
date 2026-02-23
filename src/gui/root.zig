@@ -4597,15 +4597,17 @@ const App = struct {
 
         const legacy_prefix = "/spiderweb/projects/";
         if (std.mem.startsWith(u8, trimmed, legacy_prefix)) {
-            const marker = "/workspace";
-            if (std.mem.indexOf(u8, trimmed, marker)) |idx| {
-                const suffix_idx = idx + marker.len;
-                if (suffix_idx < trimmed.len and trimmed[suffix_idx] == '/') {
-                    return std.fmt.allocPrint(self.allocator, "/workspace{s}", .{trimmed[suffix_idx..]});
-                }
+            const after_prefix = trimmed[legacy_prefix.len..];
+            const slash_after_project = std.mem.indexOfScalar(u8, after_prefix, '/') orelse return self.allocator.dupe(u8, "/workspace");
+            const after_project = after_prefix[slash_after_project + 1 ..];
+
+            if (std.mem.eql(u8, after_project, "workspace")) {
                 return self.allocator.dupe(u8, "/workspace");
             }
-            return self.allocator.dupe(u8, "/workspace");
+            if (std.mem.startsWith(u8, after_project, "workspace/")) {
+                return std.fmt.allocPrint(self.allocator, "/workspace/{s}", .{after_project["workspace/".len..]});
+            }
+            return self.allocator.dupe(u8, trimmed);
         }
 
         return self.allocator.dupe(u8, trimmed);
