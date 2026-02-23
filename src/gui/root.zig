@@ -3392,6 +3392,15 @@ const App = struct {
         return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, @errorName(err) }) catch null;
     }
 
+    fn formatControlOpError(self: *App, operation: []const u8, err: anyerror) ?[]u8 {
+        if (err == error.RemoteError) {
+            if (control_plane.lastRemoteError()) |remote| {
+                return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, remote }) catch null;
+            }
+        }
+        return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, @errorName(err) }) catch null;
+    }
+
     fn setWorkspaceError(self: *App, message: []const u8) void {
         if (self.workspace_last_error) |value| {
             self.allocator.free(value);
@@ -3431,12 +3440,41 @@ const App = struct {
         errdefer workspace_types.deinitProjectList(self.allocator, &projects);
         var nodes = try control_plane.listNodes(self.allocator, client, &self.message_counter);
         errdefer workspace_types.deinitNodeList(self.allocator, &nodes);
-        var workspace_status = try control_plane.workspaceStatus(
+        const selected_project_id = self.selectedProjectId();
+        const selected_project_token = if (selected_project_id) |project_id|
+            if (self.settings_panel.project_token.items.len > 0)
+                self.settings_panel.project_token.items
+            else
+                self.config.getProjectToken(project_id)
+        else
+            null;
+
+        var selected_project_warning: ?[]u8 = null;
+        defer if (selected_project_warning) |value| self.allocator.free(value);
+
+        var workspace_status = control_plane.workspaceStatus(
             self.allocator,
             client,
             &self.message_counter,
-            self.selectedProjectId(),
-        );
+            selected_project_id,
+            selected_project_token,
+        ) catch |err| blk: {
+            if (selected_project_id != null and err == error.RemoteError) {
+                if (control_plane.lastRemoteError()) |remote| {
+                    selected_project_warning = std.fmt.allocPrint(self.allocator, "Selected project unavailable: {s}", .{remote}) catch null;
+                } else {
+                    selected_project_warning = std.fmt.allocPrint(self.allocator, "Selected project unavailable: {s}", .{@errorName(err)}) catch null;
+                }
+                break :blk try control_plane.workspaceStatus(
+                    self.allocator,
+                    client,
+                    &self.message_counter,
+                    null,
+                    null,
+                );
+            }
+            return err;
+        };
         errdefer workspace_status.deinit(self.allocator);
 
         workspace_types.deinitProjectList(self.allocator, &self.projects);
@@ -3447,7 +3485,11 @@ const App = struct {
         self.nodes = nodes;
         self.workspace_state = workspace_status;
         self.workspace_last_refresh_ms = std.time.milliTimestamp();
-        self.clearWorkspaceError();
+        if (selected_project_warning) |message| {
+            self.setWorkspaceError(message);
+        } else {
+            self.clearWorkspaceError();
+        }
     }
 
     fn activateSelectedProject(self: *App) !void {
@@ -4531,7 +4573,7 @@ const App = struct {
             },
         )) {
             self.createProjectFromPanel() catch |err| {
-                const msg = std.fmt.allocPrint(self.allocator, "Project create failed: {s}", .{@errorName(err)}) catch null;
+                const msg = self.formatControlOpError("Project create failed", err);
                 if (msg) |text| {
                     defer self.allocator.free(text);
                     self.setWorkspaceError(text);
@@ -4545,7 +4587,7 @@ const App = struct {
             .{ .variant = .secondary, .disabled = self.connection_state != .connected },
         )) {
             self.refreshWorkspaceData() catch |err| {
-                const msg = std.fmt.allocPrint(self.allocator, "Workspace refresh failed: {s}", .{@errorName(err)}) catch null;
+                const msg = self.formatControlOpError("Workspace refresh failed", err);
                 if (msg) |text| {
                     defer self.allocator.free(text);
                     self.setWorkspaceError(text);
@@ -4559,7 +4601,7 @@ const App = struct {
             .{ .variant = .secondary, .disabled = self.connection_state != .connected or self.settings_panel.project_id.items.len == 0 },
         )) {
             self.activateSelectedProject() catch |err| {
-                const msg = std.fmt.allocPrint(self.allocator, "Project activate failed: {s}", .{@errorName(err)}) catch null;
+                const msg = self.formatControlOpError("Project activate failed", err);
                 if (msg) |text| {
                     defer self.allocator.free(text);
                     self.setWorkspaceError(text);
@@ -5893,7 +5935,7 @@ const App = struct {
             std.log.warn("Failed to save config on connect: {s}", .{@errorName(err)});
         };
         self.refreshWorkspaceData() catch |err| {
-            const msg = std.fmt.allocPrint(self.allocator, "Workspace refresh failed: {s}", .{@errorName(err)}) catch null;
+            const msg = self.formatControlOpError("Workspace refresh failed", err);
             if (msg) |text| {
                 defer self.allocator.free(text);
                 self.setWorkspaceError(text);

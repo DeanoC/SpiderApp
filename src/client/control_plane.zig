@@ -251,14 +251,25 @@ pub fn workspaceStatus(
     client: anytype,
     message_counter: *u64,
     project_id: ?[]const u8,
+    project_token: ?[]const u8,
 ) !workspace_types.WorkspaceStatus {
     var payload_req: ?[]u8 = null;
     defer if (payload_req) |value| allocator.free(value);
 
-    if (project_id) |value| {
-        const escaped_project = try unified_v2.jsonEscape(allocator, value);
+    if (project_id) |project| {
+        const escaped_project = try unified_v2.jsonEscape(allocator, project);
         defer allocator.free(escaped_project);
-        payload_req = try std.fmt.allocPrint(allocator, "{{\"project_id\":\"{s}\"}}", .{escaped_project});
+        if (project_token) |token| {
+            const escaped_token = try unified_v2.jsonEscape(allocator, token);
+            defer allocator.free(escaped_token);
+            payload_req = try std.fmt.allocPrint(
+                allocator,
+                "{{\"project_id\":\"{s}\",\"project_token\":\"{s}\"}}",
+                .{ escaped_project, escaped_token },
+            );
+        } else {
+            payload_req = try std.fmt.allocPrint(allocator, "{{\"project_id\":\"{s}\"}}", .{escaped_project});
+        }
     }
 
     const payload_json = try requestControlPayloadJson(

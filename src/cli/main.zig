@@ -760,6 +760,7 @@ fn executeProjectUp(allocator: std.mem.Allocator, options: args.Options, cmd: ar
         client,
         &g_control_request_counter,
         response_project_id,
+        response_token,
     );
     defer status.deinit(allocator);
     try printWorkspaceStatus(stdout, &status, false);
@@ -804,6 +805,13 @@ fn executeProjectDoctor(allocator: std.mem.Allocator, options: args.Options, cmd
             client,
             &g_control_request_counter,
             project_id,
+            if (project_id) |id|
+                if (options.project_token) |token|
+                    token
+                else
+                    cfg.getProjectToken(id)
+            else
+                null,
         );
         defer status.deinit(allocator);
         if (status.mounts.items.len == 0 and status.actual_mounts.items.len == 0) {
@@ -905,6 +913,13 @@ fn executeWorkspaceStatus(allocator: std.mem.Allocator, options: args.Options, c
         client,
         &g_control_request_counter,
         project_id,
+        if (project_id) |id|
+            if (options.project_token) |token|
+                token
+            else
+                cfg.getProjectToken(id)
+        else
+            null,
     );
     defer status.deinit(allocator);
     try printWorkspaceStatus(stdout, &status, options.verbose);
