@@ -19,6 +19,8 @@ pub const Noun = enum {
     chat,
     fs,
     project,
+    node,
+    workspace,
     goal,
     task,
     worker,
@@ -34,7 +36,9 @@ pub const Verb = enum {
     read,
     write,
     stat,
+    tree,
     ls,
+    status,
     history,
     list,
     use,
@@ -49,6 +53,8 @@ pub const Options = struct {
     url: []const u8 = default_server_url,
     url_explicitly_provided: bool = false,
     project: ?[]const u8 = null,
+    project_token: ?[]const u8 = null,
+    operator_token: ?[]const u8 = null,
     interactive: bool = false,
     tui: bool = false,
     verbose: bool = false,
@@ -65,6 +71,12 @@ pub const Options = struct {
         // Free project name
         if (self.project) |p| {
             allocator.free(p);
+        }
+        if (self.project_token) |token| {
+            allocator.free(token);
+        }
+        if (self.operator_token) |token| {
+            allocator.free(token);
         }
 
         // Free command args
@@ -86,6 +98,8 @@ const help_goal = @embedFile("docs/12-goal.md");
 const help_task = @embedFile("docs/13-task.md");
 const help_worker = @embedFile("docs/14-worker.md");
 const help_connection = @embedFile("docs/15-connection.md");
+const help_node = @embedFile("docs/16-node.md");
+const help_workspace = @embedFile("docs/17-workspace.md");
 
 pub fn printHelp() void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
@@ -97,6 +111,8 @@ pub fn printHelpForNoun(noun: Noun) void {
     const content = switch (noun) {
         .chat => help_chat,
         .project => help_project,
+        .node => help_node,
+        .workspace => help_workspace,
         .goal => help_goal,
         .task => help_task,
         .worker => help_worker,
@@ -127,6 +143,8 @@ fn parseNoun(arg: []const u8) ?Noun {
     if (std.mem.eql(u8, arg, "chat")) return .chat;
     if (std.mem.eql(u8, arg, "fs")) return .fs;
     if (std.mem.eql(u8, arg, "project")) return .project;
+    if (std.mem.eql(u8, arg, "node")) return .node;
+    if (std.mem.eql(u8, arg, "workspace")) return .workspace;
     if (std.mem.eql(u8, arg, "goal")) return .goal;
     if (std.mem.eql(u8, arg, "task")) return .task;
     if (std.mem.eql(u8, arg, "worker")) return .worker;
@@ -148,12 +166,20 @@ fn parseVerb(noun: Noun, arg: []const u8) ?Verb {
             if (std.mem.eql(u8, arg, "read")) return .read;
             if (std.mem.eql(u8, arg, "write")) return .write;
             if (std.mem.eql(u8, arg, "stat")) return .stat;
+            if (std.mem.eql(u8, arg, "tree")) return .tree;
         },
         .project => {
             if (std.mem.eql(u8, arg, "list")) return .list;
             if (std.mem.eql(u8, arg, "use")) return .use;
             if (std.mem.eql(u8, arg, "create")) return .create;
             if (std.mem.eql(u8, arg, "info")) return .info;
+        },
+        .node => {
+            if (std.mem.eql(u8, arg, "list")) return .list;
+            if (std.mem.eql(u8, arg, "info")) return .info;
+        },
+        .workspace => {
+            if (std.mem.eql(u8, arg, "status")) return .status;
         },
         .goal => {
             if (std.mem.eql(u8, arg, "list")) return .list;
@@ -224,6 +250,24 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Options {
             }
             // Copy the project string
             options.project = try allocator.dupe(u8, args[i]);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--project-token")) {
+            i += 1;
+            if (i >= args.len) {
+                std.process.argsFree(allocator, args);
+                return error.InvalidArguments;
+            }
+            options.project_token = try allocator.dupe(u8, args[i]);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--operator-token")) {
+            i += 1;
+            if (i >= args.len) {
+                std.process.argsFree(allocator, args);
+                return error.InvalidArguments;
+            }
+            options.operator_token = try allocator.dupe(u8, args[i]);
             continue;
         }
         if (std.mem.eql(u8, arg, "--interactive") or std.mem.eql(u8, arg, "-i")) {

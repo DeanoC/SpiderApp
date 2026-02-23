@@ -2,6 +2,8 @@ const std = @import("std");
 const zui = @import("ziggy-ui");
 const ws_client_mod = @import("websocket_client.zig");
 const config_mod = @import("client-config");
+const control_plane = @import("control_plane");
+const workspace_types = control_plane.workspace_types;
 const panels_bridge = @import("panels_bridge.zig");
 
 const zapp = zui.ui.app;
@@ -82,6 +84,8 @@ const AsyncChatWorkerContext = struct {
     url: []u8,
     token: []u8,
     message: []u8,
+    project_id: ?[]u8 = null,
+    project_token: ?[]u8 = null,
     subscribe_debug: bool = false,
 };
 
@@ -208,16 +212,12 @@ fn fsrpcBootstrapBlocking(
     debug_state: ?*AsyncChatWorkerState,
     subscribe_debug: bool,
 ) !void {
-    const connect_id = try std.fmt.allocPrint(allocator, "ctl-{d}", .{std.time.milliTimestamp()});
-    defer allocator.free(connect_id);
-
-    const connect_payload = try std.fmt.allocPrint(
+    var control_counter: u64 = 0;
+    try control_plane.ensureUnifiedV2Connection(
         allocator,
-        "{{\"channel\":\"control\",\"type\":\"control.connect\",\"id\":\"{s}\"}}",
-        .{connect_id},
+        client,
+        &control_counter,
     );
-    defer allocator.free(connect_payload);
-    try client.send(connect_payload);
 
     if (subscribe_debug) {
         const debug_id = try std.fmt.allocPrint(allocator, "debug-worker-{d}", .{std.time.milliTimestamp()});
@@ -381,6 +381,8 @@ fn runAsyncChatSendWorker(ctx: *AsyncChatWorkerContext) void {
         allocator.free(ctx.url);
         allocator.free(ctx.token);
         allocator.free(ctx.message);
+        if (ctx.project_id) |value| allocator.free(value);
+        if (ctx.project_token) |value| allocator.free(value);
         allocator.destroy(ctx);
     }
 
@@ -410,6 +412,57 @@ fn runAsyncChatSendWorker(ctx: *AsyncChatWorkerContext) void {
         return;
     };
 
+    var control_counter: u64 = 0;
+    control_plane.ensureUnifiedV2Connection(allocator, &client, &control_counter) catch |err| {
+        error_text = std.fmt.allocPrint(allocator, "Send failed: {s}", .{@errorName(err)}) catch null;
+        ctx.state.mutex.lock();
+        defer ctx.state.mutex.unlock();
+        ctx.state.response = null;
+        ctx.state.error_text = error_text;
+        ctx.state.done = true;
+        ctx.state.in_flight = false;
+        return;
+    };
+
+    if (ctx.project_id) |project_id| {
+        if (ctx.project_token) |project_token| {
+            var status = control_plane.activateProject(
+                allocator,
+                &client,
+                &control_counter,
+                project_id,
+                project_token,
+            ) catch |err| {
+                error_text = std.fmt.allocPrint(allocator, "Send failed: {s}", .{@errorName(err)}) catch null;
+                ctx.state.mutex.lock();
+                defer ctx.state.mutex.unlock();
+                ctx.state.response = null;
+                ctx.state.error_text = error_text;
+                ctx.state.done = true;
+                ctx.state.in_flight = false;
+                return;
+            };
+            status.deinit(allocator);
+        } else {
+            var status = control_plane.workspaceStatus(
+                allocator,
+                &client,
+                &control_counter,
+                project_id,
+            ) catch |err| {
+                error_text = std.fmt.allocPrint(allocator, "Send failed: {s}", .{@errorName(err)}) catch null;
+                ctx.state.mutex.lock();
+                defer ctx.state.mutex.unlock();
+                ctx.state.response = null;
+                ctx.state.error_text = error_text;
+                ctx.state.done = true;
+                ctx.state.in_flight = false;
+                return;
+            };
+            status.deinit(allocator);
+        }
+    }
+
     response = sendChatViaFsrpcBlocking(allocator, &client, ctx.message, ctx.state, ctx.subscribe_debug) catch |err| blk: {
         error_text = std.fmt.allocPrint(allocator, "Send failed: {s}", .{@errorName(err)}) catch null;
         break :blk null;
@@ -426,6 +479,8 @@ fn runAsyncChatSendWorker(ctx: *AsyncChatWorkerContext) void {
 const SettingsFocusField = enum {
     none,
     server_url,
+    project_id,
+    project_token,
     default_session,
     ui_theme,
     ui_profile,
@@ -434,6 +489,8 @@ const SettingsFocusField = enum {
 
 const SettingsPanel = struct {
     server_url: std.ArrayList(u8) = .empty,
+    project_id: std.ArrayList(u8) = .empty,
+    project_token: std.ArrayList(u8) = .empty,
     default_session: std.ArrayList(u8) = .empty,
     ui_theme: std.ArrayList(u8) = .empty,
     ui_profile: std.ArrayList(u8) = .empty,
@@ -447,12 +504,16 @@ const SettingsPanel = struct {
     pub fn init(allocator: std.mem.Allocator) SettingsPanel {
         var panel = SettingsPanel{};
         panel.server_url.appendSlice(allocator, "ws://127.0.0.1:18790") catch {};
+        panel.project_id.appendSlice(allocator, "") catch {};
+        panel.project_token.appendSlice(allocator, "") catch {};
         panel.default_session.appendSlice(allocator, "main") catch {};
         return panel;
     }
 
     pub fn deinit(self: *SettingsPanel, allocator: std.mem.Allocator) void {
         self.server_url.deinit(allocator);
+        self.project_id.deinit(allocator);
+        self.project_token.deinit(allocator);
         self.default_session.deinit(allocator);
         self.ui_theme.deinit(allocator);
         self.ui_profile.deinit(allocator);
@@ -642,6 +703,12 @@ const App = struct {
     debug_scrollbar_drag_start_scroll_y: f32 = 0.0,
     ui_commands: zui.ui.render.command_list.CommandList,
 
+    projects: std.ArrayListUnmanaged(workspace_types.ProjectSummary) = .{},
+    nodes: std.ArrayListUnmanaged(workspace_types.NodeInfo) = .{},
+    workspace_state: ?workspace_types.WorkspaceStatus = null,
+    workspace_last_error: ?[]u8 = null,
+    workspace_last_refresh_ms: i64 = 0,
+
     ws_client: ?ws_client_mod.WebSocketClient = null,
     async_chat_worker: AsyncChatWorkerState = .{},
 
@@ -734,6 +801,14 @@ const App = struct {
         var settings_panel = SettingsPanel.init(allocator);
         settings_panel.server_url.clearRetainingCapacity();
         settings_panel.server_url.appendSlice(allocator, config.server_url) catch {};
+        settings_panel.project_id.clearRetainingCapacity();
+        if (config.selectedProject()) |value| {
+            settings_panel.project_id.appendSlice(allocator, value) catch {};
+            if (config.getProjectToken(value)) |project_token| {
+                settings_panel.project_token.clearRetainingCapacity();
+                settings_panel.project_token.appendSlice(allocator, project_token) catch {};
+            }
+        }
         settings_panel.default_session.clearRetainingCapacity();
         if (config.default_session) |value| {
             settings_panel.default_session.appendSlice(allocator, value) catch {};
@@ -828,6 +903,16 @@ const App = struct {
         self.clearSessions();
         self.chat_sessions.deinit(self.allocator);
         self.session_messages.deinit(self.allocator);
+        workspace_types.deinitProjectList(self.allocator, &self.projects);
+        workspace_types.deinitNodeList(self.allocator, &self.nodes);
+        if (self.workspace_state) |*status| {
+            status.deinit(self.allocator);
+            self.workspace_state = null;
+        }
+        if (self.workspace_last_error) |value| {
+            self.allocator.free(value);
+            self.workspace_last_error = null;
+        }
         self.clearDebugEvents();
         self.debug_events.deinit(self.allocator);
         self.debug_folded_blocks.deinit();
@@ -2793,8 +2878,7 @@ const App = struct {
                 }
             },
             .enter, .keypad_enter => {
-                // Check if we're focused on settings URL input
-                if (self.settings_panel.focused_field != .none) {
+                if (self.settings_panel.focused_field == .server_url) {
                     try self.tryConnect(manager);
                 }
             },
@@ -2804,6 +2888,8 @@ const App = struct {
                     if (clip.len > 0) {
                         switch (self.settings_panel.focused_field) {
                             .server_url => try self.settings_panel.server_url.appendSlice(self.allocator, clip),
+                            .project_id => try self.settings_panel.project_id.appendSlice(self.allocator, clip),
+                            .project_token => try self.settings_panel.project_token.appendSlice(self.allocator, clip),
                             .default_session => try self.settings_panel.default_session.appendSlice(self.allocator, clip),
                             .ui_theme => try self.settings_panel.ui_theme.appendSlice(self.allocator, clip),
                             .ui_profile => try self.settings_panel.ui_profile.appendSlice(self.allocator, clip),
@@ -2856,6 +2942,10 @@ const App = struct {
             .back_space => {
                 if (self.settings_panel.focused_field == .server_url and self.settings_panel.server_url.items.len > 0) {
                     _ = self.settings_panel.server_url.pop();
+                } else if (self.settings_panel.focused_field == .project_id and self.settings_panel.project_id.items.len > 0) {
+                    _ = self.settings_panel.project_id.pop();
+                } else if (self.settings_panel.focused_field == .project_token and self.settings_panel.project_token.items.len > 0) {
+                    _ = self.settings_panel.project_token.pop();
                 } else if (self.settings_panel.focused_field == .default_session and self.settings_panel.default_session.items.len > 0) {
                     _ = self.settings_panel.default_session.pop();
                 } else if (self.settings_panel.focused_field == .ui_theme and self.settings_panel.ui_theme.items.len > 0) {
@@ -2869,6 +2959,10 @@ const App = struct {
             .delete => {
                 if (self.settings_panel.focused_field == .server_url and self.settings_panel.server_url.items.len > 0) {
                     _ = self.settings_panel.server_url.pop();
+                } else if (self.settings_panel.focused_field == .project_id and self.settings_panel.project_id.items.len > 0) {
+                    _ = self.settings_panel.project_id.pop();
+                } else if (self.settings_panel.focused_field == .project_token and self.settings_panel.project_token.items.len > 0) {
+                    _ = self.settings_panel.project_token.pop();
                 } else if (self.settings_panel.focused_field == .default_session and self.settings_panel.default_session.items.len > 0) {
                     _ = self.settings_panel.default_session.pop();
                 } else if (self.settings_panel.focused_field == .ui_theme and self.settings_panel.ui_theme.items.len > 0) {
@@ -2948,6 +3042,20 @@ const App = struct {
                     }
                 }
             },
+            .project_id => {
+                for (text) |ch| {
+                    if (ch >= 32 and ch < 127) {
+                        try self.settings_panel.project_id.append(self.allocator, ch);
+                    }
+                }
+            },
+            .project_token => {
+                for (text) |ch| {
+                    if (ch >= 32 and ch < 127) {
+                        try self.settings_panel.project_token.append(self.allocator, ch);
+                    }
+                }
+            },
             .default_session => {
                 for (text) |ch| {
                     if (ch >= 32 and ch < 127) {
@@ -2982,6 +3090,18 @@ const App = struct {
 
     fn syncSettingsToConfig(self: *App) !void {
         try self.config.setServerUrl(self.settings_panel.server_url.items);
+        try self.config.setSelectedProject(
+            if (self.settings_panel.project_id.items.len > 0)
+                self.settings_panel.project_id.items
+            else
+                null,
+        );
+        if (self.settings_panel.project_id.items.len > 0 and self.settings_panel.project_token.items.len > 0) {
+            try self.config.setProjectToken(
+                self.settings_panel.project_id.items,
+                self.settings_panel.project_token.items,
+            );
+        }
         try self.config.setDefaultSession(self.settings_panel.default_session.items);
         self.config.auto_connect_on_launch = self.settings_panel.auto_connect_on_launch;
         try self.config.setTheme(if (self.settings_panel.ui_theme.items.len > 0) self.settings_panel.ui_theme.items else null);
@@ -2991,6 +3111,108 @@ const App = struct {
         try self.config.save();
 
         self.applyThemeFromSettings();
+    }
+
+    fn clearWorkspaceData(self: *App) void {
+        workspace_types.deinitProjectList(self.allocator, &self.projects);
+        workspace_types.deinitNodeList(self.allocator, &self.nodes);
+        if (self.workspace_state) |*status| {
+            status.deinit(self.allocator);
+            self.workspace_state = null;
+        }
+        if (self.workspace_last_error) |value| {
+            self.allocator.free(value);
+            self.workspace_last_error = null;
+        }
+        self.workspace_last_refresh_ms = 0;
+    }
+
+    fn setWorkspaceError(self: *App, message: []const u8) void {
+        if (self.workspace_last_error) |value| {
+            self.allocator.free(value);
+            self.workspace_last_error = null;
+        }
+        self.workspace_last_error = self.allocator.dupe(u8, message) catch null;
+    }
+
+    fn clearWorkspaceError(self: *App) void {
+        if (self.workspace_last_error) |value| {
+            self.allocator.free(value);
+            self.workspace_last_error = null;
+        }
+    }
+
+    fn selectedProjectId(self: *App) ?[]const u8 {
+        if (self.settings_panel.project_id.items.len == 0) return null;
+        return self.settings_panel.project_id.items;
+    }
+
+    fn selectProjectInSettings(self: *App, project_id: []const u8) !void {
+        self.settings_panel.project_id.clearRetainingCapacity();
+        try self.settings_panel.project_id.appendSlice(self.allocator, project_id);
+        self.settings_panel.project_token.clearRetainingCapacity();
+        if (self.config.getProjectToken(project_id)) |token| {
+            try self.settings_panel.project_token.appendSlice(self.allocator, token);
+        }
+        try self.syncSettingsToConfig();
+    }
+
+    fn refreshWorkspaceData(self: *App) !void {
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
+
+        var projects = try control_plane.listProjects(self.allocator, client, &self.message_counter);
+        errdefer workspace_types.deinitProjectList(self.allocator, &projects);
+        var nodes = try control_plane.listNodes(self.allocator, client, &self.message_counter);
+        errdefer workspace_types.deinitNodeList(self.allocator, &nodes);
+        var workspace_status = try control_plane.workspaceStatus(
+            self.allocator,
+            client,
+            &self.message_counter,
+            self.selectedProjectId(),
+        );
+        errdefer workspace_status.deinit(self.allocator);
+
+        workspace_types.deinitProjectList(self.allocator, &self.projects);
+        workspace_types.deinitNodeList(self.allocator, &self.nodes);
+        if (self.workspace_state) |*status| status.deinit(self.allocator);
+
+        self.projects = projects;
+        self.nodes = nodes;
+        self.workspace_state = workspace_status;
+        self.workspace_last_refresh_ms = std.time.milliTimestamp();
+        self.clearWorkspaceError();
+    }
+
+    fn activateSelectedProject(self: *App) !void {
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        const project_id = self.selectedProjectId() orelse return error.MissingField;
+
+        const token = if (self.settings_panel.project_token.items.len > 0)
+            self.settings_panel.project_token.items
+        else if (self.config.getProjectToken(project_id)) |value|
+            value
+        else
+            return error.MissingField;
+
+        var status = try control_plane.activateProject(
+            self.allocator,
+            client,
+            &self.message_counter,
+            project_id,
+            token,
+        );
+        errdefer status.deinit(self.allocator);
+
+        if (self.workspace_state) |*existing| existing.deinit(self.allocator);
+        self.workspace_state = status;
+        self.workspace_last_refresh_ms = std.time.milliTimestamp();
+        self.clearWorkspaceError();
+
+        if (self.settings_panel.project_token.items.len == 0) {
+            try self.settings_panel.project_token.appendSlice(self.allocator, token);
+        }
+        try self.syncSettingsToConfig();
     }
 
     fn applyThemeFromSettings(self: *App) void {
@@ -3591,6 +3813,96 @@ const App = struct {
 
         y += input_height + pad;
 
+        // Project selection
+        self.drawLabel(
+            rect.min[0] + pad,
+            y,
+            "Project ID",
+            self.theme.colors.text_primary,
+        );
+        y += 20.0 * self.ui_scale;
+        const project_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            @max(200, rect_width - pad * 2.0),
+            input_height,
+        );
+        const project_focused = self.drawTextInputWidget(
+            project_rect,
+            self.settings_panel.project_id.items,
+            self.settings_panel.focused_field == .project_id,
+            .{ .placeholder = "proj-1" },
+        );
+        if (project_focused) self.settings_panel.focused_field = .project_id;
+
+        y += input_height + pad * 0.5;
+        self.drawLabel(
+            rect.min[0] + pad,
+            y,
+            "Project Token (for activate)",
+            self.theme.colors.text_primary,
+        );
+        y += 20.0 * self.ui_scale;
+        const project_token_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            @max(200, rect_width - pad * 2.0),
+            input_height,
+        );
+        const project_token_focused = self.drawTextInputWidget(
+            project_token_rect,
+            self.settings_panel.project_token.items,
+            self.settings_panel.focused_field == .project_token,
+            .{ .placeholder = "proj-..." },
+        );
+        if (project_token_focused) self.settings_panel.focused_field = .project_token;
+
+        y += input_height + pad * 0.5;
+        const workspace_refresh_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            @max(180.0, rect_width * 0.45),
+            input_height,
+        );
+        const refresh_workspace_clicked = self.drawButtonWidget(
+            workspace_refresh_rect,
+            "Refresh Workspace",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        );
+        if (refresh_workspace_clicked) {
+            self.refreshWorkspaceData() catch |err| {
+                const msg = std.fmt.allocPrint(self.allocator, "Workspace refresh failed: {s}", .{@errorName(err)}) catch null;
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setWorkspaceError(text);
+                }
+            };
+        }
+
+        const activate_project_rect = Rect.fromXYWH(
+            workspace_refresh_rect.max[0] + pad,
+            y,
+            @max(180.0, rect_width * 0.45),
+            input_height,
+        );
+        const activate_clicked = self.drawButtonWidget(
+            activate_project_rect,
+            "Activate Project",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        );
+        if (activate_clicked) {
+            self.activateSelectedProject() catch |err| {
+                const msg = std.fmt.allocPrint(self.allocator, "Project activate failed: {s}", .{@errorName(err)}) catch null;
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setWorkspaceError(text);
+                }
+            };
+            self.refreshWorkspaceData() catch {};
+        }
+
+        y += input_height + pad;
+
         // Default Session label
         self.drawLabel(
             rect.min[0] + pad,
@@ -3725,6 +4037,8 @@ const App = struct {
         // Handle click outside text fields
         if (self.mouse_clicked and
             !input_rect.contains(.{ self.mouse_x, self.mouse_y }) and
+            !project_rect.contains(.{ self.mouse_x, self.mouse_y }) and
+            !project_token_rect.contains(.{ self.mouse_x, self.mouse_y }) and
             !default_session_rect.contains(.{ self.mouse_x, self.mouse_y }) and
             !ui_theme_rect.contains(.{ self.mouse_x, self.mouse_y }) and
             !ui_profile_rect.contains(.{ self.mouse_x, self.mouse_y }) and
@@ -3812,13 +4126,171 @@ const App = struct {
 
         y += status_height + pad;
 
-        // Tip
-        self.drawLabel(
-            rect.min[0] + pad,
-            y,
-            "Tip: Enter URL, press Connect, then chat.",
-            self.theme.colors.text_secondary,
-        );
+        // Workspace summary
+        if (self.workspace_last_error) |err_text| {
+            self.drawLabel(
+                rect.min[0] + pad,
+                y,
+                err_text,
+                zcolors.rgba(220, 80, 80, 255),
+            );
+            y += 20.0 * self.ui_scale;
+        }
+
+        const selected_project_text = if (self.settings_panel.project_id.items.len > 0)
+            self.settings_panel.project_id.items
+        else
+            "(none)";
+        const selected_project_line = std.fmt.allocPrint(
+            self.allocator,
+            "Selected project: {s}",
+            .{selected_project_text},
+        ) catch null;
+        if (selected_project_line) |line| {
+            defer self.allocator.free(line);
+            self.drawLabel(rect.min[0] + pad, y, line, self.theme.colors.text_secondary);
+            y += 18.0 * self.ui_scale;
+        }
+
+        if (self.workspace_state) |*status| {
+            const root_text = status.workspace_root orelse "(none)";
+            const workspace_line = std.fmt.allocPrint(
+                self.allocator,
+                "Workspace root: {s} | mounts: {d}",
+                .{ root_text, status.mounts.items.len },
+            ) catch null;
+            if (workspace_line) |line| {
+                defer self.allocator.free(line);
+                self.drawLabel(rect.min[0] + pad, y, line, self.theme.colors.text_secondary);
+                y += 18.0 * self.ui_scale;
+            }
+        }
+
+        const projects_line = std.fmt.allocPrint(
+            self.allocator,
+            "Projects: {d} | Nodes: {d}",
+            .{ self.projects.items.len, self.nodes.items.len },
+        ) catch null;
+        if (projects_line) |line| {
+            defer self.allocator.free(line);
+            self.drawLabel(rect.min[0] + pad, y, line, self.theme.colors.text_secondary);
+            y += 18.0 * self.ui_scale;
+        }
+
+        if (self.workspace_state) |*status| {
+            if (status.mounts.items.len > 0) {
+                self.drawLabel(rect.min[0] + pad, y, "Mounted exports:", self.theme.colors.text_primary);
+                y += 18.0 * self.ui_scale;
+                const max_mounts: usize = @min(status.mounts.items.len, 8);
+                var mount_idx: usize = 0;
+                while (mount_idx < max_mounts) : (mount_idx += 1) {
+                    const mount = status.mounts.items[mount_idx];
+                    const line = std.fmt.allocPrint(
+                        self.allocator,
+                        "  - {s} <= {s}:{s}",
+                        .{ mount.mount_path, mount.node_id, mount.export_name },
+                    ) catch null;
+                    if (line) |value| {
+                        defer self.allocator.free(value);
+                        self.drawLabel(rect.min[0] + pad, y, value, self.theme.colors.text_secondary);
+                        y += 16.0 * self.ui_scale;
+                    }
+                }
+            }
+        }
+
+        if (self.projects.items.len > 0) {
+            self.drawLabel(rect.min[0] + pad, y, "Project List:", self.theme.colors.text_primary);
+            y += 18.0 * self.ui_scale;
+            const max_projects: usize = @min(self.projects.items.len, 6);
+            var idx: usize = 0;
+            while (idx < max_projects) : (idx += 1) {
+                const project = self.projects.items[idx];
+                const line = std.fmt.allocPrint(
+                    self.allocator,
+                    "{s} [{s}] mounts={d}",
+                    .{ project.id, project.status, project.mount_count },
+                ) catch null;
+                if (line) |value| {
+                    defer self.allocator.free(value);
+                    const project_row_height: f32 = 20.0 * self.ui_scale;
+                    const project_button_width: f32 = 84.0 * self.ui_scale;
+                    const project_text_max_w = @max(
+                        120.0,
+                        rect_width - (pad * 2.0) - project_button_width - pad,
+                    );
+                    self.drawTextTrimmed(
+                        rect.min[0] + pad,
+                        y,
+                        project_text_max_w,
+                        value,
+                        self.theme.colors.text_secondary,
+                    );
+
+                    const project_selected = self.settings_panel.project_id.items.len > 0 and
+                        std.mem.eql(u8, self.settings_panel.project_id.items, project.id);
+                    const project_button_rect = Rect.fromXYWH(
+                        rect.min[0] + pad + project_text_max_w + pad,
+                        y - 2.0 * self.ui_scale,
+                        project_button_width,
+                        project_row_height,
+                    );
+                    const project_button_clicked = self.drawButtonWidget(
+                        project_button_rect,
+                        if (project_selected) "Selected" else "Use",
+                        .{ .variant = .secondary, .disabled = project_selected },
+                    );
+                    if (project_button_clicked) {
+                        self.selectProjectInSettings(project.id) catch |err| {
+                            const msg = std.fmt.allocPrint(
+                                self.allocator,
+                                "Project select failed: {s}",
+                                .{@errorName(err)},
+                            ) catch null;
+                            if (msg) |text| {
+                                defer self.allocator.free(text);
+                                self.setWorkspaceError(text);
+                            }
+                        };
+                        if (self.connection_state == .connected) {
+                            self.refreshWorkspaceData() catch |err| {
+                                const msg = std.fmt.allocPrint(
+                                    self.allocator,
+                                    "Workspace refresh failed: {s}",
+                                    .{@errorName(err)},
+                                ) catch null;
+                                if (msg) |text| {
+                                    defer self.allocator.free(text);
+                                    self.setWorkspaceError(text);
+                                }
+                            };
+                        }
+                    }
+                    y += project_row_height;
+                }
+            }
+        }
+
+        if (self.nodes.items.len > 0) {
+            y += 6.0 * self.ui_scale;
+            self.drawLabel(rect.min[0] + pad, y, "Node List:", self.theme.colors.text_primary);
+            y += 18.0 * self.ui_scale;
+            const max_nodes: usize = @min(self.nodes.items.len, 6);
+            var idx: usize = 0;
+            while (idx < max_nodes) : (idx += 1) {
+                const node = self.nodes.items[idx];
+                const line = std.fmt.allocPrint(
+                    self.allocator,
+                    "  - {s} ({s})",
+                    .{ node.node_id, node.node_name },
+                ) catch null;
+                if (line) |value| {
+                    defer self.allocator.free(value);
+                    self.drawLabel(rect.min[0] + pad, y, value, self.theme.colors.text_secondary);
+                    y += 16.0 * self.ui_scale;
+                }
+            }
+        }
 
         // Update scroll bounds based on total content height
         const content_bottom_scrolled = y;
@@ -4615,21 +5087,10 @@ const App = struct {
         };
 
         if (self.ws_client) |*client| {
-            const connect_id = try self.nextMessageId("connect");
-            defer self.allocator.free(connect_id);
-            const connect_payload = protocol_messages.buildConnect(self.allocator, connect_id) catch |err| {
+            control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter) catch |err| {
                 client.deinit();
                 self.ws_client = null;
-                const msg = try std.fmt.allocPrint(self.allocator, "Connect envelope failed: {s}", .{@errorName(err)});
-                defer self.allocator.free(msg);
-                self.setConnectionState(.error_state, msg);
-                return;
-            };
-            defer self.allocator.free(connect_payload);
-            client.send(connect_payload) catch |err| {
-                client.deinit();
-                self.ws_client = null;
-                const msg = try std.fmt.allocPrint(self.allocator, "Connect envelope send failed: {s}", .{@errorName(err)});
+                const msg = try std.fmt.allocPrint(self.allocator, "Handshake failed: {s}", .{@errorName(err)});
                 defer self.allocator.free(msg);
                 self.setConnectionState(.error_state, msg);
                 return;
@@ -4646,6 +5107,13 @@ const App = struct {
         }
         self.syncSettingsToConfig() catch |err| {
             std.log.warn("Failed to save config on connect: {s}", .{@errorName(err)});
+        };
+        self.refreshWorkspaceData() catch |err| {
+            const msg = std.fmt.allocPrint(self.allocator, "Workspace refresh failed: {s}", .{@errorName(err)}) catch null;
+            if (msg) |text| {
+                defer self.allocator.free(text);
+                self.setWorkspaceError(text);
+            }
         };
 
         self.clearSessions();
@@ -4691,6 +5159,7 @@ const App = struct {
         self.debug_stream_enabled = false;
         self.debug_stream_pending = false;
         self.clearPendingDebugRequest();
+        self.clearWorkspaceData();
     }
 
     fn drainAsyncChatWorker(self: *App) void {
@@ -4744,6 +5213,24 @@ const App = struct {
         errdefer page_allocator.free(token);
         const message = try page_allocator.dupe(u8, text);
         errdefer page_allocator.free(message);
+        const worker_project_id = if (self.settings_panel.project_id.items.len > 0)
+            try page_allocator.dupe(u8, self.settings_panel.project_id.items)
+        else
+            null;
+        errdefer if (worker_project_id) |value| page_allocator.free(value);
+        var token_source: ?[]const u8 = null;
+        if (worker_project_id != null) {
+            if (self.settings_panel.project_token.items.len > 0) {
+                token_source = self.settings_panel.project_token.items;
+            } else {
+                token_source = self.config.getProjectToken(worker_project_id.?);
+            }
+        }
+        const worker_project_token = if (token_source) |value|
+            try page_allocator.dupe(u8, value)
+        else
+            null;
+        errdefer if (worker_project_token) |value| page_allocator.free(value);
         const context = try page_allocator.create(AsyncChatWorkerContext);
         errdefer page_allocator.destroy(context);
 
@@ -4772,6 +5259,8 @@ const App = struct {
             .url = url,
             .token = token,
             .message = message,
+            .project_id = worker_project_id,
+            .project_token = worker_project_token,
             .subscribe_debug = self.debug_stream_enabled or self.debug_stream_pending,
         };
 
@@ -5001,16 +5490,11 @@ const App = struct {
     }
 
     fn fsrpcBootstrapGui(self: *App, client: *ws_client_mod.WebSocketClient) !void {
-        const connect_id = try self.nextMessageId("ctl");
-        defer self.allocator.free(connect_id);
-
-        const connect_payload = try std.fmt.allocPrint(
+        try control_plane.ensureUnifiedV2Connection(
             self.allocator,
-            "{{\"channel\":\"control\",\"type\":\"control.connect\",\"id\":\"{s}\"}}",
-            .{connect_id},
+            client,
+            &self.message_counter,
         );
-        defer self.allocator.free(connect_payload);
-        try client.send(connect_payload);
 
         const version_tag = self.nextFsrpcTag();
         const version_req = try std.fmt.allocPrint(

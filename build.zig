@@ -70,6 +70,11 @@ fn addGuiArtifact(
         .target = target,
         .optimize = optimize,
     });
+    const control_plane_module = b.createModule(.{
+        .root_source_file = b.path("src/client/control_plane.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     const gui_module = b.createModule(.{
         .root_source_file = b.path("src/gui/root.zig"),
@@ -79,6 +84,7 @@ fn addGuiArtifact(
     gui_module.addImport("websocket", websocket.module("websocket"));
     gui_module.addImport("ziggy-ui", ziggy_ui_module);
     gui_module.addImport("client-config", client_config_module);
+    gui_module.addImport("control_plane", control_plane_module);
     gui_module.addIncludePath(sdl3.path("include"));
     gui_module.addIncludePath(ziggy_ui_src);
 
@@ -333,6 +339,18 @@ pub fn build(b: *std.Build) void {
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
+
+    const control_plane_test_module = b.createModule(.{
+        .root_source_file = b.path("src/client/control_plane.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const control_plane_tests = b.addTest(.{
+        .root_module = control_plane_test_module,
+        .name = "control_plane_tests",
+    });
+    const run_control_plane_tests = b.addRunArtifact(control_plane_tests);
+    test_step.dependOn(&run_control_plane_tests.step);
 
     // ---------------------------------------------------------------------
     // TUI Tests

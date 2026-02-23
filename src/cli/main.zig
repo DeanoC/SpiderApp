@@ -2,12 +2,17 @@ const std = @import("std");
 const args = @import("args.zig");
 const logger = @import("ziggy-core").utils.logger;
 const WebSocketClient = @import("../client/websocket.zig").WebSocketClient;
+const Config = @import("../client/config.zig").Config;
+const control_plane = @import("../client/control_plane.zig");
+const workspace_types = @import("../client/workspace_types.zig");
 const unified = @import("ziggy-spider-protocol").unified;
 
 // Main CLI entry point for ZiggyStarSpider
 
 var g_client: ?WebSocketClient = null;
 var g_connected: bool = false;
+var g_control_ready: bool = false;
+var g_control_request_counter: u64 = 0;
 var g_fsrpc_tag: u32 = 1;
 var g_fsrpc_fid: u32 = 2;
 const fsrpc_default_timeout_ms: i64 = 15_000;
@@ -83,6 +88,7 @@ fn getOrCreateClient(allocator: std.mem.Allocator, url: []const u8) !*WebSocketC
             return err;
         };
         g_connected = true;
+        g_control_ready = false;
     }
 
     return &g_client.?;
@@ -94,6 +100,13 @@ fn cleanupGlobalClient() void {
     }
     g_client = null;
     g_connected = false;
+    g_control_ready = false;
+}
+
+fn ensureUnifiedV2Control(allocator: std.mem.Allocator, client: *WebSocketClient) !void {
+    if (g_control_ready) return;
+    try control_plane.ensureUnifiedV2Connection(allocator, client, &g_control_request_counter);
+    g_control_ready = true;
 }
 
 fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
@@ -118,6 +131,7 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
                 .read => try executeFsRead(allocator, options, cmd),
                 .write => try executeFsWrite(allocator, options, cmd),
                 .stat => try executeFsStat(allocator, options, cmd),
+                .tree => try executeFsTree(allocator, options, cmd),
                 else => {
                     logger.err("Unknown fs verb", .{});
                     return error.InvalidArguments;
@@ -126,28 +140,31 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
         },
         .project => {
             switch (cmd.verb) {
-                .list => {
-                    try stdout.print("Project list not yet implemented\n", .{});
-                },
-                .use => {
-                    if (cmd.args.len == 0) {
-                        logger.err("project use requires a project name", .{});
-                        return error.InvalidArguments;
-                    }
-                    try stdout.print("Would switch to project: {s}\n", .{cmd.args[0]});
-                },
-                .create => {
-                    if (cmd.args.len == 0) {
-                        logger.err("project create requires a name", .{});
-                        return error.InvalidArguments;
-                    }
-                    try stdout.print("Would create project: {s}\n", .{cmd.args[0]});
-                },
-                .info => {
-                    try stdout.print("Project info not yet implemented\n", .{});
-                },
+                .list => try executeProjectList(allocator, options, cmd),
+                .use => try executeProjectUse(allocator, options, cmd),
+                .create => try executeProjectCreate(allocator, options, cmd),
+                .info => try executeProjectInfo(allocator, options, cmd),
                 else => {
                     logger.err("Unknown project verb", .{});
+                    return error.InvalidArguments;
+                },
+            }
+        },
+        .node => {
+            switch (cmd.verb) {
+                .list => try executeNodeList(allocator, options, cmd),
+                .info => try executeNodeInfo(allocator, options, cmd),
+                else => {
+                    logger.err("Unknown node verb", .{});
+                    return error.InvalidArguments;
+                },
+            }
+        },
+        .workspace => {
+            switch (cmd.verb) {
+                .status => try executeWorkspaceStatus(allocator, options, cmd),
+                else => {
+                    logger.err("Unknown workspace verb", .{});
                     return error.InvalidArguments;
                 },
             }
@@ -222,7 +239,7 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
             }
 
             const client = try getOrCreateClient(allocator, options.url);
-            _ = client;
+            try ensureUnifiedV2Control(allocator, client);
             try stdout.print("Connected to {s}\n", .{options.url});
         },
         .disconnect => {
@@ -298,6 +315,333 @@ fn nextFsrpcFid() u32 {
     return fid;
 }
 
+fn loadCliConfig(allocator: std.mem.Allocator) !Config {
+    return Config.load(allocator) catch try Config.init(allocator);
+}
+
+fn resolveProjectSelection(options: args.Options, cfg: *const Config) ?[]const u8 {
+    if (options.project) |project_id| return project_id;
+    return cfg.selectedProject();
+}
+
+fn printWorkspaceStatus(stdout: anytype, status: *const workspace_types.WorkspaceStatus) !void {
+    try stdout.print("Agent: {s}\n", .{status.agent_id});
+    if (status.project_id) |project_id| {
+        try stdout.print("Project: {s}\n", .{project_id});
+    } else {
+        try stdout.print("Project: (none)\n", .{});
+    }
+    if (status.workspace_root) |workspace_root| {
+        try stdout.print("Workspace root: {s}\n", .{workspace_root});
+    } else {
+        try stdout.print("Workspace root: (none)\n", .{});
+    }
+    try stdout.print("Mounts: {d}\n", .{status.mounts.items.len});
+    for (status.mounts.items) |mount| {
+        try stdout.print(
+            "  - {s} <= {s}:{s}",
+            .{ mount.mount_path, mount.node_id, mount.export_name },
+        );
+        if (mount.node_name) |name| {
+            try stdout.print(" ({s})", .{name});
+        }
+        if (mount.fs_url) |url| {
+            try stdout.print(" [{s}]", .{url});
+        }
+        try stdout.print("\n", .{});
+    }
+}
+
+fn maybeApplyProjectContext(
+    allocator: std.mem.Allocator,
+    options: args.Options,
+    client: *WebSocketClient,
+) !void {
+    var cfg = try loadCliConfig(allocator);
+    defer cfg.deinit();
+
+    const project_id = resolveProjectSelection(options, &cfg) orelse return;
+    try ensureUnifiedV2Control(allocator, client);
+
+    const token = if (options.project_token) |value| value else cfg.getProjectToken(project_id);
+    if (token) |project_token| {
+        var activated = try control_plane.activateProject(
+            allocator,
+            client,
+            &g_control_request_counter,
+            project_id,
+            project_token,
+        );
+        defer activated.deinit(allocator);
+        logger.info(
+            "Project context active: {s} ({d} mount(s))",
+            .{ project_id, activated.mounts.items.len },
+        );
+        return;
+    }
+
+    var status = try control_plane.workspaceStatus(
+        allocator,
+        client,
+        &g_control_request_counter,
+        project_id,
+    );
+    defer status.deinit(allocator);
+    logger.info(
+        "Project selected without token: {s} ({d} mount(s))",
+        .{ project_id, status.mounts.items.len },
+    );
+}
+
+fn executeProjectList(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    _ = cmd;
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options.url);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var cfg = try loadCliConfig(allocator);
+    defer cfg.deinit();
+    const selected_project = resolveProjectSelection(options, &cfg);
+
+    var projects = try control_plane.listProjects(allocator, client, &g_control_request_counter);
+    defer workspace_types.deinitProjectList(allocator, &projects);
+
+    if (projects.items.len == 0) {
+        try stdout.print("(no projects)\n", .{});
+        return;
+    }
+
+    try stdout.print("Projects:\n", .{});
+    for (projects.items) |project| {
+        const marker = if (selected_project != null and std.mem.eql(u8, selected_project.?, project.id)) "*" else " ";
+        try stdout.print(
+            "{s} {s}  [{s}]  mounts={d}  name={s}\n",
+            .{ marker, project.id, project.status, project.mount_count, project.name },
+        );
+    }
+}
+
+fn executeProjectInfo(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len == 0) {
+        logger.err("project info requires a project ID", .{});
+        return error.InvalidArguments;
+    }
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options.url);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var detail = try control_plane.getProject(allocator, client, &g_control_request_counter, cmd.args[0]);
+    defer detail.deinit(allocator);
+
+    try stdout.print("Project {s}\n", .{detail.id});
+    try stdout.print("  Name: {s}\n", .{detail.name});
+    try stdout.print("  Vision: {s}\n", .{detail.vision});
+    try stdout.print("  Status: {s}\n", .{detail.status});
+    try stdout.print("  Created: {d}\n", .{detail.created_at_ms});
+    try stdout.print("  Updated: {d}\n", .{detail.updated_at_ms});
+    if (detail.project_token) |token| {
+        try stdout.print("  Project token: {s}\n", .{token});
+    }
+    try stdout.print("  Mounts ({d}):\n", .{detail.mounts.items.len});
+    for (detail.mounts.items) |mount| {
+        try stdout.print("    - {s} <= {s}:{s}\n", .{ mount.mount_path, mount.node_id, mount.export_name });
+    }
+}
+
+fn resolveOperatorToken(options: args.Options, cfg: *const Config) ?[]const u8 {
+    if (options.operator_token) |value| {
+        if (value.len > 0) return value;
+    }
+    if (cfg.auth_token.len > 0) return cfg.auth_token;
+    if (cfg.token.len > 0) return cfg.token;
+    return null;
+}
+
+fn executeProjectCreate(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len == 0) {
+        logger.err("project create requires a name", .{});
+        return error.InvalidArguments;
+    }
+
+    const name = cmd.args[0];
+    const vision = if (cmd.args.len > 1)
+        try std.mem.join(allocator, " ", cmd.args[1..])
+    else
+        null;
+    defer if (vision) |value| allocator.free(value);
+
+    var cfg = try loadCliConfig(allocator);
+    defer cfg.deinit();
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options.url);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var created = try control_plane.createProject(
+        allocator,
+        client,
+        &g_control_request_counter,
+        name,
+        vision,
+        resolveOperatorToken(options, &cfg),
+    );
+    defer created.deinit(allocator);
+
+    try cfg.setSelectedProject(created.id);
+    if (created.project_token) |token| {
+        try cfg.setProjectToken(created.id, token);
+    }
+    try cfg.save();
+
+    try stdout.print("Created project {s}\n", .{created.id});
+    try stdout.print("  Name: {s}\n", .{created.name});
+    try stdout.print("  Vision: {s}\n", .{created.vision});
+    try stdout.print("  Status: {s}\n", .{created.status});
+    try stdout.print("  Created: {d}\n", .{created.created_at_ms});
+    if (created.project_token) |token| {
+        try stdout.print("  Project token: {s}\n", .{token});
+    }
+    try stdout.print("  Saved as selected project in local config\n", .{});
+
+    if (created.project_token) |token| {
+        var status = control_plane.activateProject(
+            allocator,
+            client,
+            &g_control_request_counter,
+            created.id,
+            token,
+        ) catch |err| {
+            logger.warn("project created but activation failed: {s}", .{@errorName(err)});
+            return;
+        };
+        defer status.deinit(allocator);
+        if (status.workspace_root) |workspace_root| {
+            try stdout.print("  Workspace root: {s}\n", .{workspace_root});
+        }
+    } else {
+        logger.warn("project created without project token in response", .{});
+    }
+}
+
+fn executeProjectUse(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len == 0) {
+        logger.err("project use requires a project ID", .{});
+        return error.InvalidArguments;
+    }
+
+    const project_id = cmd.args[0];
+    const cli_token = if (options.project_token) |token|
+        token
+    else if (cmd.args.len > 1)
+        cmd.args[1]
+    else
+        null;
+
+    var cfg = try loadCliConfig(allocator);
+    defer cfg.deinit();
+    if (cli_token) |token| {
+        try cfg.setProjectToken(project_id, token);
+    }
+    try cfg.setSelectedProject(project_id);
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options.url);
+    try ensureUnifiedV2Control(allocator, client);
+
+    const effective_token = if (cli_token) |token| token else cfg.getProjectToken(project_id);
+    if (effective_token) |token| {
+        var status = try control_plane.activateProject(
+            allocator,
+            client,
+            &g_control_request_counter,
+            project_id,
+            token,
+        );
+        defer status.deinit(allocator);
+        try stdout.print("Selected and activated project: {s}\n", .{project_id});
+        if (status.workspace_root) |workspace_root| {
+            try stdout.print("Workspace root: {s}\n", .{workspace_root});
+        }
+    } else {
+        var status = try control_plane.workspaceStatus(
+            allocator,
+            client,
+            &g_control_request_counter,
+            project_id,
+        );
+        defer status.deinit(allocator);
+        try stdout.print("Selected project: {s}\n", .{project_id});
+        try stdout.print("Activation skipped (no project token configured)\n", .{});
+    }
+
+    try cfg.save();
+}
+
+fn executeNodeList(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    _ = cmd;
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options.url);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var nodes = try control_plane.listNodes(allocator, client, &g_control_request_counter);
+    defer workspace_types.deinitNodeList(allocator, &nodes);
+    if (nodes.items.len == 0) {
+        try stdout.print("(no nodes)\n", .{});
+        return;
+    }
+
+    try stdout.print("Nodes:\n", .{});
+    for (nodes.items) |node| {
+        try stdout.print(
+            "  - {s} ({s})  fs={s}  lease_expires_at_ms={d}\n",
+            .{ node.node_id, node.node_name, node.fs_url, node.lease_expires_at_ms },
+        );
+    }
+}
+
+fn executeNodeInfo(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len == 0) {
+        logger.err("node info requires a node ID", .{});
+        return error.InvalidArguments;
+    }
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options.url);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var node = try control_plane.getNode(allocator, client, &g_control_request_counter, cmd.args[0]);
+    defer node.deinit(allocator);
+    try stdout.print("Node {s}\n", .{node.node_id});
+    try stdout.print("  Name: {s}\n", .{node.node_name});
+    try stdout.print("  FS URL: {s}\n", .{node.fs_url});
+    try stdout.print("  Joined: {d}\n", .{node.joined_at_ms});
+    try stdout.print("  Last seen: {d}\n", .{node.last_seen_ms});
+    try stdout.print("  Lease expires: {d}\n", .{node.lease_expires_at_ms});
+}
+
+fn executeWorkspaceStatus(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options.url);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var cfg = try loadCliConfig(allocator);
+    defer cfg.deinit();
+    const project_id = if (cmd.args.len > 0)
+        cmd.args[0]
+    else
+        resolveProjectSelection(options, &cfg);
+
+    var status = try control_plane.workspaceStatus(
+        allocator,
+        client,
+        &g_control_request_counter,
+        project_id,
+    );
+    defer status.deinit(allocator);
+    try printWorkspaceStatus(stdout, &status);
+}
+
 fn executeChatSend(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     if (cmd.args.len == 0) {
         logger.err("chat send requires a message", .{});
@@ -309,6 +653,7 @@ fn executeChatSend(allocator: std.mem.Allocator, options: args.Options, cmd: arg
     defer allocator.free(message);
 
     const client = try getOrCreateClient(allocator, options.url);
+    try maybeApplyProjectContext(allocator, options, client);
     logger.info("Negotiating FS-RPC session...", .{});
     try fsrpcBootstrap(allocator, client);
 
@@ -346,6 +691,7 @@ fn executeChatSend(allocator: std.mem.Allocator, options: args.Options, cmd: arg
 fn executeFsLs(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const client = try getOrCreateClient(allocator, options.url);
+    try maybeApplyProjectContext(allocator, options, client);
     try fsrpcBootstrap(allocator, client);
 
     const path = if (cmd.args.len > 0) cmd.args[0] else "/";
@@ -371,6 +717,7 @@ fn executeFsRead(allocator: std.mem.Allocator, options: args.Options, cmd: args.
 
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const client = try getOrCreateClient(allocator, options.url);
+    try maybeApplyProjectContext(allocator, options, client);
     try fsrpcBootstrap(allocator, client);
 
     const fid = try fsrpcWalkPath(allocator, client, cmd.args[0]);
@@ -390,6 +737,7 @@ fn executeFsWrite(allocator: std.mem.Allocator, options: args.Options, cmd: args
 
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const client = try getOrCreateClient(allocator, options.url);
+    try maybeApplyProjectContext(allocator, options, client);
     try fsrpcBootstrap(allocator, client);
 
     const fid = try fsrpcWalkPath(allocator, client, cmd.args[0]);
@@ -412,6 +760,7 @@ fn executeFsStat(allocator: std.mem.Allocator, options: args.Options, cmd: args.
 
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const client = try getOrCreateClient(allocator, options.url);
+    try maybeApplyProjectContext(allocator, options, client);
     try fsrpcBootstrap(allocator, client);
 
     const fid = try fsrpcWalkPath(allocator, client, cmd.args[0]);
@@ -422,22 +771,14 @@ fn executeFsStat(allocator: std.mem.Allocator, options: args.Options, cmd: args.
     try stdout.print("{s}\n", .{stat_json});
 }
 
-fn fsrpcBootstrap(allocator: std.mem.Allocator, client: *WebSocketClient) !void {
-    const connect_id = try std.fmt.allocPrint(allocator, "ctl-{d}", .{std.time.milliTimestamp()});
-    defer allocator.free(connect_id);
+fn executeFsTree(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    // Runtime FS currently exposes textual directory materialization via read().
+    // Reuse ls behavior for now.
+    try executeFsLs(allocator, options, cmd);
+}
 
-    const connect_payload = try std.fmt.allocPrint(
-        allocator,
-        "{{\"channel\":\"control\",\"type\":\"control.connect\",\"id\":\"{s}\"}}",
-        .{connect_id},
-    );
-    defer allocator.free(connect_payload);
-    client.send(connect_payload) catch |err| {
-        if (err == error.BrokenPipe or err == error.ConnectionResetByPeer or err == error.EndOfStream or err == error.Closed) {
-            logger.err("Server closed connection before control handshake", .{});
-        }
-        return err;
-    };
+fn fsrpcBootstrap(allocator: std.mem.Allocator, client: *WebSocketClient) !void {
+    try ensureUnifiedV2Control(allocator, client);
 
     const version_tag = nextFsrpcTag();
     const version_req = try std.fmt.allocPrint(
