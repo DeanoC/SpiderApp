@@ -3392,10 +3392,35 @@ const App = struct {
         return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, @errorName(err) }) catch null;
     }
 
+    fn controlAuthHintForRemote(self: *App, remote: []const u8) ?[]u8 {
+        if (std.mem.indexOf(u8, remote, "project_auth_failed") != null) {
+            return self.allocator.dupe(
+                u8,
+                "Set Project Token in Project panel (token is returned when project is created/project_up).",
+            ) catch null;
+        }
+        if (std.mem.indexOf(u8, remote, "project_assignment_forbidden") != null) {
+            return self.allocator.dupe(
+                u8,
+                "This agent is not allowed on that project (Spider Web is primary-agent only).",
+            ) catch null;
+        }
+        return null;
+    }
+
+    fn formatControlRemoteMessage(self: *App, operation: []const u8, remote: []const u8) ?[]u8 {
+        const hint = self.controlAuthHintForRemote(remote);
+        defer if (hint) |value| self.allocator.free(value);
+        if (hint) |value| {
+            return std.fmt.allocPrint(self.allocator, "{s}: {s} {s}", .{ operation, remote, value }) catch null;
+        }
+        return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, remote }) catch null;
+    }
+
     fn formatControlOpError(self: *App, operation: []const u8, err: anyerror) ?[]u8 {
         if (err == error.RemoteError) {
             if (control_plane.lastRemoteError()) |remote| {
-                return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, remote }) catch null;
+                return self.formatControlRemoteMessage(operation, remote);
             }
         }
         return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, @errorName(err) }) catch null;
@@ -3461,7 +3486,7 @@ const App = struct {
         ) catch |err| blk: {
             if (selected_project_id != null and err == error.RemoteError) {
                 if (control_plane.lastRemoteError()) |remote| {
-                    selected_project_warning = std.fmt.allocPrint(self.allocator, "Selected project unavailable: {s}", .{remote}) catch null;
+                    selected_project_warning = self.formatControlRemoteMessage("Selected project unavailable", remote);
                 } else {
                     selected_project_warning = std.fmt.allocPrint(self.allocator, "Selected project unavailable: {s}", .{@errorName(err)}) catch null;
                 }
@@ -4490,7 +4515,7 @@ const App = struct {
         }
 
         y += pad * 0.5;
-        self.drawLabel(rect.min[0] + pad, y, "Project Token", self.theme.colors.text_primary);
+        self.drawLabel(rect.min[0] + pad, y, "Project Token (required unless primary agent)", self.theme.colors.text_primary);
         y += 20.0 * self.ui_scale;
         const project_token_rect = Rect.fromXYWH(
             rect.min[0] + pad,
