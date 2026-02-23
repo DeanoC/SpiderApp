@@ -32,3 +32,13 @@ ziggystarspider chat history --limit 20
 **Notes:**
 - History is maintained for the current chat session
 - Use `/new` in interactive mode to start a fresh chat (saves current to memory)
+
+## chat resume [job_id]
+
+Inspect queued/running/done chat jobs and resume by job id.
+
+**Examples:**
+```bash
+ziggystarspider chat resume
+ziggystarspider chat resume job-12
+```

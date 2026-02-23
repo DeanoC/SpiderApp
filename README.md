@@ -1,29 +1,27 @@
 # ZiggyStarSpider
 
-> Native client for ZiggySpiderweb - a project-oriented AI assistant with pro-active agency.
+Native CLI + GUI client for ZiggySpiderweb unified-v2 control and FS-RPC.
 
-## What This Is
+## Overview
 
-ZiggyStarSpider (ZSS) is the native client for [ZiggySpiderweb](https://github.com/DeanoC/ZiggySpiderweb) - an AI assistant runtime built around:
+ZiggyStarSpider exposes one project-oriented view of a distributed Spiderweb workspace:
 
-- **Project-oriented work** - agents work on goals, not just chat
-- **Pro-active agency** - PM agent plans, spawns workers, reports progress
-- **Soft workflows** - AI-driven execution, not rigid pipelines
-- **Virtual filesystem** - unified workspace across local, remote, and cloud storage
-- **Memory separation** - current chat, working context, long-term memory
+- connect to Spiderweb over WebSocket
+- select or create projects
+- activate project workspace mounts
+- inspect nodes and workspace topology
+- browse and read/write the unified filesystem via `fsrpc.*`
+- chat with the agent through FS-RPC chat capabilities
 
-## Relationship to ZiggyStarClaw
-
-| | ZiggyStarClaw | ZiggyStarSpider |
-|---|---|---|
-| **Purpose** | OpenClaw protocol client | Spiderweb-native client |
-| **Session model** | Channel-based (Discord/Slack style) | Project-based with chat |
-| **Agent behavior** | Reactive (waits for user) | Pro-active (plans, reports) |
-| **Use case** | General chat assistant | Project work, game dev, coding |
-
-Both share a common core (`ziggy-core`) for WebSocket, Canvas, and platform abstractions.
+`control.*` is used for out-of-band control API operations.  
+`fsrpc.*` is used for filesystem and capability IO.
 
 ## Build
+
+```bash
+zig build
+zig build test
+```
 
 ### CLI
 
@@ -32,60 +30,95 @@ zig build
 ./zig-out/bin/ziggystarspider --help
 ```
 
-### GUI (Windows + Linux + macOS desktop builds)
+### GUI
 
 ```bash
-# Build GUI executable
 zig build gui
-
-# Run GUI
 zig build run-gui
 ```
 
-Built GUI binary:
+GUI binary: `zig-out/bin/zss-gui`
 
-- `zig-out/bin/zss-gui`
+## CLI Quickstart
 
-## GUI Features (MVP)
+```bash
+# Connect
+ziggystarspider connect --url ws://127.0.0.1:18790
 
-### Settings / Auth Screen
+# Project control
+ziggystarspider project list
+ziggystarspider --operator-token op-secret project create "Distributed Workspace" "unified mounts"
+ziggystarspider project use proj-1 proj-token-abc
+ziggystarspider workspace status
 
-- Server URL input (default `ws://127.0.0.1:18790`)
-- Connect button
-- Connection status indicator
+# Topology
+ziggystarspider node list
+ziggystarspider node info node-1
 
-### Chat Screen
+# Unified filesystem access
+ziggystarspider fs ls /
+ziggystarspider fs tree /spiderweb
+ziggystarspider fs read /spiderweb/projects/proj-1/workspace/README.md
 
-- Message input field
-- Send button
-- Message history list
-- Mouse-wheel scrolling for history
+# Agent chat via FS-RPC capability path
+ziggystarspider chat send "summarize current mounts"
+```
 
-## Notes
+Useful options:
 
-- GUI uses SDL3 for the native window/event loop and uses **ziggy-ui widget patterns** (`button` + `text_input` state handling) for interaction behavior.
-- Current chat payload format is JSON:
-  - `{"type":"chat","content":"..."}`
+- `--project <project_id>`
+- `--project-token <token>`
+- `--operator-token <token>`
+- `--url <ws-url>`
 
-## Architecture
+## GUI Highlights
 
-See [ARCHITECTURE.md](./docs/ARCHITECTURE.md) for protocol design and client architecture.
+- server connect/disconnect
+- project ID + project token selection
+- onboarding wizard (`connect -> project -> mounts -> activate`)
+- workspace refresh + activate project actions
+- live project/node/mount summary in settings
+- filesystem browser panel with path navigation and text preview
+- chat send/receive bound to selected project context
+- debug stream panel
 
-## Protocol
+## Protocol Notes
 
-ZSS speaks the Spiderweb protocol - an extension of OpenClaw that adds:
+- unified-v2 only (no legacy compatibility path)
+- control handshake: `control.version` then `control.connect`
+- control-plane examples:
+  - `control.project_list`
+  - `control.project_get`
+  - `control.project_create`
+  - `control.project_activate`
+  - `control.workspace_status`
+  - `control.node_list`
+  - `control.node_get`
+- FS-RPC examples:
+  - `fsrpc.t_version` / `fsrpc.r_version`
+  - `fsrpc.t_attach` / `fsrpc.r_attach`
+  - `fsrpc.t_walk`, `fsrpc.t_open`, `fsrpc.t_read`, `fsrpc.t_write`, `fsrpc.t_stat`, `fsrpc.t_clunk`
 
-- Project/goal/task management
-- Worker spawn/complete events
-- Virtual filesystem operations
-- Memory store/recall
+## Docs
 
-See [PROTOCOL.md](./docs/PROTOCOL.md) for message formats.
+- `docs/ARCHITECTURE.md`
+- `docs/OPERATOR_RUNBOOK.md`
+- `docs/TROUBLESHOOTING.md`
+- `docs/DATA_MODEL.md`
+- `docs/MILESTONES.md`
 
-## Module Migration Notes
+## Smoke Matrix
 
-StarSpider now imports `ziggy-spider-protocol` directly for `session.send` envelope helpers. The local compatibility wrapper (`src/client/session_protocol.zig`) was marked for removal on February 22, 2026 with a target of `v0.3.0`, and is now removed.
+```bash
+./scripts/smoke-matrix.sh
+```
+
+Environment knobs:
+- `SPIDERWEB_URL`
+- `SMOKE_SKIP_BUILD=1`
+- `SMOKE_SKIP_GUI_BUILD=1`
+- `SMOKE_SKIP_CHAT=1`
 
 ## License
 
-MIT - See LICENSE
+MIT - See `LICENSE`

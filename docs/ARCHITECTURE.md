@@ -1,210 +1,132 @@
 # ZiggyStarSpider Architecture
 
-> Design principles and protocol specification for the Spiderweb-native client.
+## Scope
 
-## Core Philosophy
+ZiggyStarSpider is the user-facing client (CLI + GUI) for Spiderweb distributed workspace control and FS-RPC access.
 
-**User-first, project-oriented.** Unlike chat assistants that wait for messages, Spiderweb agents work on user goals with pro-active planning and reporting.
+Primary goals:
 
-## Architecture Principles
+1. Connect to Spiderweb using unified-v2.
+2. Manage project context (list/get/create/use/activate).
+3. Surface node topology and workspace mounts.
+4. Route filesystem and capability IO through `fsrpc.*`.
 
-### 1. Chat-First Interface
-All agent activity surfaces in chat. The user always knows what the agent is doing.
+## Protocol Model
 
-```
-User: "Refactor the rendering system"
-    ↓
-Agent: "I'll analyze the current code and plan the refactor. This may take a few minutes."
-    ↓
-[Worker spawned: analyze_rendering_code]
-[Worker complete: Found 12 files using RenderContext]
-    ↓
-Agent: "Found 12 files. Here's my plan:
-        1. Extract RenderContext interface
-        2. Migrate OpenGL backend
-        3. Update tests
-        Proceed? (yes/no/modify)"
-```
+### Unified-v2 only
 
-### 2. Soft Workflows
-AI-driven execution rather than rigid pipelines.
+No legacy compatibility path is maintained in this client.
 
-- **Goals, not scripts** - Agent decides implementation path
-- **Adaptive** - If approach fails, tries alternatives
-- **Human gates** - Significant changes require approval
-- **Transparent** - Agent explains reasoning in chat
+### Channels
 
-### 3. Memory Model
+- `control`:
+  - out-of-band control API and topology/project operations
+  - includes handshake and project/node/workspace control calls
+- `fsrpc`:
+  - filesystem transport (`t_walk`, `t_open`, `t_read`, `t_write`, etc.)
+  - capability IO (for example chat via `/capabilities/chat/control/input`)
 
-Three distinct concepts OpenClaw conflates:
+### Required control handshake
 
-| Concept | Scope | Persistence |
-|---------|-------|-------------|
-| **Current Chat** | Active conversation | Yes (for continuity) |
-| **Working Memory** | Task context, partial results | Ephemeral (task lifetime) |
-| **Long-term Memory** | Past chats, lessons learned | Searchable, retrievable |
+All control/FS-RPC work starts with:
 
-**Chat lifecycle:**
-```
-Chat 1: "Design the asset pipeline"
-    ↓
-/new  → Chat 1 stored to memory
-    ↓  
-Chat 2: "Implement texture compression"
-    ↓
-"Continue yesterday's pipeline discussion"
-    ↓
-Memory recall → Chat 1 context loaded into Chat 2
-```
+1. `control.version` with payload `{"protocol":"unified-v2"}`
+2. `control.connect`
 
-### 4. Virtual Filesystem
+This is centralized in `src/client/unified_v2_client.zig` and wrapped by `src/client/control_plane.zig`.
 
-Plan9/Inferno-style unified namespace aggregating multiple backends.
+## Client Modules
 
-```
-/spiderweb/
-├── workspace/              # Agent's working directory
-├── nodes/
-│   ├── user-windows/       # Windows machine (WebSocket node)
-│   │   └── D:/Projects/
-│   ├── user-mac/           # Mac via node
-│   └── build-server/       # Remote builder
-├── cloud/
-│   ├── dropbox/
-│   └── s3-bucket/
-└── shared/
-    └── assets/             # Game textures, sounds
-```
+### `src/client/unified_v2_client.zig`
 
-**Benefits:**
-- Game dev: Agent reads textures from Windows D:, processes, writes to cloud
-- No SFTP/SMB: Uses existing WebSocket node transport
-- Unified: Agent uses normal file operations regardless of backend
+- control request envelope build/send
+- request/response correlation by `id`
+- handshake helper (`control.version` + `control.connect`)
+- control timeout handling and payload extraction
 
-### 5. Hierarchical Agency
+### `src/client/control_plane.zig`
 
-```
-User (sets goals, direction)
-    ↓
-PM Agent (orchestrates)
-    ├── Plans approach
-    ├── Spawns workers
-    ├── Handles blockers
-    └── Reports to user
-        ↓
-Workers (execute)
-    ├── Research workers
-    ├── Implementation workers
-    └── Test workers
-```
+Typed control-plane operations:
 
-**Pro-active when blocked:**
-- Current tasks blocked? PM adds speculative work that fits project
-- Always reports: "Couldn't do X, so I started Y which helps with Z"
+- `listProjects`
+- `getProject`
+- `createProject`
+- `activateProject`
+- `reconcileStatus`
+- `listNodes`
+- `getNode`
+- `workspaceStatus`
 
-## Protocol Design
+### `src/client/workspace_types.zig`
 
-### Message Types
+Shared typed models for CLI and GUI:
 
-**OpenClaw Compatible:**
-- `connect` / `chat_ack` - Connection handshake
-- `chat_send` / `chat_receive` - Messaging
-- `ping` / `pong` - Heartbeat
+- `ProjectSummary`
+- `ProjectDetail`
+- `NodeInfo`
+- `WorkspaceStatus`
+- `MountView`
+- `DriftItem`
+- `ReconcileStatus`
 
-**Spiderweb Extensions:**
+### `src/client/config.zig`
 
-**Project Management:**
-```zig
-project_create { name, description }
-project_list { }
-project_update { id, status }
-goal_create { project_id, description, priority }
-goal_complete { id, result }
-```
+Persistent local state:
 
-**Worker Management:**
-```zig
-worker_spawn { task_description, type }
-worker_progress { task_id, percent, message }
-worker_complete { task_id, result }
-worker_failed { task_id, error }
-```
+- server/auth defaults
+- selected project
+- per-project tokens
+- GUI preferences/theme/profile
 
-**Memory:**
-```zig
-memory_store { kind, content, tags }
-memory_recall { query, limit }
-memory_search { keywords }
-```
+## CLI Architecture
 
-**Virtual Filesystem:**
-```zig
-vfs_mount { name, backend_type, config }
-vfs_unmount { mount_point }
-vfs_list { path }
-```
+`src/cli/main.zig` maps noun/verb commands to:
 
-## Client State
+1. control-plane operations (`project`, `node`, `workspace`)
+2. FS-RPC filesystem operations (`fs`)
+3. FS-RPC chat capability flow (`chat send`)
 
-Simpler than OpenClaw - no session management:
+Project context handling:
 
-```zig
-ClientContext {
-    chat: ChatState,           // Current conversation
-    projects: ProjectContext,  // Goals, tasks
-    workers: []Task,           // Active workers
-    vfs: []Mount,              // Mounted filesystems
-}
-```
+- project id from `--project` or saved config
+- project token from `--project-token` or saved per-project token
+- activation via `control.project_activate` when token is available
 
-## Roadmap
+## GUI Architecture
 
-### v0.1 - Foundation
-- [ ] Basic connection to Spiderweb
-- [ ] Chat send/receive
-- [ ] Simple project commands
+`src/gui/root.zig` maintains:
 
-### v0.2 - Worker Support
-- [ ] Display worker progress
-- [ ] Task list view
-- [ ] Goal tracking
+- connection state and handshake lifecycle
+- settings panel project selection/token controls
+- onboarding wizard (`connect -> project -> mounts -> activate`)
+- workspace topology cache (projects, nodes, mounts)
+- filesystem browser panel (path navigation + preview)
+- async chat worker that applies project context before FS-RPC chat IO
+- reconnect-aware chat job resume handling
 
-### v0.3 - Virtual Filesystem
-- [ ] Mount/unmount commands
-- [ ] File browser UI
-- [ ] Cross-platform path handling
+The GUI refreshes workspace topology from control-plane APIs and shows selected project + mount state alongside chat.
 
-### v0.4 - Memory
-- [ ] /new command
-- [ ] Memory recall
-- [ ] Search interface
+## Filesystem + Capability Flow
 
-### v1.0 - Complete
-- [ ] Full pro-active agent support
-- [ ] TUI with project dashboard
-- [ ] Canvas integration
+FS-RPC bootstrap sequence:
 
-## Comparison
+1. `fsrpc.t_version`
+2. `fsrpc.t_attach` (root fid)
 
-### ZiggyStarSpider vs ZiggyStarClaw
+Then path-based operations:
 
-| | ZSC (OpenClaw) | ZSS (Spiderweb) |
-|---|---|---|
-| **Protocol** | OpenClaw | Spiderweb (extended) |
-| **Focus** | Chat channels | Project goals |
-| **Session** | Multiple channels | Single chat + memory |
-| **Agent** | Reactive | Pro-active |
-| **Use case** | General assistant | Project work, game dev |
+- `t_walk` to target path/capability file
+- `t_open`
+- `t_read` / `t_write`
+- `t_clunk` for fid cleanup
 
-Both share `ziggy-core` for common components.
+Chat currently uses capability path:
 
-## Open Questions
+- write prompt to `/capabilities/chat/control/input`
+- read result from `/jobs/<job>/result.txt`
+- resume from `/jobs/<job>/status.json` after reconnect when needed
 
-1. **Protocol versioning** - How to extend without breaking OpenClaw compatibility?
-2. **Error handling** - Graceful degradation when Spiderweb features unavailable?
-3. **File sync** - How much to cache vs stream for VFS?
-4. **Security** - Node authentication for VFS mounts?
+## Current Limitations
 
----
-
-*This doc evolves with implementation. Update as decisions are made.*
+- Interactive CLI REPL remains unimplemented.
+- GUI smoke is currently validated by build + scripted workflow checks (not full headless rendering assertions).

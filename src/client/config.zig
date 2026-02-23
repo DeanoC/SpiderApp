@@ -2,6 +2,11 @@ const std = @import("std");
 
 // Client configuration for ZiggyStarSpider
 
+pub const ProjectTokenEntry = struct {
+    project_id: []const u8,
+    token: []const u8,
+};
+
 pub const Config = struct {
     allocator: std.mem.Allocator,
 
@@ -15,6 +20,7 @@ pub const Config = struct {
     auto_connect_on_launch: bool = true,
     connect_host_override: ?[]const u8 = null,
     default_project: ?[]const u8 = null,
+    project_tokens: ?[]ProjectTokenEntry = null,
     default_session: ?[]const u8 = null,
 
     // Update + theme settings
@@ -58,6 +64,14 @@ pub const Config = struct {
         if (self.default_project) |value| {
             self.allocator.free(value);
             self.default_project = null;
+        }
+        if (self.project_tokens) |entries| {
+            for (entries) |entry| {
+                self.allocator.free(entry.project_id);
+                self.allocator.free(entry.token);
+            }
+            self.allocator.free(entries);
+            self.project_tokens = null;
         }
         if (self.default_session) |value| {
             self.allocator.free(value);
@@ -106,6 +120,96 @@ pub const Config = struct {
             self.allocator.free(value);
         }
         self.default_session = current;
+    }
+
+    pub fn setSelectedProject(self: *Config, project_id: ?[]const u8) !void {
+        const next = if (project_id) |value| blk: {
+            if (value.len == 0) break :blk null;
+            break :blk try self.allocator.dupe(u8, value);
+        } else null;
+        if (self.default_project) |value| self.allocator.free(value);
+        self.default_project = next;
+    }
+
+    pub fn selectedProject(self: *const Config) ?[]const u8 {
+        return self.default_project;
+    }
+
+    pub fn getProjectToken(self: *const Config, project_id: []const u8) ?[]const u8 {
+        const entries = self.project_tokens orelse return null;
+        for (entries) |entry| {
+            if (std.mem.eql(u8, entry.project_id, project_id)) return entry.token;
+        }
+        return null;
+    }
+
+    pub fn setProjectToken(self: *Config, project_id: []const u8, token: []const u8) !void {
+        if (project_id.len == 0) return;
+        if (token.len == 0) {
+            try self.clearProjectToken(project_id);
+            return;
+        }
+
+        if (self.project_tokens) |entries| {
+            for (entries) |*entry| {
+                if (!std.mem.eql(u8, entry.project_id, project_id)) continue;
+                const token_copy = try self.allocator.dupe(u8, token);
+                self.allocator.free(entry.token);
+                entry.token = token_copy;
+                return;
+            }
+
+            const expanded = try self.allocator.alloc(ProjectTokenEntry, entries.len + 1);
+            @memcpy(expanded[0..entries.len], entries);
+            expanded[entries.len] = .{
+                .project_id = try self.allocator.dupe(u8, project_id),
+                .token = try self.allocator.dupe(u8, token),
+            };
+            self.allocator.free(entries);
+            self.project_tokens = expanded;
+            return;
+        }
+
+        const entries = try self.allocator.alloc(ProjectTokenEntry, 1);
+        entries[0] = .{
+            .project_id = try self.allocator.dupe(u8, project_id),
+            .token = try self.allocator.dupe(u8, token),
+        };
+        self.project_tokens = entries;
+    }
+
+    pub fn clearProjectToken(self: *Config, project_id: []const u8) !void {
+        if (project_id.len == 0) return;
+        const entries = self.project_tokens orelse return;
+
+        var remove_idx: ?usize = null;
+        for (entries, 0..) |entry, idx| {
+            if (std.mem.eql(u8, entry.project_id, project_id)) {
+                remove_idx = idx;
+                break;
+            }
+        }
+        const idx = remove_idx orelse return;
+
+        self.allocator.free(entries[idx].project_id);
+        self.allocator.free(entries[idx].token);
+
+        if (entries.len == 1) {
+            self.allocator.free(entries);
+            self.project_tokens = null;
+            return;
+        }
+
+        const compacted = try self.allocator.alloc(ProjectTokenEntry, entries.len - 1);
+        var out_idx: usize = 0;
+        for (entries, 0..) |entry, entry_idx| {
+            if (entry_idx == idx) continue;
+            compacted[out_idx] = entry;
+            out_idx += 1;
+        }
+
+        self.allocator.free(entries);
+        self.project_tokens = compacted;
     }
 
     pub fn setTheme(self: *Config, value: ?[]const u8) !void {
@@ -159,6 +263,34 @@ pub const Config = struct {
         return out;
     }
 
+    fn duplicateOptionalProjectTokens(
+        allocator: std.mem.Allocator,
+        values: ?[]const ProjectTokenEntry,
+    ) !?[]ProjectTokenEntry {
+        if (values == null) return null;
+        const list = values.?;
+        if (list.len == 0) return try allocator.alloc(ProjectTokenEntry, 0);
+
+        const out = try allocator.alloc(ProjectTokenEntry, list.len);
+        var written: usize = 0;
+        errdefer {
+            for (0..written) |i| {
+                allocator.free(out[i].project_id);
+                allocator.free(out[i].token);
+            }
+            allocator.free(out);
+        }
+
+        for (list) |entry| {
+            out[written] = .{
+                .project_id = try allocator.dupe(u8, entry.project_id),
+                .token = try allocator.dupe(u8, entry.token),
+            };
+            written += 1;
+        }
+        return out;
+    }
+
     /// Get config directory path
     pub fn getConfigDir(allocator: std.mem.Allocator) ![]const u8 {
         const home = std.process.getEnvVarOwned(allocator, "HOME") catch |err| switch (err) {
@@ -206,6 +338,7 @@ pub const Config = struct {
             .auto_connect_on_launch = json.auto_connect_on_launch orelse true,
             .connect_host_override = try duplicateOptionalString(allocator, json.connect_host_override),
             .default_project = try duplicateOptionalString(allocator, json.default_project),
+            .project_tokens = try duplicateOptionalProjectTokens(allocator, json.project_tokens),
             .default_session = try duplicateOptionalString(allocator, json.default_session),
             .update_manifest_url = try duplicateOptionalString(allocator, json.update_manifest_url) orelse
                 try allocator.dupe(u8, "https://github.com/DeanoC/ZiggyStarSpider/releases/latest/download/update.json"),
@@ -239,6 +372,7 @@ pub const Config = struct {
             .auto_connect_on_launch = self.auto_connect_on_launch,
             .connect_host_override = self.connect_host_override,
             .default_project = self.default_project,
+            .project_tokens = self.project_tokens,
             .default_session = self.default_session,
             .update_manifest_url = self.update_manifest_url,
             .ui_theme = self.ui_theme,
@@ -266,6 +400,7 @@ const ConfigJson = struct {
     auto_connect_on_launch: ?bool = null,
     connect_host_override: ?[]const u8 = null,
     default_project: ?[]const u8 = null,
+    project_tokens: ?[]const ProjectTokenEntry = null,
     default_session: ?[]const u8 = null,
     update_manifest_url: ?[]const u8 = null,
     ui_theme: ?[]const u8 = null,

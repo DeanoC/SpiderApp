@@ -11,56 +11,81 @@ List all projects.
 ziggystarspider project list
 ```
 
-**Output:**
+**Output (example):**
 ```
 Projects:
-  spiderweb   | Active | AI gateway development
-  mygame      | Active | Game project
-  website     | Paused | Personal website
+  proj-1  [active]  mounts=2  name=Spiderweb
+* proj-2  [active]  mounts=1  name=Game AI
 ```
 
-## project use <name>
+## project use <project_id> [project_token]
 
-Switch to a different project.
+Select a project and optionally activate it.
 
 **Arguments:**
-- `name` - Project name
+- `project_id` - Project id (for example `proj-1`)
+- `project_token` (optional) - Project token for activation
 
 **Examples:**
 ```bash
-ziggystarspider project use spiderweb
-ziggystarspider project use mygame
+ziggystarspider project use proj-1
+ziggystarspider project use proj-1 proj-abc123
+ziggystarspider --project-token proj-abc123 project use proj-1
 ```
 
-## project create <name>
+## project create <name> [vision]
 
-Create a new project.
+Create a new project and persist it as the selected project in local config.
 
 **Arguments:**
-- `name` - Project name (unique)
-
-**Options:**
-- `--description <text>` - Project description
+- `name` - Project display name
+- `vision` (optional) - Freeform vision/description text
 
 **Examples:**
 ```bash
-ziggystarspider project create mynewproject --description "A new project"
+ziggystarspider project create "Distributed Workspace"
+ziggystarspider project create "Distributed Workspace" "unified node mounts"
+ziggystarspider --operator-token op-secret project create "Secure Project"
 ```
 
-## project info
+## project info <project_id>
 
-Show information about the current project.
+Show information about a project.
 
 **Examples:**
 ```bash
-ziggystarspider project info
+ziggystarspider project info proj-1
 ```
 
-**Output:**
+**Output (example):**
 ```
-Project: spiderweb
-Status: Active
-Description: AI gateway development
-Goals: 3 (2 open, 1 completed)
-Active Tasks: 2
+Project proj-1
+  Name: Distributed Workspace
+  Vision: unified node mounts
+  Status: active
+  Created: 1739999999999
+  Updated: 1739999999999
+  Mounts (2):
+    - /src <= node-a:work
+    - /cache <= node-b:cache
+```
+
+## project up <name>
+
+Create/update and activate a project with desired mounts in one command.
+
+**Examples:**
+```bash
+ziggystarspider project up "Distributed Workspace"
+ziggystarspider project up "Distributed Workspace" --mount /workspace=node-1:work
+```
+
+## project doctor
+
+Run readiness checks for nodes, project selection, and active mounts.
+
+**Examples:**
+```bash
+ziggystarspider project doctor
+ziggystarspider --project proj-1 project doctor
 ```
