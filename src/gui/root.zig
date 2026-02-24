@@ -5990,7 +5990,13 @@ const App = struct {
         }
     }
 
-    fn attachSessionBinding(self: *App, client: *ws_client_mod.WebSocketClient, session_key: []const u8) !void {
+    fn attachSessionBindingWithProject(
+        self: *App,
+        client: *ws_client_mod.WebSocketClient,
+        session_key: []const u8,
+        project_id: ?[]const u8,
+        project_token: ?[]const u8,
+    ) !void {
         const resolved_agent = if (self.selectedAgentId()) |value| blk: {
             // Prevent stale persisted user-scoped agent ids from being reused on admin connects.
             if (self.config.active_role == .admin and isUserScopedAgentId(value)) {
@@ -6000,11 +6006,6 @@ const App = struct {
         } else try self.fetchDefaultAgentFromServer(client, session_key);
         defer self.allocator.free(resolved_agent);
 
-        const project_id = self.selectedProjectId();
-        const project_token = if (project_id) |value|
-            self.selectedProjectToken(value)
-        else
-            null;
         const payload_json = try self.buildSessionAttachPayload(
             session_key,
             resolved_agent,
@@ -6023,6 +6024,20 @@ const App = struct {
         defer self.allocator.free(response_payload);
 
         try self.setDefaultAgentInSettings(resolved_agent);
+    }
+
+    fn attachSessionBinding(self: *App, client: *ws_client_mod.WebSocketClient, session_key: []const u8) !void {
+        const project_id = self.selectedProjectId();
+        const project_token = if (project_id) |value|
+            self.selectedProjectToken(value)
+        else
+            null;
+        try self.attachSessionBindingWithProject(
+            client,
+            session_key,
+            project_id,
+            project_token,
+        );
     }
 
     fn tryConnect(self: *App, manager: *panel_manager.PanelManager) !void {
@@ -6080,6 +6095,9 @@ const App = struct {
             return;
         };
 
+        var attach_warning: ?[]u8 = null;
+        defer if (attach_warning) |value| self.allocator.free(value);
+
         if (self.ws_client) |*client| {
             control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter) catch |err| {
                 client.deinit();
@@ -6107,13 +6125,44 @@ const App = struct {
             try self.ensureSessionExists(attach_session, attach_session);
 
             self.attachSessionBinding(client, attach_session) catch |err| {
-                client.deinit();
-                self.ws_client = null;
-                const detail = control_plane.lastRemoteError() orelse @errorName(err);
-                const msg = try std.fmt.allocPrint(self.allocator, "Session attach failed: {s}", .{detail});
-                defer self.allocator.free(msg);
-                self.setConnectionState(.error_state, msg);
-                return;
+                const primary_detail_owned = try self.allocator.dupe(
+                    u8,
+                    control_plane.lastRemoteError() orelse @errorName(err),
+                );
+                defer self.allocator.free(primary_detail_owned);
+
+                const has_selected_project = self.selectedProjectId() != null;
+                if (has_selected_project) {
+                    std.log.warn(
+                        "Session attach with selected project failed; retrying default attach: {s}",
+                        .{primary_detail_owned},
+                    );
+                    self.attachSessionBindingWithProject(client, attach_session, null, null) catch |fallback_err| {
+                        client.deinit();
+                        self.ws_client = null;
+                        const fallback_detail = control_plane.lastRemoteError() orelse @errorName(fallback_err);
+                        const msg = try std.fmt.allocPrint(
+                            self.allocator,
+                            "Session attach failed: {s} (fallback also failed: {s})",
+                            .{ primary_detail_owned, fallback_detail },
+                        );
+                        defer self.allocator.free(msg);
+                        self.setConnectionState(.error_state, msg);
+                        return;
+                    };
+                    attach_warning = try std.fmt.allocPrint(
+                        self.allocator,
+                        "Selected project attach failed ({s}); connected using default project. Update project/token in Settings.",
+                        .{primary_detail_owned},
+                    );
+                } else {
+                    client.deinit();
+                    self.ws_client = null;
+                    const msg = try std.fmt.allocPrint(self.allocator, "Session attach failed: {s}", .{primary_detail_owned});
+                    defer self.allocator.free(msg);
+                    self.setConnectionState(.error_state, msg);
+                    return;
+                }
             };
         }
 
@@ -6140,6 +6189,11 @@ const App = struct {
             try self.ensureSessionExists("main", "Main");
         } else if (self.current_session_key == null) {
             try self.setCurrentSessionKey(self.chat_sessions.items[0].key);
+        }
+
+        if (attach_warning) |warning| {
+            self.setWorkspaceError(warning);
+            try self.appendMessage("system", warning, null);
         }
 
         if (had_pending_send and try self.tryResumePendingSendJob()) {
