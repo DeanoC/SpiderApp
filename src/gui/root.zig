@@ -2989,7 +2989,7 @@ const App = struct {
         if (std.mem.indexOf(u8, remote, "project_auth_failed") != null) {
             return self.allocator.dupe(
                 u8,
-                "Set Project Token in Project panel (token is returned when project is created/project_up).",
+                "Selected project is not available for this session. Choose another project or clear project selection.",
             ) catch null;
         }
         if (std.mem.indexOf(u8, remote, "project_assignment_forbidden") != null) {
@@ -3017,6 +3017,19 @@ const App = struct {
             }
         }
         return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, @errorName(err) }) catch null;
+    }
+
+    fn isProjectAuthRemoteError(remote: []const u8) bool {
+        return std.mem.indexOf(u8, remote, "project_auth_failed") != null or
+            std.mem.indexOf(u8, remote, "ProjectAuthFailed") != null;
+    }
+
+    fn clearSelectedProjectAfterAuthFailure(self: *App) void {
+        self.settings_panel.project_id.clearRetainingCapacity();
+        self.settings_panel.project_token.clearRetainingCapacity();
+        self.syncSettingsToConfig() catch |err| {
+            std.log.warn("Failed to persist cleared selected project after auth failure: {s}", .{@errorName(err)});
+        };
     }
 
     fn setWorkspaceError(self: *App, message: []const u8) void {
@@ -6389,11 +6402,19 @@ const App = struct {
                         );
                     };
                     if (fallback_ok) {
-                        attach_warning = try std.fmt.allocPrint(
-                            self.allocator,
-                            "Selected project attach failed ({s}); connected using default project. Update project/token in Settings.",
-                            .{primary_detail_owned},
-                        );
+                        if (isProjectAuthRemoteError(primary_detail_owned)) {
+                            self.clearSelectedProjectAfterAuthFailure();
+                            attach_warning = try self.allocator.dupe(
+                                u8,
+                                "Selected project is not available for this session; connected using default project.",
+                            );
+                        } else {
+                            attach_warning = try std.fmt.allocPrint(
+                                self.allocator,
+                                "Selected project attach failed ({s}); connected using default project.",
+                                .{primary_detail_owned},
+                            );
+                        }
                     }
                 } else {
                     std.log.err("Session attach failed: {s}", .{primary_detail_owned});
@@ -6577,11 +6598,40 @@ const App = struct {
             return;
         }
         self.attachSessionBinding(client, session_key) catch |err| {
-            const detail = control_plane.lastRemoteError() orelse @errorName(err);
-            const err_text = try std.fmt.allocPrint(self.allocator, "Session attach failed: {s}", .{detail});
-            defer self.allocator.free(err_text);
-            try self.appendMessage("system", err_text, null);
-            return err;
+            const primary_detail_owned = try self.allocator.dupe(
+                u8,
+                control_plane.lastRemoteError() orelse @errorName(err),
+            );
+            defer self.allocator.free(primary_detail_owned);
+
+            const has_selected_project = self.selectedProjectId() != null;
+            if (has_selected_project) {
+                self.attachSessionBindingWithProject(client, session_key, null, null) catch |fallback_err| {
+                    const fallback_detail = control_plane.lastRemoteError() orelse @errorName(fallback_err);
+                    const err_text = try std.fmt.allocPrint(
+                        self.allocator,
+                        "Session attach failed: {s} (fallback also failed: {s})",
+                        .{ primary_detail_owned, fallback_detail },
+                    );
+                    defer self.allocator.free(err_text);
+                    try self.appendMessage("system", err_text, null);
+                    return fallback_err;
+                };
+
+                const warning = if (isProjectAuthRemoteError(primary_detail_owned)) blk: {
+                    self.clearSelectedProjectAfterAuthFailure();
+                    break :blk "Selected project is not available for this session; using default project for this message.";
+                } else blk: {
+                    break :blk "Selected project attach failed; using default project for this message.";
+                };
+                self.setWorkspaceError(warning);
+                try self.appendMessage("system", warning, null);
+            } else {
+                const err_text = try std.fmt.allocPrint(self.allocator, "Session attach failed: {s}", .{primary_detail_owned});
+                defer self.allocator.free(err_text);
+                try self.appendMessage("system", err_text, null);
+                return err;
+            }
         };
         self.refreshSessionAttachStatusOnce(client, session_key);
         if (self.session_attach_state == .warming) {
