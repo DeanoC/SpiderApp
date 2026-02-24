@@ -8491,7 +8491,7 @@ const App = struct {
 
     fn panelLayoutMetrics(self: *App) PanelLayoutMetrics {
         const line_height = self.textLineHeight();
-        return form_layout.defaultMetrics(self.theme, line_height, self.ui_scale);
+        return form_layout.defaultMetrics(zui.ui.theme.activeTheme(), line_height, self.ui_scale);
     }
 
     fn dockTabMetrics(self: *App) DockTabMetrics {
