@@ -3193,14 +3193,18 @@ const App = struct {
         try self.config.save();
 
         const role_name = if (role == .admin) "admin" else "user";
-        const status = try std.fmt.allocPrint(
-            self.allocator,
-            if (self.connection_state == .connected)
-                "Connect role set to {s}; reconnect to apply."
-            else
+        const status = if (self.connection_state == .connected)
+            try std.fmt.allocPrint(
+                self.allocator,
+                "Connect role set to {s}; reconnect to apply.",
+                .{role_name},
+            )
+        else
+            try std.fmt.allocPrint(
+                self.allocator,
                 "Connect role set to {s}.",
-            .{role_name},
-        );
+                .{role_name},
+            );
         defer self.allocator.free(status);
         self.setConnectionState(self.connection_state, status);
     }
