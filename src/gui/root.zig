@@ -189,6 +189,10 @@ fn isProjectPanelFocusField(field: SettingsFocusField) bool {
     };
 }
 
+fn isUserScopedAgentId(agent_id: []const u8) bool {
+    return std.mem.eql(u8, agent_id, "user") or std.mem.eql(u8, agent_id, "user-isolated");
+}
+
 const SettingsPanel = struct {
     server_url: std.ArrayList(u8) = .empty,
     project_id: std.ArrayList(u8) = .empty,
@@ -5987,10 +5991,13 @@ const App = struct {
     }
 
     fn attachSessionBinding(self: *App, client: *ws_client_mod.WebSocketClient, session_key: []const u8) !void {
-        const resolved_agent = if (self.selectedAgentId()) |value|
-            try self.allocator.dupe(u8, value)
-        else
-            try self.fetchDefaultAgentFromServer(client, session_key);
+        const resolved_agent = if (self.selectedAgentId()) |value| blk: {
+            // Prevent stale persisted user-scoped agent ids from being reused on admin connects.
+            if (self.config.active_role == .admin and isUserScopedAgentId(value)) {
+                break :blk try self.fetchDefaultAgentFromServer(client, session_key);
+            }
+            break :blk try self.allocator.dupe(u8, value);
+        } else try self.fetchDefaultAgentFromServer(client, session_key);
         defer self.allocator.free(resolved_agent);
 
         const project_id = self.selectedProjectId();
@@ -6043,6 +6050,11 @@ const App = struct {
             const entered_admin_token = std.mem.trim(u8, self.settings_panel.project_operator_token.items, " \t");
             if (entered_admin_token.len > 0 and !std.mem.eql(u8, self.config.getRoleToken(.admin), entered_admin_token)) {
                 self.config.setRoleToken(.admin, entered_admin_token) catch {};
+                self.config.save() catch {};
+            }
+            // Operator token in Project panel is an admin credential; prefer admin connect role.
+            if (entered_admin_token.len > 0 and self.config.active_role != .admin) {
+                self.config.setActiveRole(.admin) catch {};
                 self.config.save() catch {};
             }
         }
