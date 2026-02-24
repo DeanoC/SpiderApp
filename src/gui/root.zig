@@ -4194,7 +4194,7 @@ const App = struct {
             self.settings_panel.auto_connect_on_launch = !self.settings_panel.auto_connect_on_launch;
         }
 
-        if (self.mouse_clicked and
+        if (self.mouse_released and
             isSettingsPanelFocusField(self.settings_panel.focused_field) and
             !input_rect.contains(.{ self.mouse_x, self.mouse_y }) and
             !default_session_rect.contains(.{ self.mouse_x, self.mouse_y }) and
@@ -4761,11 +4761,11 @@ const App = struct {
         const clicked_outside_project_selector = !project_rect.contains(.{ self.mouse_x, self.mouse_y }) and
             !(project_dropdown_rect != null and project_dropdown_rect.?.contains(.{ self.mouse_x, self.mouse_y }));
 
-        if (self.mouse_clicked and clicked_outside_project_selector) {
+        if (self.mouse_released and clicked_outside_project_selector) {
             self.project_selector_open = false;
         }
 
-        if (self.mouse_clicked and
+        if (self.mouse_released and
             isProjectPanelFocusField(self.settings_panel.focused_field) and
             clicked_outside_project_selector and
             !project_token_rect.contains(.{ self.mouse_x, self.mouse_y }) and
@@ -5832,7 +5832,7 @@ const App = struct {
         const state = widgets.text_input.updateState(
             .{ .x = rect.min[0], .y = rect.min[1], .width = rect.width(), .height = rect.height() },
             .{ self.mouse_x, self.mouse_y },
-            self.mouse_clicked,
+            self.mouse_released,
             currently_focused,
         );
 
