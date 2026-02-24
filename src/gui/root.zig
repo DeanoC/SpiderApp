@@ -53,6 +53,8 @@ const FSRPC_CHAT_WRITE_TIMEOUT_MS: u32 = 180_000;
 const FSRPC_CLUNK_TIMEOUT_MS: u32 = 1_000;
 const CONTROL_SESSION_ATTACH_TIMEOUT_MS: i64 = 8_000;
 const CONTROL_SESSION_STATUS_TIMEOUT_MS: i64 = 2_000;
+const WS_MAX_MESSAGES_PER_FRAME: u32 = 32;
+const WS_MAX_POLL_BUDGET_NS: i128 = 2 * std.time.ns_per_ms;
 
 const ChatAttachment = zui.protocol.types.ChatAttachment;
 const ChatMessage = zui.protocol.types.ChatMessage;
@@ -2666,10 +2668,11 @@ const App = struct {
             }
 
             var count: u32 = 0;
-            // Drain all available messages (non-blocking, like ZSC)
-            while (client.tryReceive()) |msg| {
+            const started_ns = std.time.nanoTimestamp();
+            // Incremental drain: bounded receive work per frame to keep UI responsive.
+            while (count < WS_MAX_MESSAGES_PER_FRAME) {
+                const msg = client.tryReceive() orelse break;
                 count += 1;
-                std.log.info("[ZSS] Received frame ({d} bytes)", .{msg.len});
                 defer self.allocator.free(msg);
 
                 self.handleIncomingMessage(msg) catch |err| {
@@ -2677,6 +2680,10 @@ const App = struct {
                     defer self.allocator.free(msg_text);
                     try self.appendMessage("system", msg_text, null);
                 };
+
+                if (std.time.nanoTimestamp() - started_ns >= WS_MAX_POLL_BUDGET_NS) {
+                    break;
+                }
             }
             if (count > 0) {
                 std.log.debug("[ZSS] Polled {d} messages this frame", .{count});
@@ -5318,7 +5325,7 @@ const App = struct {
         }
 
         var total_content_height: f32 = inner * 2.0;
-        for (self.debug_events.items) |entry| {
+        for (self.debug_events.items) |*entry| {
             const payload_visible_rows = self.countVisibleDebugPayloadRows(output_rect.min[0], output_rect.max[0] - scrollbar_reserved, entry);
             const visible_lines = 1 + payload_visible_rows;
             total_content_height += line_height * @as(f32, @floatFromInt(visible_lines)) + event_gap;
@@ -5331,7 +5338,9 @@ const App = struct {
         defer self.ui_commands.popClip();
 
         var cur_y = output_rect.min[1] + inner - self.debug_scroll_y;
-        for (self.debug_events.items, 0..) |entry, idx| {
+        for (self.debug_events.items, 0..) |*entry, idx| {
+            const is_selected = self.debug_selected_index != null and self.debug_selected_index.? == idx;
+            if (is_selected) self.ensureDebugPayloadLines(entry);
             const payload_visible_rows = self.countVisibleDebugPayloadRows(output_rect.min[0], output_rect.max[0] - scrollbar_reserved, entry);
             const visible_lines = 1 + payload_visible_rows;
             const entry_h = line_height * @as(f32, @floatFromInt(visible_lines)) + event_gap;
@@ -5343,14 +5352,13 @@ const App = struct {
             if (cur_y > output_rect.max[1]) break;
 
             const entry_rect = Rect.fromXYWH(output_rect.min[0], cur_y, output_rect.width(), entry_h - event_gap);
-            const is_selected = self.debug_selected_index != null and self.debug_selected_index.? == idx;
             if (is_selected) {
                 const select_color = zcolors.withAlpha(self.theme.colors.primary, 0.25);
                 self.drawFilledRect(entry_rect, select_color);
             }
 
             const content_max_x = output_rect.max[0] - scrollbar_reserved;
-            self.drawDebugEventHeaderLine(output_rect.min[0] + inner + 2.0, cur_y, content_max_x, entry);
+            self.drawDebugEventHeaderLine(output_rect.min[0] + inner + 2.0, cur_y, content_max_x, entry.*);
 
             var clicked_fold_marker = false;
             var line_y = cur_y + line_height;
@@ -5511,7 +5519,14 @@ const App = struct {
         }
     }
 
-    fn countVisibleDebugPayloadRows(self: *App, output_min_x: f32, content_max_x: f32, entry: DebugEventEntry) usize {
+    fn ensureDebugPayloadLines(self: *App, entry: *DebugEventEntry) void {
+        if (entry.payload_lines.items.len > 0) return;
+        if (entry.payload_json.len == 0) return;
+        entry.payload_lines = self.buildDebugPayloadLines(entry.payload_json) catch .empty;
+    }
+
+    fn countVisibleDebugPayloadRows(self: *App, output_min_x: f32, content_max_x: f32, entry: *const DebugEventEntry) usize {
+        if (entry.payload_lines.items.len == 0) return 0;
         const fold_marker_w = self.measureText("[-]") + self.measureText(" ");
         var rows: usize = 0;
         var line_index: usize = 0;
@@ -7622,15 +7637,9 @@ const App = struct {
     }
 
     fn formatDebugPayloadJson(self: *App, payload: std.json.Value) ![]u8 {
-        var pretty = payload;
-        var used_pretty = false;
-        if (self.prettifyValue(payload)) |val| {
-            pretty = val;
-            used_pretty = true;
-        } else |_| {}
-        defer if (used_pretty) self.freePrettifiedValue(pretty);
-
-        return std.json.Stringify.valueAlloc(self.allocator, pretty, .{ .whitespace = .indent_2 });
+        // Keep debug-stream formatting intentionally cheap to avoid UI stalls
+        // under high event throughput.
+        return std.json.Stringify.valueAlloc(self.allocator, payload, .{ .whitespace = .indent_2 });
     }
 
     fn recordDecodeError(self: *App, reason: []const u8, msg: []const u8) !void {
@@ -8317,8 +8326,6 @@ const App = struct {
         errdefer if (correlation_copy) |value| self.allocator.free(value);
         const payload_copy = try self.allocator.dupe(u8, payload_json);
         errdefer self.allocator.free(payload_copy);
-        var payload_lines = try self.buildDebugPayloadLines(payload_copy);
-        errdefer payload_lines.deinit(self.allocator);
 
         const event_id = self.debug_next_event_id;
         self.debug_next_event_id +%= 1;
@@ -8330,7 +8337,6 @@ const App = struct {
             .category = category_copy,
             .correlation_id = correlation_copy,
             .payload_json = payload_copy,
-            .payload_lines = payload_lines,
         });
     }
 

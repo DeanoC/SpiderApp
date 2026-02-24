@@ -3,58 +3,69 @@ const ws = @import("websocket");
 const builtin = @import("builtin");
 
 const MessageQueue = struct {
-    mutex: std.Thread.Mutex,
-    cond: std.Thread.Condition,
-    items: std.ArrayListUnmanaged([]u8),
+    const capacity: usize = 4096;
+
+    // Single-producer (read thread) / single-consumer (UI thread) ring queue.
+    slots: [capacity]?[]u8,
+    head: std.atomic.Value(usize),
+    tail: std.atomic.Value(usize),
+    dropped_messages: std.atomic.Value(u32),
     allocator: std.mem.Allocator,
 
     fn init(allocator: std.mem.Allocator) MessageQueue {
         return .{
-            .mutex = .{},
-            .cond = .{},
-            .items = .empty,
+            .slots = [_]?[]u8{null} ** capacity,
+            .head = std.atomic.Value(usize).init(0),
+            .tail = std.atomic.Value(usize).init(0),
+            .dropped_messages = std.atomic.Value(u32).init(0),
             .allocator = allocator,
         };
     }
 
     fn deinit(self: *MessageQueue) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        for (self.items.items) |item| {
+        while (self.pop()) |item| {
             self.allocator.free(item);
         }
-        self.items.deinit(self.allocator);
     }
 
     fn push(self: *MessageQueue, msg: []u8) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        self.items.append(self.allocator, msg) catch {
-            std.log.err("[WS] MessageQueue.push failed to append", .{});
+        const tail = self.tail.load(.monotonic);
+        const head = self.head.load(.acquire);
+        if (tail - head >= capacity) {
+            const dropped = self.dropped_messages.fetchAdd(1, .monotonic) + 1;
+            if (dropped == 1 or dropped % 256 == 0) {
+                std.log.warn("[WS] inbound queue full, dropped {d} messages", .{dropped});
+            }
+            self.allocator.free(msg);
             return;
-        };
-        self.cond.signal();
+        }
+
+        const slot_index = tail % capacity;
+        self.slots[slot_index] = msg;
+        self.tail.store(tail + 1, .release);
     }
 
     fn pop(self: *MessageQueue) ?[]u8 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        if (self.items.items.len == 0) {
+        const head = self.head.load(.monotonic);
+        const tail = self.tail.load(.acquire);
+        if (head == tail) {
             return null;
         }
-        return self.items.orderedRemove(0);
+
+        const slot_index = head % capacity;
+        const item = self.slots[slot_index] orelse return null;
+        self.slots[slot_index] = null;
+        self.head.store(head + 1, .release);
+        return item;
     }
 
     fn popWait(self: *MessageQueue, timeout_ms: u32) ?[]u8 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        if (self.items.items.len == 0) {
-            self.cond.timedWait(&self.mutex, timeout_ms * std.time.ns_per_ms) catch {};
+        const deadline_ms = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+        while (std.time.milliTimestamp() <= deadline_ms) {
+            if (self.pop()) |item| return item;
+            std.Thread.sleep(1 * std.time.ns_per_ms);
         }
-        if (self.items.items.len == 0) {
-            return null;
-        }
-        return self.items.orderedRemove(0);
+        return null;
     }
 };
 
@@ -153,7 +164,7 @@ pub const WebSocketClient = struct {
     }
 
     fn readLoop(self: *WebSocketClient) void {
-        std.log.info("[WS] readLoop thread started", .{});
+        std.log.debug("[WS] readLoop thread started", .{});
 
         while (!self.should_stop.load(.acquire)) {
             if (self.client) |*client| {
@@ -177,36 +188,33 @@ pub const WebSocketClient = struct {
                     continue;
                 };
 
-                std.log.info("[WS] read() got message, type={s}, len={d}", .{@tagName(msg.type), msg.data.len});
                 defer client.done(msg);
 
                 switch (msg.type) {
                     .text, .binary => {
-                        std.log.info("[WS] Pushing message to queue", .{});
                         const copy = self.allocator.dupe(u8, msg.data) catch |err| {
                             std.log.err("[WS] Failed to allocate copy: {s}", .{@errorName(err)});
                             continue;
                         };
                         self.message_queue.push(copy);
-                        std.log.info("[WS] Message pushed to queue", .{});
                     },
                     .ping => {
                         client.writePong(@constCast(msg.data)) catch {};
                     },
                     .close => {
-                        std.log.info("[WS] Got close frame", .{});
+                        std.log.debug("[WS] Got close frame", .{});
                         break;
                     },
                     .pong => {},
                 }
             } else {
-                std.log.info("[WS] self.client is null, breaking", .{});
+                std.log.debug("[WS] self.client is null, breaking", .{});
                 break;
             }
         }
 
         self.connection_alive.store(false, .release);
-        std.log.info("[WS] readLoop thread stopped (should_stop={})", .{self.should_stop.load(.acquire)});
+        std.log.debug("[WS] readLoop thread stopped (should_stop={})", .{self.should_stop.load(.acquire)});
     }
 
     pub fn disconnect(self: *WebSocketClient) void {
@@ -232,14 +240,14 @@ pub const WebSocketClient = struct {
     pub fn send(self: *WebSocketClient, payload: []const u8) !void {
         if (self.client == null) return error.NotConnected;
         if (!self.connection_alive.load(.acquire)) return error.ConnectionClosed;
-        std.log.info("[WS] Sending {d} bytes", .{ payload.len });
+        std.log.debug("[WS] Sending {d} bytes", .{payload.len});
         if (self.client) |*client| {
             client.write(@constCast(payload)) catch |err| {
                 std.log.err("[WS] Send failed: {s}", .{@errorName(err)});
                 self.connection_alive.store(false, .release);
                 return err;
             };
-            std.log.info("[WS] Send successful", .{});
+            std.log.debug("[WS] Send successful", .{});
             return;
         }
         return error.NotConnected;
