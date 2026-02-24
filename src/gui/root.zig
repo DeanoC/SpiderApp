@@ -69,29 +69,6 @@ const FsrpcEnvelope = struct {
     }
 };
 
-const AsyncChatWorkerState = struct {
-    mutex: std.Thread.Mutex = .{},
-    in_flight: bool = false,
-    done: bool = false,
-    response: ?[]u8 = null,
-    error_text: ?[]u8 = null,
-    job_id: ?[]u8 = null,
-    correlation_id: ?[]u8 = null,
-    pending_debug_frames: std.ArrayListUnmanaged([]u8) = .{},
-    worker_thread: ?std.Thread = null,
-};
-
-const PendingJobMetadata = struct {
-    job_id: ?[]u8 = null,
-    correlation_id: ?[]u8 = null,
-
-    fn deinit(self: *PendingJobMetadata, allocator: std.mem.Allocator) void {
-        if (self.job_id) |value| allocator.free(value);
-        if (self.correlation_id) |value| allocator.free(value);
-        self.* = .{};
-    }
-};
-
 const FilesystemEntry = struct {
     name: []u8,
     path: []u8,
@@ -117,14 +94,17 @@ const JobStatusInfo = struct {
     }
 };
 
-const AsyncChatWorkerContext = struct {
-    state: *AsyncChatWorkerState,
-    url: []u8,
-    token: []u8,
-    message: []u8,
-    project_id: ?[]u8 = null,
-    project_token: ?[]u8 = null,
-    subscribe_debug: bool = false,
+const AuthStatusSnapshot = struct {
+    admin_token: []u8,
+    user_token: []u8,
+    path: ?[]u8 = null,
+
+    fn deinit(self: *AuthStatusSnapshot, allocator: std.mem.Allocator) void {
+        allocator.free(self.admin_token);
+        allocator.free(self.user_token);
+        if (self.path) |value| allocator.free(value);
+        self.* = undefined;
+    }
 };
 
 fn encodeDataB64(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
@@ -159,436 +139,14 @@ fn jsonEscape(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
-fn nextCounter(counter: *u32, minimum: u32) u32 {
-    const current = counter.*;
-    counter.* +%= 1;
-    if (counter.* < minimum) counter.* = minimum;
-    return current;
-}
-
-fn sendAndAwaitFsrpcBlocking(
-    allocator: std.mem.Allocator,
-    client: *ws_client_mod.WebSocketClient,
-    request_json: []const u8,
-    tag: u32,
-    timeout_ms: u32,
-    debug_state: ?*AsyncChatWorkerState,
-) !FsrpcEnvelope {
-    try client.send(request_json);
-
-    const started = std.time.milliTimestamp();
-    while (std.time.milliTimestamp() - started < timeout_ms) {
-        if (client.receive(250)) |raw| {
-            const parsed = std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch {
-                allocator.free(raw);
-                continue;
-            };
-
-            var matched = false;
-            if (parsed.value == .object) {
-                const obj = parsed.value.object;
-                if (obj.get("channel")) |channel| {
-                    if (channel == .string and std.mem.eql(u8, channel.string, "fsrpc")) {
-                        if (obj.get("tag")) |raw_tag| {
-                            if (raw_tag == .integer and raw_tag.integer >= 0 and @as(u32, @intCast(raw_tag.integer)) == tag) {
-                                matched = true;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (matched) {
-                return .{
-                    .raw = raw,
-                    .parsed = parsed,
-                };
-            }
-
-            if (debug_state) |state| {
-                if (parsed.value == .object) {
-                    const maybe_type = parsed.value.object.get("type");
-                    if (maybe_type != null and maybe_type.? == .string and std.mem.eql(u8, maybe_type.?.string, "debug.event")) {
-                        const copied = allocator.dupe(u8, raw) catch null;
-                        if (copied) |payload| {
-                            state.mutex.lock();
-                            state.pending_debug_frames.append(allocator, payload) catch {
-                                allocator.free(payload);
-                            };
-                            state.mutex.unlock();
-                        }
-                    }
-                }
-            }
-
-            parsed.deinit();
-            allocator.free(raw);
-        }
-    }
-
-    return error.Timeout;
-}
-
-fn setOptionalOwnedMessage(
-    allocator: std.mem.Allocator,
-    slot: *?[]u8,
-    message: ?[]const u8,
-) void {
-    if (slot.*) |value| allocator.free(value);
-    slot.* = null;
-    if (message) |value| {
-        slot.* = allocator.dupe(u8, value) catch null;
-    }
-}
-
-fn buildSendFailedErrorText(
-    allocator: std.mem.Allocator,
-    err: anyerror,
-    fsrpc_remote_error: ?[]const u8,
-) ?[]u8 {
-    if (err == error.RemoteError) {
-        if (fsrpc_remote_error) |value| {
-            return std.fmt.allocPrint(allocator, "Send failed: {s}", .{value}) catch null;
-        }
-        if (control_plane.lastRemoteError()) |value| {
-            return std.fmt.allocPrint(allocator, "Send failed: {s}", .{value}) catch null;
-        }
-    }
-    return std.fmt.allocPrint(allocator, "Send failed: {s}", .{@errorName(err)}) catch null;
-}
-
-fn ensureFsrpcOkBlocking(
-    allocator: std.mem.Allocator,
-    envelope: *FsrpcEnvelope,
-    remote_error_detail: *?[]u8,
-) !void {
-    if (envelope.parsed.value != .object) return error.InvalidResponse;
-    const obj = envelope.parsed.value.object;
-    const ok_value = obj.get("ok") orelse return error.InvalidResponse;
-    if (ok_value != .bool) return error.InvalidResponse;
-    if (ok_value.bool) {
-        setOptionalOwnedMessage(allocator, remote_error_detail, null);
-        return;
-    }
-
-    var detail: ?[]u8 = null;
-    if (obj.get("error")) |err_value| {
-        if (err_value == .object) {
-            const err_obj = err_value.object;
-            const message = if (err_obj.get("message")) |value|
-                if (value == .string) value.string else null
-            else
-                null;
-            const code = if (err_obj.get("code")) |value|
-                if (value == .string) value.string else null
-            else
-                null;
-            const errno = if (err_obj.get("errno")) |value|
-                if (value == .integer) value.integer else null
-            else
-                null;
-
-            if (message != null and code != null and errno != null) {
-                detail = std.fmt.allocPrint(allocator, "{s} [{s}] (errno={d})", .{ message.?, code.?, errno.? }) catch null;
-            } else if (message != null and errno != null) {
-                detail = std.fmt.allocPrint(allocator, "{s} (errno={d})", .{ message.?, errno.? }) catch null;
-            } else if (message != null and code != null) {
-                detail = std.fmt.allocPrint(allocator, "{s} [{s}]", .{ message.?, code.? }) catch null;
-            } else if (message) |value| {
-                detail = allocator.dupe(u8, value) catch null;
-            } else if (code) |value| {
-                detail = std.fmt.allocPrint(allocator, "remote fsrpc error [{s}]", .{value}) catch null;
-            } else if (errno) |value| {
-                detail = std.fmt.allocPrint(allocator, "remote fsrpc error (errno={d})", .{value}) catch null;
-            }
-        } else if (err_value == .string) {
-            detail = allocator.dupe(u8, err_value.string) catch null;
-        }
-    }
-
-    setOptionalOwnedMessage(allocator, remote_error_detail, if (detail) |value| value else "remote fsrpc error");
-    if (detail) |value| allocator.free(value);
-    return error.RemoteError;
-}
-
-fn getFsrpcPayloadObjectBlocking(root: std.json.ObjectMap) !std.json.ObjectMap {
-    const payload = root.get("payload") orelse return error.InvalidResponse;
-    if (payload != .object) return error.InvalidResponse;
-    return payload.object;
-}
-
-fn fsrpcBootstrapBlocking(
-    allocator: std.mem.Allocator,
-    client: *ws_client_mod.WebSocketClient,
-    next_tag: *u32,
-    debug_state: ?*AsyncChatWorkerState,
-    subscribe_debug: bool,
-    remote_error_detail: *?[]u8,
-) !void {
-    if (subscribe_debug) {
-        const debug_id = try std.fmt.allocPrint(allocator, "debug-worker-{d}", .{std.time.milliTimestamp()});
-        defer allocator.free(debug_id);
-        const debug_payload = try std.fmt.allocPrint(
-            allocator,
-            "{{\"channel\":\"control\",\"type\":\"control.debug_subscribe\",\"id\":\"{s}\"}}",
-            .{debug_id},
-        );
-        defer allocator.free(debug_payload);
-        try client.send(debug_payload);
-    }
-
-    const version_tag = nextCounter(next_tag, 1);
-    const version_req = try std.fmt.allocPrint(
+fn maskTokenForDisplay(allocator: std.mem.Allocator, token: []const u8) ![]u8 {
+    if (token.len == 0) return allocator.dupe(u8, "(empty)");
+    if (token.len <= 8) return allocator.dupe(u8, "****");
+    return std.fmt.allocPrint(
         allocator,
-        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_version\",\"tag\":{d},\"msize\":1048576,\"version\":\"styx-lite-1\"}}",
-        .{version_tag},
+        "{s}...{s}",
+        .{ token[0..4], token[token.len - 4 ..] },
     );
-    defer allocator.free(version_req);
-    var version = try sendAndAwaitFsrpcBlocking(allocator, client, version_req, version_tag, FSRPC_DEFAULT_TIMEOUT_MS, debug_state);
-    defer version.deinit(allocator);
-    try ensureFsrpcOkBlocking(allocator, &version, remote_error_detail);
-
-    const attach_tag = nextCounter(next_tag, 1);
-    const attach_req = try std.fmt.allocPrint(
-        allocator,
-        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_attach\",\"tag\":{d},\"fid\":1}}",
-        .{attach_tag},
-    );
-    defer allocator.free(attach_req);
-    var attach = try sendAndAwaitFsrpcBlocking(allocator, client, attach_req, attach_tag, FSRPC_DEFAULT_TIMEOUT_MS, debug_state);
-    defer attach.deinit(allocator);
-    try ensureFsrpcOkBlocking(allocator, &attach, remote_error_detail);
-}
-
-fn fsrpcClunkBestEffortBlocking(
-    allocator: std.mem.Allocator,
-    client: *ws_client_mod.WebSocketClient,
-    next_tag: *u32,
-    fid: u32,
-    debug_state: ?*AsyncChatWorkerState,
-) void {
-    const tag = nextCounter(next_tag, 1);
-    const req = std.fmt.allocPrint(
-        allocator,
-        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_clunk\",\"tag\":{d},\"fid\":{d}}}",
-        .{ tag, fid },
-    ) catch return;
-    defer allocator.free(req);
-    var response = sendAndAwaitFsrpcBlocking(allocator, client, req, tag, FSRPC_CLUNK_TIMEOUT_MS, debug_state) catch return;
-    response.deinit(allocator);
-}
-
-fn sendChatViaFsrpcBlocking(
-    allocator: std.mem.Allocator,
-    client: *ws_client_mod.WebSocketClient,
-    text: []const u8,
-    debug_state: ?*AsyncChatWorkerState,
-    subscribe_debug: bool,
-    job_meta: ?*PendingJobMetadata,
-    remote_error_detail: *?[]u8,
-) ![]u8 {
-    var next_tag: u32 = 1;
-    var next_fid: u32 = 2;
-
-    try fsrpcBootstrapBlocking(allocator, client, &next_tag, debug_state, subscribe_debug, remote_error_detail);
-
-    const input_fid = nextCounter(&next_fid, 2);
-    const result_fid = nextCounter(&next_fid, 2);
-    defer fsrpcClunkBestEffortBlocking(allocator, client, &next_tag, input_fid, debug_state);
-    defer fsrpcClunkBestEffortBlocking(allocator, client, &next_tag, result_fid, debug_state);
-
-    const walk_input_tag = nextCounter(&next_tag, 1);
-    const walk_input_req = try std.fmt.allocPrint(
-        allocator,
-        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":[\"capabilities\",\"chat\",\"control\",\"input\"]}}",
-        .{ walk_input_tag, input_fid },
-    );
-    defer allocator.free(walk_input_req);
-    var walk_input = try sendAndAwaitFsrpcBlocking(allocator, client, walk_input_req, walk_input_tag, FSRPC_DEFAULT_TIMEOUT_MS, debug_state);
-    defer walk_input.deinit(allocator);
-    try ensureFsrpcOkBlocking(allocator, &walk_input, remote_error_detail);
-
-    const open_input_tag = nextCounter(&next_tag, 1);
-    const open_input_req = try std.fmt.allocPrint(
-        allocator,
-        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"rw\"}}",
-        .{ open_input_tag, input_fid },
-    );
-    defer allocator.free(open_input_req);
-    var open_input = try sendAndAwaitFsrpcBlocking(allocator, client, open_input_req, open_input_tag, FSRPC_DEFAULT_TIMEOUT_MS, debug_state);
-    defer open_input.deinit(allocator);
-    try ensureFsrpcOkBlocking(allocator, &open_input, remote_error_detail);
-
-    const encoded = try encodeDataB64(allocator, text);
-    defer allocator.free(encoded);
-    const write_tag = nextCounter(&next_tag, 1);
-    const write_req = try std.fmt.allocPrint(
-        allocator,
-        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_write\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"data_b64\":\"{s}\"}}",
-        .{ write_tag, input_fid, encoded },
-    );
-    defer allocator.free(write_req);
-    var write = try sendAndAwaitFsrpcBlocking(allocator, client, write_req, write_tag, FSRPC_CHAT_WRITE_TIMEOUT_MS, debug_state);
-    defer write.deinit(allocator);
-    try ensureFsrpcOkBlocking(allocator, &write, remote_error_detail);
-
-    const write_payload = try getFsrpcPayloadObjectBlocking(write.parsed.value.object);
-    const job_value = write_payload.get("job") orelse return error.InvalidResponse;
-    if (job_value != .string) return error.InvalidResponse;
-    const job_name = job_value.string;
-
-    if (job_meta) |meta| {
-        if (meta.job_id) |value| allocator.free(value);
-        if (meta.correlation_id) |value| allocator.free(value);
-        meta.job_id = try allocator.dupe(u8, job_name);
-        meta.correlation_id = null;
-        if (write_payload.get("correlation_id")) |corr_value| {
-            if (corr_value == .string) {
-                meta.correlation_id = try allocator.dupe(u8, corr_value.string);
-            }
-        }
-    }
-
-    const escaped_job = try jsonEscape(allocator, job_name);
-    defer allocator.free(escaped_job);
-    const walk_result_tag = nextCounter(&next_tag, 1);
-    const walk_result_req = try std.fmt.allocPrint(
-        allocator,
-        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":[\"jobs\",\"{s}\",\"result.txt\"]}}",
-        .{ walk_result_tag, result_fid, escaped_job },
-    );
-    defer allocator.free(walk_result_req);
-    var walk_result = try sendAndAwaitFsrpcBlocking(allocator, client, walk_result_req, walk_result_tag, FSRPC_DEFAULT_TIMEOUT_MS, debug_state);
-    defer walk_result.deinit(allocator);
-    try ensureFsrpcOkBlocking(allocator, &walk_result, remote_error_detail);
-
-    const open_result_tag = nextCounter(&next_tag, 1);
-    const open_result_req = try std.fmt.allocPrint(
-        allocator,
-        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"r\"}}",
-        .{ open_result_tag, result_fid },
-    );
-    defer allocator.free(open_result_req);
-    var open_result = try sendAndAwaitFsrpcBlocking(allocator, client, open_result_req, open_result_tag, FSRPC_DEFAULT_TIMEOUT_MS, debug_state);
-    defer open_result.deinit(allocator);
-    try ensureFsrpcOkBlocking(allocator, &open_result, remote_error_detail);
-
-    const read_tag = nextCounter(&next_tag, 1);
-    const read_req = try std.fmt.allocPrint(
-        allocator,
-        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_read\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"count\":1048576}}",
-        .{ read_tag, result_fid },
-    );
-    defer allocator.free(read_req);
-    var read = try sendAndAwaitFsrpcBlocking(allocator, client, read_req, read_tag, FSRPC_DEFAULT_TIMEOUT_MS, debug_state);
-    defer read.deinit(allocator);
-    try ensureFsrpcOkBlocking(allocator, &read, remote_error_detail);
-
-    const read_payload = try getFsrpcPayloadObjectBlocking(read.parsed.value.object);
-    const data_b64 = read_payload.get("data_b64") orelse return error.InvalidResponse;
-    if (data_b64 != .string) return error.InvalidResponse;
-
-    const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(data_b64.string) catch return error.InvalidResponse;
-    const decoded = try allocator.alloc(u8, decoded_len);
-    errdefer allocator.free(decoded);
-    _ = std.base64.standard.Decoder.decode(decoded, data_b64.string) catch return error.InvalidResponse;
-    return decoded;
-}
-
-fn runAsyncChatSendWorker(ctx: *AsyncChatWorkerContext) void {
-    const allocator = std.heap.page_allocator;
-    defer {
-        allocator.free(ctx.url);
-        allocator.free(ctx.token);
-        allocator.free(ctx.message);
-        if (ctx.project_id) |value| allocator.free(value);
-        if (ctx.project_token) |value| allocator.free(value);
-        allocator.destroy(ctx);
-    }
-
-    var response: ?[]u8 = null;
-    var error_text: ?[]u8 = null;
-    var fsrpc_error_detail: ?[]u8 = null;
-    defer if (fsrpc_error_detail) |value| allocator.free(value);
-
-    var client = ws_client_mod.WebSocketClient.init(allocator, ctx.url, ctx.token) catch |err| {
-        error_text = buildSendFailedErrorText(allocator, err, null);
-        ctx.state.mutex.lock();
-        defer ctx.state.mutex.unlock();
-        ctx.state.response = null;
-        ctx.state.error_text = error_text;
-        ctx.state.done = true;
-        ctx.state.in_flight = false;
-        return;
-    };
-    defer client.deinit();
-
-    client.connect() catch |err| {
-        error_text = buildSendFailedErrorText(allocator, err, null);
-        ctx.state.mutex.lock();
-        defer ctx.state.mutex.unlock();
-        ctx.state.response = null;
-        ctx.state.error_text = error_text;
-        ctx.state.done = true;
-        ctx.state.in_flight = false;
-        return;
-    };
-
-    var control_counter: u64 = 0;
-    control_plane.ensureUnifiedV2Connection(allocator, &client, &control_counter) catch |err| {
-        error_text = buildSendFailedErrorText(allocator, err, null);
-        ctx.state.mutex.lock();
-        defer ctx.state.mutex.unlock();
-        ctx.state.response = null;
-        ctx.state.error_text = error_text;
-        ctx.state.done = true;
-        ctx.state.in_flight = false;
-        return;
-    };
-
-    if (ctx.project_id) |project_id| {
-        var status = control_plane.activateProject(
-            allocator,
-            &client,
-            &control_counter,
-            project_id,
-            ctx.project_token,
-        ) catch |err| {
-            error_text = buildSendFailedErrorText(allocator, err, null);
-            ctx.state.mutex.lock();
-            defer ctx.state.mutex.unlock();
-            ctx.state.response = null;
-            ctx.state.error_text = error_text;
-            ctx.state.done = true;
-            ctx.state.in_flight = false;
-            return;
-        };
-        status.deinit(allocator);
-    }
-
-    var job_meta = PendingJobMetadata{};
-    defer job_meta.deinit(allocator);
-
-    response = sendChatViaFsrpcBlocking(allocator, &client, ctx.message, ctx.state, ctx.subscribe_debug, &job_meta, &fsrpc_error_detail) catch |err| blk: {
-        error_text = buildSendFailedErrorText(allocator, err, fsrpc_error_detail);
-        break :blk null;
-    };
-
-    const final_job_id = job_meta.job_id;
-    const final_corr = job_meta.correlation_id;
-    job_meta.job_id = null;
-    job_meta.correlation_id = null;
-
-    ctx.state.mutex.lock();
-    defer ctx.state.mutex.unlock();
-    if (ctx.state.job_id) |value| allocator.free(value);
-    if (ctx.state.correlation_id) |value| allocator.free(value);
-    ctx.state.job_id = final_job_id;
-    ctx.state.correlation_id = final_corr;
-    ctx.state.response = response;
-    ctx.state.error_text = error_text;
-    ctx.state.done = true;
-    ctx.state.in_flight = false;
 }
 
 const SettingsFocusField = enum {
@@ -600,10 +158,36 @@ const SettingsFocusField = enum {
     project_create_vision,
     project_operator_token,
     default_session,
+    default_agent,
     ui_theme,
     ui_profile,
     ui_theme_pack,
 };
+
+fn isSettingsPanelFocusField(field: SettingsFocusField) bool {
+    return switch (field) {
+        .server_url,
+        .default_session,
+        .default_agent,
+        .ui_theme,
+        .ui_profile,
+        .ui_theme_pack,
+        => true,
+        else => false,
+    };
+}
+
+fn isProjectPanelFocusField(field: SettingsFocusField) bool {
+    return switch (field) {
+        .project_id,
+        .project_token,
+        .project_create_name,
+        .project_create_vision,
+        .project_operator_token,
+        => true,
+        else => false,
+    };
+}
 
 const SettingsPanel = struct {
     server_url: std.ArrayList(u8) = .empty,
@@ -613,6 +197,7 @@ const SettingsPanel = struct {
     project_create_vision: std.ArrayList(u8) = .empty,
     project_operator_token: std.ArrayList(u8) = .empty,
     default_session: std.ArrayList(u8) = .empty,
+    default_agent: std.ArrayList(u8) = .empty,
     ui_theme: std.ArrayList(u8) = .empty,
     ui_profile: std.ArrayList(u8) = .empty,
     ui_theme_pack: std.ArrayList(u8) = .empty,
@@ -631,6 +216,7 @@ const SettingsPanel = struct {
         panel.project_create_vision.appendSlice(allocator, "") catch {};
         panel.project_operator_token.appendSlice(allocator, "") catch {};
         panel.default_session.appendSlice(allocator, "main") catch {};
+        panel.default_agent.appendSlice(allocator, "") catch {};
         return panel;
     }
 
@@ -642,6 +228,7 @@ const SettingsPanel = struct {
         self.project_create_vision.deinit(allocator);
         self.project_operator_token.deinit(allocator);
         self.default_session.deinit(allocator);
+        self.default_agent.deinit(allocator);
         self.ui_theme.deinit(allocator);
         self.ui_profile.deinit(allocator);
         self.ui_theme_pack.deinit(allocator);
@@ -852,7 +439,6 @@ const App = struct {
     fsrpc_last_remote_error: ?[]u8 = null,
 
     ws_client: ?ws_client_mod.WebSocketClient = null,
-    async_chat_worker: AsyncChatWorkerState = .{},
 
     connection_state: ConnectionState = .disconnected,
     status_text: []u8,
@@ -951,18 +537,19 @@ const App = struct {
                 settings_panel.project_token.appendSlice(allocator, project_token) catch {};
             }
         }
-        if (config.auth_token.len > 0) {
+        if (config.getRoleToken(.admin).len > 0) {
             settings_panel.project_operator_token.clearRetainingCapacity();
-            settings_panel.project_operator_token.appendSlice(allocator, config.auth_token) catch {};
-        } else if (config.token.len > 0) {
-            settings_panel.project_operator_token.clearRetainingCapacity();
-            settings_panel.project_operator_token.appendSlice(allocator, config.token) catch {};
+            settings_panel.project_operator_token.appendSlice(allocator, config.getRoleToken(.admin)) catch {};
         }
         settings_panel.default_session.clearRetainingCapacity();
         if (config.default_session) |value| {
             settings_panel.default_session.appendSlice(allocator, value) catch {};
         } else {
             settings_panel.default_session.appendSlice(allocator, "main") catch {};
+        }
+        settings_panel.default_agent.clearRetainingCapacity();
+        if (config.selectedAgent()) |value| {
+            settings_panel.default_agent.appendSlice(allocator, value) catch {};
         }
         if (config.ui_theme) |value| {
             settings_panel.ui_theme.clearRetainingCapacity();
@@ -1051,7 +638,6 @@ const App = struct {
 
     pub fn deinit(self: *App) void {
         self.disconnect();
-        self.drainAsyncChatWorker();
         self.clearSessions();
         self.chat_sessions.deinit(self.allocator);
         self.session_messages.deinit(self.allocator);
@@ -1183,7 +769,6 @@ const App = struct {
             }
 
             try self.pollWebSocket();
-            try self.pollAsyncChatSendCompletion();
             if (self.pending_send_job_id != null and self.ws_client != null) {
                 _ = self.tryResumePendingSendJob() catch {};
             }
@@ -3068,6 +2653,7 @@ const App = struct {
                             .project_create_vision => try self.settings_panel.project_create_vision.appendSlice(self.allocator, clip),
                             .project_operator_token => try self.settings_panel.project_operator_token.appendSlice(self.allocator, clip),
                             .default_session => try self.settings_panel.default_session.appendSlice(self.allocator, clip),
+                            .default_agent => try self.settings_panel.default_agent.appendSlice(self.allocator, clip),
                             .ui_theme => try self.settings_panel.ui_theme.appendSlice(self.allocator, clip),
                             .ui_profile => try self.settings_panel.ui_profile.appendSlice(self.allocator, clip),
                             .ui_theme_pack => try self.settings_panel.ui_theme_pack.appendSlice(self.allocator, clip),
@@ -3131,6 +2717,8 @@ const App = struct {
                     _ = self.settings_panel.project_operator_token.pop();
                 } else if (self.settings_panel.focused_field == .default_session and self.settings_panel.default_session.items.len > 0) {
                     _ = self.settings_panel.default_session.pop();
+                } else if (self.settings_panel.focused_field == .default_agent and self.settings_panel.default_agent.items.len > 0) {
+                    _ = self.settings_panel.default_agent.pop();
                 } else if (self.settings_panel.focused_field == .ui_theme and self.settings_panel.ui_theme.items.len > 0) {
                     _ = self.settings_panel.ui_theme.pop();
                 } else if (self.settings_panel.focused_field == .ui_profile and self.settings_panel.ui_profile.items.len > 0) {
@@ -3154,6 +2742,8 @@ const App = struct {
                     _ = self.settings_panel.project_operator_token.pop();
                 } else if (self.settings_panel.focused_field == .default_session and self.settings_panel.default_session.items.len > 0) {
                     _ = self.settings_panel.default_session.pop();
+                } else if (self.settings_panel.focused_field == .default_agent and self.settings_panel.default_agent.items.len > 0) {
+                    _ = self.settings_panel.default_agent.pop();
                 } else if (self.settings_panel.focused_field == .ui_theme and self.settings_panel.ui_theme.items.len > 0) {
                     _ = self.settings_panel.ui_theme.pop();
                 } else if (self.settings_panel.focused_field == .ui_profile and self.settings_panel.ui_profile.items.len > 0) {
@@ -3273,6 +2863,13 @@ const App = struct {
                     }
                 }
             },
+            .default_agent => {
+                for (text) |ch| {
+                    if (ch >= 32 and ch < 127) {
+                        try self.settings_panel.default_agent.append(self.allocator, ch);
+                    }
+                }
+            },
             .ui_theme => {
                 for (text) |ch| {
                     if (ch >= 32 and ch < 127) {
@@ -3312,7 +2909,16 @@ const App = struct {
                 self.settings_panel.project_token.items,
             );
         }
+        if (self.settings_panel.project_operator_token.items.len > 0) {
+            try self.config.setRoleToken(.admin, self.settings_panel.project_operator_token.items);
+        }
         try self.config.setDefaultSession(self.settings_panel.default_session.items);
+        try self.config.setDefaultAgent(
+            if (self.settings_panel.default_agent.items.len > 0)
+                self.settings_panel.default_agent.items
+            else
+                null,
+        );
         self.config.auto_connect_on_launch = self.settings_panel.auto_connect_on_launch;
         try self.config.setTheme(if (self.settings_panel.ui_theme.items.len > 0) self.settings_panel.ui_theme.items else null);
         try self.config.setProfile(if (self.settings_panel.ui_profile.items.len > 0) self.settings_panel.ui_profile.items else null);
@@ -3442,8 +3048,8 @@ const App = struct {
     }
 
     fn selectedProjectId(self: *App) ?[]const u8 {
-        if (self.settings_panel.project_id.items.len == 0) return null;
-        return self.settings_panel.project_id.items;
+        if (self.settings_panel.project_id.items.len > 0) return self.settings_panel.project_id.items;
+        return self.config.selectedProject();
     }
 
     fn selectProjectInSettings(self: *App, project_id: []const u8) !void {
@@ -3552,9 +3158,210 @@ const App = struct {
 
     fn resolveProjectOperatorToken(self: *App) ?[]const u8 {
         if (self.settings_panel.project_operator_token.items.len > 0) return self.settings_panel.project_operator_token.items;
-        if (self.config.auth_token.len > 0) return self.config.auth_token;
-        if (self.config.token.len > 0) return self.config.token;
+        if (self.config.getRoleToken(.admin).len > 0) return self.config.getRoleToken(.admin);
         return null;
+    }
+
+    fn setRoleToken(
+        self: *App,
+        role: config_mod.Config.TokenRole,
+        token: []const u8,
+        set_active: bool,
+    ) !void {
+        if (role == .admin) {
+            self.settings_panel.project_operator_token.clearRetainingCapacity();
+            if (token.len > 0) {
+                try self.settings_panel.project_operator_token.appendSlice(self.allocator, token);
+            }
+        }
+        try self.config.setRoleToken(role, token);
+        if (set_active) try self.config.setActiveRole(role);
+        try self.config.save();
+    }
+
+    fn setOperatorToken(self: *App, token: []const u8) !void {
+        try self.setRoleToken(.admin, token, true);
+    }
+
+    fn setUserToken(self: *App, token: []const u8) !void {
+        try self.setRoleToken(.user, token, false);
+    }
+
+    fn setActiveConnectRole(self: *App, role: config_mod.Config.TokenRole) !void {
+        if (self.config.active_role == role) return;
+        try self.config.setActiveRole(role);
+        try self.config.save();
+
+        const role_name = if (role == .admin) "admin" else "user";
+        const status = try std.fmt.allocPrint(
+            self.allocator,
+            if (self.connection_state == .connected)
+                "Connect role set to {s}; reconnect to apply."
+            else
+                "Connect role set to {s}.",
+            .{role_name},
+        );
+        defer self.allocator.free(status);
+        self.setConnectionState(self.connection_state, status);
+    }
+
+    fn parseRequiredTokenField(self: *App, payload_json: []const u8) ![]u8 {
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, payload_json, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return error.InvalidResponse;
+        const token_val = parsed.value.object.get("token") orelse return error.InvalidResponse;
+        if (token_val != .string or token_val.string.len == 0) return error.InvalidResponse;
+        return self.allocator.dupe(u8, token_val.string);
+    }
+
+    fn requestAuthStatusSnapshot(self: *App) !AuthStatusSnapshot {
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
+
+        const payload_json = try control_plane.requestControlPayloadJson(
+            self.allocator,
+            client,
+            &self.message_counter,
+            "control.auth_status",
+            null,
+        );
+        defer self.allocator.free(payload_json);
+
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, payload_json, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return error.InvalidResponse;
+        const root = parsed.value.object;
+
+        const admin_value = root.get("admin_token") orelse return error.InvalidResponse;
+        if (admin_value != .string) return error.InvalidResponse;
+        const user_value = root.get("user_token") orelse return error.InvalidResponse;
+        if (user_value != .string) return error.InvalidResponse;
+
+        return .{
+            .admin_token = try self.allocator.dupe(u8, admin_value.string),
+            .user_token = try self.allocator.dupe(u8, user_value.string),
+            .path = if (root.get("path")) |value| switch (value) {
+                .string => try self.allocator.dupe(u8, value.string),
+                .null => null,
+                else => return error.InvalidResponse,
+            } else null,
+        };
+    }
+
+    fn authSnapshotRoleToken(snapshot: *const AuthStatusSnapshot, role: []const u8) ![]const u8 {
+        if (std.mem.eql(u8, role, "admin")) return snapshot.admin_token;
+        if (std.mem.eql(u8, role, "user")) return snapshot.user_token;
+        return error.InvalidArguments;
+    }
+
+    fn copyTextToClipboard(self: *App, text: []const u8) !void {
+        if (text.len == 0) return;
+        const buf = try self.allocator.alloc(u8, text.len + 1);
+        defer self.allocator.free(buf);
+        @memcpy(buf[0..text.len], text);
+        buf[text.len] = 0;
+        const zslice: [:0]const u8 = buf[0..text.len :0];
+        zapp.clipboard.setTextZ(zslice);
+    }
+
+    fn fetchAuthStatusFromPanel(self: *App, reveal_tokens: bool) !void {
+        var snapshot = try self.requestAuthStatusSnapshot();
+        defer snapshot.deinit(self.allocator);
+
+        const admin_display_owned = if (reveal_tokens)
+            null
+        else
+            try maskTokenForDisplay(self.allocator, snapshot.admin_token);
+        defer if (admin_display_owned) |value| self.allocator.free(value);
+        const user_display_owned = if (reveal_tokens)
+            null
+        else
+            try maskTokenForDisplay(self.allocator, snapshot.user_token);
+        defer if (user_display_owned) |value| self.allocator.free(value);
+        const admin_display = if (admin_display_owned) |value| value else snapshot.admin_token;
+        const user_display = if (user_display_owned) |value| value else snapshot.user_token;
+        const path = snapshot.path orelse "(none)";
+
+        const msg = try std.fmt.allocPrint(
+            self.allocator,
+            "Auth status: admin={s} user={s} path={s}{s}",
+            .{
+                admin_display,
+                user_display,
+                path,
+                if (reveal_tokens) "" else " (masked; use reveal/copy buttons for full token)",
+            },
+        );
+        defer self.allocator.free(msg);
+        try self.appendMessage("system", msg, null);
+    }
+
+    fn revealAuthTokenFromPanel(self: *App, role: []const u8) !void {
+        var snapshot = try self.requestAuthStatusSnapshot();
+        defer snapshot.deinit(self.allocator);
+        const token = try authSnapshotRoleToken(&snapshot, role);
+        const msg = try std.fmt.allocPrint(self.allocator, "Auth {s} token: {s}", .{ role, token });
+        defer self.allocator.free(msg);
+        try self.appendMessage("system", msg, null);
+    }
+
+    fn copyAuthTokenFromPanel(self: *App, role: []const u8) !void {
+        var snapshot = try self.requestAuthStatusSnapshot();
+        defer snapshot.deinit(self.allocator);
+        const token = try authSnapshotRoleToken(&snapshot, role);
+        try self.copyTextToClipboard(token);
+        const msg = try std.fmt.allocPrint(self.allocator, "Copied auth {s} token to clipboard", .{role});
+        defer self.allocator.free(msg);
+        try self.appendMessage("system", msg, null);
+    }
+
+    fn rotateAuthTokenFromPanel(self: *App, role: []const u8) !void {
+        if (!std.mem.eql(u8, role, "admin") and !std.mem.eql(u8, role, "user")) {
+            return error.InvalidArguments;
+        }
+
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
+
+        const escaped_role = try jsonEscape(self.allocator, role);
+        defer self.allocator.free(escaped_role);
+        const payload = try std.fmt.allocPrint(self.allocator, "{{\"role\":\"{s}\"}}", .{escaped_role});
+        defer self.allocator.free(payload);
+
+        const response_json = try control_plane.requestControlPayloadJson(
+            self.allocator,
+            client,
+            &self.message_counter,
+            "control.auth_rotate",
+            payload,
+        );
+        defer self.allocator.free(response_json);
+
+        const token = try self.parseRequiredTokenField(response_json);
+        defer self.allocator.free(token);
+
+        const masked = try maskTokenForDisplay(self.allocator, token);
+        defer self.allocator.free(masked);
+        if (std.mem.eql(u8, role, "admin")) {
+            try self.setOperatorToken(token);
+            const msg = try std.fmt.allocPrint(
+                self.allocator,
+                "Rotated admin token: {s} (saved; use reveal/copy buttons for full token)",
+                .{masked},
+            );
+            defer self.allocator.free(msg);
+            try self.appendMessage("system", msg, null);
+            return;
+        }
+
+        try self.setUserToken(token);
+        const msg = try std.fmt.allocPrint(
+            self.allocator,
+            "Rotated user token: {s} (saved; use reveal/copy buttons for full token)",
+            .{masked},
+        );
+        defer self.allocator.free(msg);
+        try self.appendMessage("system", msg, null);
     }
 
     fn createProjectFromPanel(self: *App) !void {
@@ -4183,7 +3990,54 @@ const App = struct {
         );
         if (url_focused) self.settings_panel.focused_field = .server_url;
 
-        y += input_height + pad;
+        y += input_height + pad * 0.5;
+        self.drawLabel(
+            rect.min[0] + pad,
+            y,
+            "Connect role",
+            self.theme.colors.text_primary,
+        );
+        y += 20.0 * self.ui_scale;
+        const role_button_width: f32 = @max(120.0, (rect_width - pad * 3.0) * 0.5);
+        const connect_role_admin_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            role_button_width,
+            input_height,
+        );
+        const connect_role_user_rect = Rect.fromXYWH(
+            connect_role_admin_rect.max[0] + pad,
+            y,
+            role_button_width,
+            input_height,
+        );
+        if (self.drawButtonWidget(
+            connect_role_admin_rect,
+            "Admin",
+            .{ .variant = if (self.config.active_role == .admin) .primary else .secondary },
+        )) {
+            self.setActiveConnectRole(.admin) catch |err| {
+                std.log.err("Failed to set connect role admin: {s}", .{@errorName(err)});
+            };
+        }
+        if (self.drawButtonWidget(
+            connect_role_user_rect,
+            "User",
+            .{ .variant = if (self.config.active_role == .user) .primary else .secondary },
+        )) {
+            self.setActiveConnectRole(.user) catch |err| {
+                std.log.err("Failed to set connect role user: {s}", .{@errorName(err)});
+            };
+        }
+        y += input_height + 4.0 * self.ui_scale;
+        self.drawLabel(
+            rect.min[0] + pad,
+            y,
+            if (self.connection_state == .connected) "Role applies on next reconnect" else "Role applies on next connect",
+            self.theme.colors.text_secondary,
+        );
+
+        y += 18.0 * self.ui_scale + pad * 0.5;
         self.drawLabel(
             rect.min[0] + pad,
             y,
@@ -4204,6 +4058,28 @@ const App = struct {
             .{ .placeholder = "main" },
         );
         if (default_session_focused) self.settings_panel.focused_field = .default_session;
+
+        y += input_height + pad;
+        self.drawLabel(
+            rect.min[0] + pad,
+            y,
+            "Default agent",
+            self.theme.colors.text_primary,
+        );
+        y += 20.0 * self.ui_scale;
+        const default_agent_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            @max(200.0, rect_width - pad * 2.0),
+            input_height,
+        );
+        const default_agent_focused = self.drawTextInputWidget(
+            default_agent_rect,
+            self.settings_panel.default_agent.items,
+            self.settings_panel.focused_field == .default_agent,
+            .{ .placeholder = "leave empty for role default" },
+        );
+        if (default_agent_focused) self.settings_panel.focused_field = .default_agent;
 
         y += input_height + pad;
         self.drawLabel(
@@ -4311,8 +4187,10 @@ const App = struct {
         }
 
         if (self.mouse_clicked and
+            isSettingsPanelFocusField(self.settings_panel.focused_field) and
             !input_rect.contains(.{ self.mouse_x, self.mouse_y }) and
             !default_session_rect.contains(.{ self.mouse_x, self.mouse_y }) and
+            !default_agent_rect.contains(.{ self.mouse_x, self.mouse_y }) and
             !ui_theme_rect.contains(.{ self.mouse_x, self.mouse_y }) and
             !ui_profile_rect.contains(.{ self.mouse_x, self.mouse_y }) and
             !ui_theme_pack_rect.contains(.{ self.mouse_x, self.mouse_y }))
@@ -4565,7 +4443,7 @@ const App = struct {
             operator_token_rect,
             self.settings_panel.project_operator_token.items,
             self.settings_panel.focused_field == .project_operator_token,
-            .{ .placeholder = "(fallback: config auth token)" },
+            .{ .placeholder = "(fallback: saved admin token)" },
         );
         if (operator_token_focused) self.settings_panel.focused_field = .project_operator_token;
 
@@ -4632,6 +4510,111 @@ const App = struct {
         if (self.drawButtonWidget(debug_rect, "Open Debug", .{ .variant = .secondary })) {
             _ = self.ensureDebugPanel(manager) catch |err| {
                 std.log.err("Failed to open debug panel: {s}", .{@errorName(err)});
+            };
+        }
+
+        y += button_height + pad;
+        const auth_status_rect = Rect.fromXYWH(rect.min[0] + pad, y, button_width, button_height);
+        const auth_rotate_user_rect = Rect.fromXYWH(auth_status_rect.max[0] + pad, y, button_width, button_height);
+        const auth_rotate_admin_rect = Rect.fromXYWH(auth_rotate_user_rect.max[0] + pad, y, button_width, button_height);
+
+        if (self.drawButtonWidget(
+            auth_status_rect,
+            "Auth Status",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            self.fetchAuthStatusFromPanel(false) catch |err| {
+                const msg = self.formatControlOpError("Auth status failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setWorkspaceError(text);
+                }
+            };
+        }
+        if (self.drawButtonWidget(
+            auth_rotate_user_rect,
+            "Rotate User",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            self.rotateAuthTokenFromPanel("user") catch |err| {
+                const msg = self.formatControlOpError("Auth rotate(user) failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setWorkspaceError(text);
+                }
+            };
+        }
+        if (self.drawButtonWidget(
+            auth_rotate_admin_rect,
+            "Rotate Admin",
+            .{ .variant = .primary, .disabled = self.connection_state != .connected },
+        )) {
+            self.rotateAuthTokenFromPanel("admin") catch |err| {
+                const msg = self.formatControlOpError("Auth rotate(admin) failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setWorkspaceError(text);
+                }
+            };
+        }
+
+        y += button_height + pad;
+        const auth_reveal_admin_rect = Rect.fromXYWH(rect.min[0] + pad, y, button_width, button_height);
+        const auth_copy_admin_rect = Rect.fromXYWH(auth_reveal_admin_rect.max[0] + pad, y, button_width, button_height);
+        const auth_reveal_user_rect = Rect.fromXYWH(auth_copy_admin_rect.max[0] + pad, y, button_width, button_height);
+        if (self.drawButtonWidget(
+            auth_reveal_admin_rect,
+            "Reveal Admin",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            self.revealAuthTokenFromPanel("admin") catch |err| {
+                const msg = self.formatControlOpError("Reveal admin token failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setWorkspaceError(text);
+                }
+            };
+        }
+        if (self.drawButtonWidget(
+            auth_copy_admin_rect,
+            "Copy Admin",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            self.copyAuthTokenFromPanel("admin") catch |err| {
+                const msg = self.formatControlOpError("Copy admin token failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setWorkspaceError(text);
+                }
+            };
+        }
+        if (self.drawButtonWidget(
+            auth_reveal_user_rect,
+            "Reveal User",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            self.revealAuthTokenFromPanel("user") catch |err| {
+                const msg = self.formatControlOpError("Reveal user token failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setWorkspaceError(text);
+                }
+            };
+        }
+
+        y += button_height + pad;
+        const auth_copy_user_rect = Rect.fromXYWH(rect.min[0] + pad, y, button_width, button_height);
+        if (self.drawButtonWidget(
+            auth_copy_user_rect,
+            "Copy User",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            self.copyAuthTokenFromPanel("user") catch |err| {
+                const msg = self.formatControlOpError("Copy user token failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setWorkspaceError(text);
+                }
             };
         }
 
@@ -4775,6 +4758,7 @@ const App = struct {
         }
 
         if (self.mouse_clicked and
+            isProjectPanelFocusField(self.settings_panel.focused_field) and
             clicked_outside_project_selector and
             !project_token_rect.contains(.{ self.mouse_x, self.mouse_y }) and
             !create_name_rect.contains(.{ self.mouse_x, self.mouse_y }) and
@@ -5888,6 +5872,148 @@ const App = struct {
         return state.focused;
     }
 
+    fn selectedProjectToken(self: *App, project_id: []const u8) ?[]const u8 {
+        if (project_id.len == 0) return null;
+        if (self.settings_panel.project_token.items.len > 0) return self.settings_panel.project_token.items;
+        return self.config.getProjectToken(project_id);
+    }
+
+    fn selectedAgentId(self: *App) ?[]const u8 {
+        if (self.settings_panel.default_agent.items.len > 0) return self.settings_panel.default_agent.items;
+        return self.config.selectedAgent();
+    }
+
+    fn parseAgentFromSessionListPayload(
+        self: *App,
+        payload_json: []const u8,
+        preferred_session_key: []const u8,
+    ) ![]u8 {
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, payload_json, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return error.InvalidResponse;
+
+        const root = parsed.value.object;
+        const active_session_key = if (root.get("active_session")) |value| switch (value) {
+            .string => value.string,
+            else => null,
+        } else null;
+        const sessions = root.get("sessions") orelse return error.InvalidResponse;
+        if (sessions != .array) return error.InvalidResponse;
+
+        var preferred_agent: ?[]const u8 = null;
+        var active_agent: ?[]const u8 = null;
+        var fallback_agent: ?[]const u8 = null;
+        for (sessions.array.items) |entry| {
+            if (entry != .object) continue;
+            const session_key = if (entry.object.get("session_key")) |value| switch (value) {
+                .string => value.string,
+                else => null,
+            } else null;
+            const agent_id = if (entry.object.get("agent_id")) |value| switch (value) {
+                .string => value.string,
+                else => null,
+            } else null;
+            if (session_key == null or agent_id == null) continue;
+            if (fallback_agent == null) fallback_agent = agent_id;
+            if (active_session_key != null and std.mem.eql(u8, active_session_key.?, session_key.?)) {
+                active_agent = agent_id;
+            }
+            if (std.mem.eql(u8, preferred_session_key, session_key.?)) {
+                preferred_agent = agent_id;
+            }
+        }
+
+        const selected = preferred_agent orelse active_agent orelse fallback_agent orelse return error.InvalidResponse;
+        return self.allocator.dupe(u8, selected);
+    }
+
+    fn fetchDefaultAgentFromServer(
+        self: *App,
+        client: *ws_client_mod.WebSocketClient,
+        preferred_session_key: []const u8,
+    ) ![]u8 {
+        const payload_json = try control_plane.requestControlPayloadJson(
+            self.allocator,
+            client,
+            &self.message_counter,
+            "control.session_list",
+            null,
+        );
+        defer self.allocator.free(payload_json);
+        return self.parseAgentFromSessionListPayload(payload_json, preferred_session_key);
+    }
+
+    fn buildSessionAttachPayload(
+        self: *App,
+        session_key: []const u8,
+        agent_id: []const u8,
+        project_id: ?[]const u8,
+        project_token: ?[]const u8,
+    ) ![]u8 {
+        const escaped_session = try jsonEscape(self.allocator, session_key);
+        defer self.allocator.free(escaped_session);
+        const escaped_agent = try jsonEscape(self.allocator, agent_id);
+        defer self.allocator.free(escaped_agent);
+
+        var out = std.ArrayListUnmanaged(u8){};
+        defer out.deinit(self.allocator);
+        try out.writer(self.allocator).print(
+            "{{\"session_key\":\"{s}\",\"agent_id\":\"{s}\"",
+            .{ escaped_session, escaped_agent },
+        );
+        if (project_id) |project| {
+            const escaped_project = try jsonEscape(self.allocator, project);
+            defer self.allocator.free(escaped_project);
+            try out.writer(self.allocator).print(",\"project_id\":\"{s}\"", .{escaped_project});
+        }
+        if (project_token) |token| {
+            const escaped_token = try jsonEscape(self.allocator, token);
+            defer self.allocator.free(escaped_token);
+            try out.writer(self.allocator).print(",\"project_token\":\"{s}\"", .{escaped_token});
+        }
+        try out.append(self.allocator, '}');
+        return out.toOwnedSlice(self.allocator);
+    }
+
+    fn setDefaultAgentInSettings(self: *App, agent_id: []const u8) !void {
+        self.settings_panel.default_agent.clearRetainingCapacity();
+        if (agent_id.len > 0) {
+            try self.settings_panel.default_agent.appendSlice(self.allocator, agent_id);
+        }
+    }
+
+    fn attachSessionBinding(self: *App, client: *ws_client_mod.WebSocketClient, session_key: []const u8) !void {
+        const resolved_agent = if (self.selectedAgentId()) |value|
+            try self.allocator.dupe(u8, value)
+        else
+            try self.fetchDefaultAgentFromServer(client, session_key);
+        defer self.allocator.free(resolved_agent);
+
+        const project_id = self.selectedProjectId();
+        const project_token = if (project_id) |value|
+            self.selectedProjectToken(value)
+        else
+            null;
+        const payload_json = try self.buildSessionAttachPayload(
+            session_key,
+            resolved_agent,
+            project_id,
+            project_token,
+        );
+        defer self.allocator.free(payload_json);
+
+        const response_payload = try control_plane.requestControlPayloadJson(
+            self.allocator,
+            client,
+            &self.message_counter,
+            "control.session_attach",
+            payload_json,
+        );
+        defer self.allocator.free(response_payload);
+
+        try self.setDefaultAgentInSettings(resolved_agent);
+    }
+
     fn tryConnect(self: *App, manager: *panel_manager.PanelManager) !void {
         if (self.settings_panel.server_url.items.len == 0) {
             self.setConnectionState(.error_state, "Server URL cannot be empty");
@@ -5906,7 +6032,10 @@ const App = struct {
         self.clearPendingDebugRequest();
 
         const effective_url = self.settings_panel.server_url.items;
-        const connect_token = if (self.config.token.len > 0) self.config.token else self.config.auth_token;
+        const connect_token = if (self.config.activeRoleToken().len > 0)
+            self.config.activeRoleToken()
+        else
+            "";
         const ws_client = ws_client_mod.WebSocketClient.init(self.allocator, effective_url, connect_token) catch |err| {
             const msg = try std.fmt.allocPrint(self.allocator, "Client init failed: {s}", .{@errorName(err)});
             defer self.allocator.free(msg);
@@ -5933,13 +6062,34 @@ const App = struct {
                 self.setConnectionState(.error_state, msg);
                 return;
             };
+
+            if (self.settings_panel.default_session.items.len == 0) {
+                if (self.config.default_session) |default_session| {
+                    const seed = if (default_session.len > 0) default_session else "main";
+                    try self.settings_panel.default_session.appendSlice(self.allocator, seed);
+                } else {
+                    try self.settings_panel.default_session.appendSlice(self.allocator, "main");
+                }
+            }
+            const attach_session = self.settings_panel.default_session.items;
+            try self.ensureSessionExists(attach_session, attach_session);
+
+            self.attachSessionBinding(client, attach_session) catch |err| {
+                client.deinit();
+                self.ws_client = null;
+                const detail = control_plane.lastRemoteError() orelse @errorName(err);
+                const msg = try std.fmt.allocPrint(self.allocator, "Session attach failed: {s}", .{detail});
+                defer self.allocator.free(msg);
+                self.setConnectionState(.error_state, msg);
+                return;
+            };
         }
 
         self.setConnectionState(.connected, "Connected");
         self.settings_panel.focused_field = .none;
 
         // Save URL to config on successful connect
-        self.config.setAuthToken(connect_token) catch {};
+        self.config.setRoleToken(self.config.active_role, connect_token) catch {};
         if (self.settings_panel.default_session.items.len == 0) {
             try self.settings_panel.default_session.appendSlice(self.allocator, "main");
         }
@@ -5955,12 +6105,7 @@ const App = struct {
         };
 
         if (self.chat_sessions.items.len == 0) {
-            if (self.config.default_session) |default_session| {
-                const seed = if (default_session.len > 0) default_session else "main";
-                try self.ensureSessionExists(seed, seed);
-            } else {
-                try self.ensureSessionExists("main", "Main");
-            }
+            try self.ensureSessionExists("main", "Main");
         } else if (self.current_session_key == null) {
             try self.setCurrentSessionKey(self.chat_sessions.items[0].key);
         }
@@ -5992,7 +6137,6 @@ const App = struct {
     }
 
     fn disconnect(self: *App) void {
-        self.drainAsyncChatWorker();
         if (self.ws_client) |*client| {
             // Drain any pending messages before disconnecting
             while (client.tryReceive()) |msg| {
@@ -6008,255 +6152,6 @@ const App = struct {
         self.clearPendingDebugRequest();
         self.clearWorkspaceData();
         self.clearFilesystemData();
-    }
-
-    fn drainAsyncChatWorker(self: *App) void {
-        var worker_thread: ?std.Thread = null;
-
-        self.async_chat_worker.mutex.lock();
-        worker_thread = self.async_chat_worker.worker_thread;
-        self.async_chat_worker.worker_thread = null;
-        self.async_chat_worker.mutex.unlock();
-
-        if (worker_thread) |thread| thread.join();
-
-        var response: ?[]u8 = null;
-        var error_text: ?[]u8 = null;
-        var job_id: ?[]u8 = null;
-        var correlation_id: ?[]u8 = null;
-        var pending_debug_frames: [][]u8 = &.{};
-        self.async_chat_worker.mutex.lock();
-        response = self.async_chat_worker.response;
-        error_text = self.async_chat_worker.error_text;
-        job_id = self.async_chat_worker.job_id;
-        correlation_id = self.async_chat_worker.correlation_id;
-        self.async_chat_worker.response = null;
-        self.async_chat_worker.error_text = null;
-        self.async_chat_worker.job_id = null;
-        self.async_chat_worker.correlation_id = null;
-        if (self.async_chat_worker.pending_debug_frames.items.len > 0) {
-            pending_debug_frames = self.async_chat_worker.pending_debug_frames.toOwnedSlice(std.heap.page_allocator) catch &.{};
-            self.async_chat_worker.pending_debug_frames = .{};
-        }
-        self.async_chat_worker.in_flight = false;
-        self.async_chat_worker.done = false;
-        self.async_chat_worker.mutex.unlock();
-
-        if (response) |value| std.heap.page_allocator.free(value);
-        if (error_text) |value| std.heap.page_allocator.free(value);
-        if (job_id) |value| std.heap.page_allocator.free(value);
-        if (correlation_id) |value| std.heap.page_allocator.free(value);
-        if (pending_debug_frames.len > 0) {
-            for (pending_debug_frames) |payload| std.heap.page_allocator.free(payload);
-            std.heap.page_allocator.free(pending_debug_frames);
-        }
-    }
-
-    fn startAsyncChatSend(self: *App, text: []const u8) !void {
-        const client = self.ws_client orelse return error.NotConnected;
-
-        self.async_chat_worker.mutex.lock();
-        if (self.async_chat_worker.in_flight) {
-            self.async_chat_worker.mutex.unlock();
-            return error.SendInProgress;
-        }
-        self.async_chat_worker.mutex.unlock();
-
-        const page_allocator = std.heap.page_allocator;
-        const url = try page_allocator.dupe(u8, client.url_buf);
-        errdefer page_allocator.free(url);
-        const token = try page_allocator.dupe(u8, client.token_buf);
-        errdefer page_allocator.free(token);
-        const message = try page_allocator.dupe(u8, text);
-        errdefer page_allocator.free(message);
-        const worker_project_id = if (self.settings_panel.project_id.items.len > 0)
-            try page_allocator.dupe(u8, self.settings_panel.project_id.items)
-        else
-            null;
-        errdefer if (worker_project_id) |value| page_allocator.free(value);
-        var token_source: ?[]const u8 = null;
-        if (worker_project_id != null) {
-            if (self.settings_panel.project_token.items.len > 0) {
-                token_source = self.settings_panel.project_token.items;
-            } else {
-                token_source = self.config.getProjectToken(worker_project_id.?);
-            }
-        }
-        const worker_project_token = if (token_source) |value|
-            try page_allocator.dupe(u8, value)
-        else
-            null;
-        errdefer if (worker_project_token) |value| page_allocator.free(value);
-        const context = try page_allocator.create(AsyncChatWorkerContext);
-        errdefer page_allocator.destroy(context);
-
-        self.async_chat_worker.mutex.lock();
-        defer self.async_chat_worker.mutex.unlock();
-        if (self.async_chat_worker.in_flight) return error.SendInProgress;
-
-        if (self.async_chat_worker.response) |value| {
-            page_allocator.free(value);
-            self.async_chat_worker.response = null;
-        }
-        if (self.async_chat_worker.error_text) |value| {
-            page_allocator.free(value);
-            self.async_chat_worker.error_text = null;
-        }
-        if (self.async_chat_worker.job_id) |value| {
-            page_allocator.free(value);
-            self.async_chat_worker.job_id = null;
-        }
-        if (self.async_chat_worker.correlation_id) |value| {
-            page_allocator.free(value);
-            self.async_chat_worker.correlation_id = null;
-        }
-        if (self.async_chat_worker.pending_debug_frames.items.len > 0) {
-            for (self.async_chat_worker.pending_debug_frames.items) |payload| {
-                page_allocator.free(payload);
-            }
-            self.async_chat_worker.pending_debug_frames.deinit(page_allocator);
-            self.async_chat_worker.pending_debug_frames = .{};
-        }
-
-        context.* = .{
-            .state = &self.async_chat_worker,
-            .url = url,
-            .token = token,
-            .message = message,
-            .project_id = worker_project_id,
-            .project_token = worker_project_token,
-            .subscribe_debug = self.debug_stream_enabled or self.debug_stream_pending,
-        };
-
-        self.async_chat_worker.in_flight = true;
-        self.async_chat_worker.done = false;
-        self.async_chat_worker.worker_thread = null;
-
-        const worker = std.Thread.spawn(.{}, runAsyncChatSendWorker, .{context}) catch |err| {
-            self.async_chat_worker.in_flight = false;
-            return err;
-        };
-        self.async_chat_worker.worker_thread = worker;
-    }
-
-    fn pollAsyncChatSendCompletion(self: *App) !void {
-        var worker_thread: ?std.Thread = null;
-        var response: ?[]u8 = null;
-        var error_text: ?[]u8 = null;
-        var worker_job_id: ?[]u8 = null;
-        var worker_correlation_id: ?[]u8 = null;
-        var pending_debug_frames: [][]u8 = &.{};
-
-        self.async_chat_worker.mutex.lock();
-        if (self.async_chat_worker.pending_debug_frames.items.len > 0) {
-            pending_debug_frames = self.async_chat_worker.pending_debug_frames.toOwnedSlice(std.heap.page_allocator) catch &.{};
-            self.async_chat_worker.pending_debug_frames = .{};
-        }
-        if (!self.async_chat_worker.done) {
-            self.async_chat_worker.mutex.unlock();
-            if (pending_debug_frames.len > 0) {
-                defer std.heap.page_allocator.free(pending_debug_frames);
-                for (pending_debug_frames) |raw| {
-                    defer std.heap.page_allocator.free(raw);
-                    self.handleWorkerDebugFrame(raw) catch |err| {
-                        std.log.warn("[GUI] dropped worker debug frame: {s}", .{@errorName(err)});
-                    };
-                }
-            }
-            return;
-        }
-        worker_thread = self.async_chat_worker.worker_thread;
-        self.async_chat_worker.worker_thread = null;
-        response = self.async_chat_worker.response;
-        error_text = self.async_chat_worker.error_text;
-        worker_job_id = self.async_chat_worker.job_id;
-        worker_correlation_id = self.async_chat_worker.correlation_id;
-        self.async_chat_worker.response = null;
-        self.async_chat_worker.error_text = null;
-        self.async_chat_worker.job_id = null;
-        self.async_chat_worker.correlation_id = null;
-        self.async_chat_worker.done = false;
-        self.async_chat_worker.mutex.unlock();
-
-        if (pending_debug_frames.len > 0) {
-            defer std.heap.page_allocator.free(pending_debug_frames);
-            for (pending_debug_frames) |raw| {
-                defer std.heap.page_allocator.free(raw);
-                self.handleWorkerDebugFrame(raw) catch |err| {
-                    std.log.warn("[GUI] dropped worker debug frame: {s}", .{@errorName(err)});
-                };
-            }
-        }
-
-        if (worker_thread) |thread| thread.join();
-        defer if (response) |value| std.heap.page_allocator.free(value);
-        defer if (error_text) |value| std.heap.page_allocator.free(value);
-        defer if (worker_job_id) |value| std.heap.page_allocator.free(value);
-        defer if (worker_correlation_id) |value| std.heap.page_allocator.free(value);
-
-        if (response) |value| {
-            if (self.pending_send_message_id) |message_id| {
-                try self.setMessageState(message_id, null);
-            }
-            const session_key = if (self.pending_send_session_key) |key|
-                key
-            else
-                try self.currentSessionOrDefault();
-            try self.appendMessageForSession(session_key, "assistant", value, null);
-            self.clearPendingSend();
-            return;
-        }
-
-        const err_text = error_text orelse "Send failed";
-        if (worker_job_id) |job_id| {
-            if (self.pending_send_job_id) |value| {
-                self.allocator.free(value);
-                self.pending_send_job_id = null;
-            }
-            if (self.pending_send_correlation_id) |value| {
-                self.allocator.free(value);
-                self.pending_send_correlation_id = null;
-            }
-            self.pending_send_job_id = self.allocator.dupe(u8, job_id) catch null;
-            self.pending_send_correlation_id = if (worker_correlation_id) |corr|
-                self.allocator.dupe(u8, corr) catch null
-            else
-                null;
-            self.pending_send_resume_notified = false;
-            self.pending_send_last_resume_attempt_ms = 0;
-
-            if (try self.tryResumePendingSendJob()) return;
-
-            if (!self.pending_send_resume_notified) {
-                const msg = std.fmt.allocPrint(
-                    self.allocator,
-                    "Send interrupted, job {s} is queued. Reconnect to resume result retrieval.",
-                    .{job_id},
-                ) catch null;
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    try self.appendMessage("system", text, null);
-                }
-                self.pending_send_resume_notified = true;
-            }
-            return;
-        }
-
-        const escaped_error = jsonEscape(self.allocator, err_text) catch null;
-        defer if (escaped_error) |value| self.allocator.free(value);
-        if (escaped_error) |encoded| {
-            const payload = std.fmt.allocPrint(self.allocator, "{{\"message\":\"{s}\"}}", .{encoded}) catch null;
-            if (payload) |value| {
-                defer self.allocator.free(value);
-                self.appendDebugEvent(std.time.milliTimestamp(), "client.send_error", null, value) catch {};
-            }
-        }
-
-        try self.appendMessage("system", err_text, null);
-        if (self.pending_send_message_id) |message_id| {
-            try self.setMessageFailed(message_id);
-        }
-        self.clearPendingSend();
     }
 
     fn saveConfig(self: *App) !void {
@@ -6296,6 +6191,12 @@ const App = struct {
             try self.appendMessage("system", "Wait for the current send to finish.", null);
             return;
         }
+        const client = if (self.ws_client) |*value|
+            value
+        else {
+            try self.appendMessage("system", "No active websocket connection", null);
+            return;
+        };
 
         // Keep a session key for this send
         const session_key = try self.currentSessionOrDefault();
@@ -6303,16 +6204,33 @@ const App = struct {
             try self.appendMessage("system", "No active session available", null);
             return;
         }
+        self.attachSessionBinding(client, session_key) catch |err| {
+            const detail = control_plane.lastRemoteError() orelse @errorName(err);
+            const err_text = try std.fmt.allocPrint(self.allocator, "Session attach failed: {s}", .{detail});
+            defer self.allocator.free(err_text);
+            try self.appendMessage("system", err_text, null);
+            return err;
+        };
 
         const user_msg_id = try self.nextMessageId("msg");
         const appended_user_msg_id = try self.appendMessageWithIdForSession(session_key, "user", text, .sending, user_msg_id);
         defer self.allocator.free(appended_user_msg_id);
         self.allocator.free(user_msg_id);
         try self.setPendingSend(self.allocator, appended_user_msg_id, session_key);
+
+        const request_id = try self.nextMessageId("send");
+        defer self.allocator.free(request_id);
+        if (self.pending_send_request_id) |value| {
+            self.allocator.free(value);
+            self.pending_send_request_id = null;
+        }
+        self.pending_send_request_id = try self.allocator.dupe(u8, request_id);
         self.awaiting_reply = true;
 
-        self.startAsyncChatSend(text) catch |err| {
-            std.log.err("[GUI] sendChatMessageText: async send start failed: {s}", .{@errorName(err)});
+        const payload = try protocol_messages.buildSessionSend(self.allocator, request_id, text, session_key);
+        defer self.allocator.free(payload);
+        client.send(payload) catch |err| {
+            std.log.err("[GUI] sendChatMessageText: websocket send failed: {s}", .{@errorName(err)});
             const err_text = try std.fmt.allocPrint(self.allocator, "Send failed: {s}", .{@errorName(err)});
             defer self.allocator.free(err_text);
             try self.appendMessage("system", err_text, null);
@@ -6766,12 +6684,6 @@ const App = struct {
         const job_id = self.pending_send_job_id orelse return false;
         const client = if (self.ws_client) |*value| value else return false;
 
-        var in_flight = false;
-        self.async_chat_worker.mutex.lock();
-        in_flight = self.async_chat_worker.in_flight;
-        self.async_chat_worker.mutex.unlock();
-        if (in_flight) return false;
-
         const now_ms = std.time.milliTimestamp();
         if (self.pending_send_last_resume_attempt_ms != 0 and now_ms - self.pending_send_last_resume_attempt_ms < 1_500) {
             return false;
@@ -6834,6 +6746,10 @@ const App = struct {
         message_id: []const u8,
         session_key: []const u8,
     ) !void {
+        if (self.pending_send_request_id) |value| {
+            allocator.free(value);
+            self.pending_send_request_id = null;
+        }
         if (self.pending_send_message_id) |value| allocator.free(value);
         if (self.pending_send_session_key) |value| allocator.free(value);
         if (self.pending_send_job_id) |value| {
@@ -7444,23 +7360,6 @@ const App = struct {
         try self.appendDebugEvent(timestamp, category, correlation_id, payload_json);
     }
 
-    fn handleWorkerDebugFrame(self: *App, msg: []const u8) !void {
-        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, msg, .{}) catch |err| {
-            self.recordDecodeError(@errorName(err), msg) catch {};
-            return;
-        };
-        defer parsed.deinit();
-
-        if (parsed.value != .object) {
-            self.recordDecodeError("non-object json", msg) catch {};
-            return;
-        }
-
-        const mt = protocol_messages.parseMessageType(msg) orelse return;
-        if (mt != .debug_event) return;
-        try self.handleDebugEventMessageWithStateSync(parsed.value.object, false);
-    }
-
     fn handleIncomingMessage(self: *App, msg: []const u8) !void {
         const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, msg, .{}) catch |err| {
             self.recordDecodeError(@errorName(err), msg) catch {};
@@ -7613,6 +7512,14 @@ const App = struct {
                     if (self.isPendingDebugRequest(request_id)) {
                         self.debug_stream_pending = false;
                         self.clearPendingDebugRequest();
+                    }
+                    if (self.pending_send_request_id) |pending| {
+                        if (std.mem.eql(u8, pending, request_id)) {
+                            if (self.pending_send_message_id) |message_id| {
+                                self.setMessageFailed(message_id) catch {};
+                            }
+                            self.clearPendingSend();
+                        }
                     }
                 }
                 try self.appendMessage("system", err_message, null);

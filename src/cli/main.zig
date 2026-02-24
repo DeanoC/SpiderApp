@@ -12,6 +12,9 @@ const unified = @import("ziggy-spider-protocol").unified;
 var g_client: ?WebSocketClient = null;
 var g_connected: bool = false;
 var g_control_ready: bool = false;
+var g_client_allocator: ?std.mem.Allocator = null;
+var g_client_url_owned: ?[]u8 = null;
+var g_client_token_owned: ?[]u8 = null;
 var g_control_request_counter: u64 = 0;
 var g_fsrpc_tag: u32 = 1;
 var g_fsrpc_fid: u32 = 2;
@@ -77,9 +80,37 @@ pub fn run(allocator: std.mem.Allocator) !void {
     }
 }
 
-fn getOrCreateClient(allocator: std.mem.Allocator, url: []const u8) !*WebSocketClient {
+fn resolveConnectToken(allocator: std.mem.Allocator, options: args.Options) ![]u8 {
+    if (options.operator_token) |value| {
+        if (value.len > 0) return allocator.dupe(u8, value);
+    }
+
+    var cfg = try loadCliConfig(allocator);
+    defer cfg.deinit();
+    if (options.role) |selected_role| {
+        const token_role: Config.TokenRole = if (selected_role == .admin) .admin else .user;
+        const role_token = cfg.getRoleToken(token_role);
+        if (role_token.len > 0) return allocator.dupe(u8, role_token);
+    }
+    const active_token = cfg.activeRoleToken();
+    if (active_token.len > 0) return allocator.dupe(u8, active_token);
+    return allocator.dupe(u8, "");
+}
+
+fn getOrCreateClient(allocator: std.mem.Allocator, options: args.Options) !*WebSocketClient {
     if (g_client == null) {
-        g_client = WebSocketClient.init(allocator, url, "");
+        g_client_allocator = allocator;
+        g_client_url_owned = try allocator.dupe(u8, options.url);
+        errdefer {
+            if (g_client_url_owned) |value| allocator.free(value);
+            g_client_url_owned = null;
+        }
+        g_client_token_owned = try resolveConnectToken(allocator, options);
+        errdefer {
+            if (g_client_token_owned) |value| allocator.free(value);
+            g_client_token_owned = null;
+        }
+        g_client = WebSocketClient.init(allocator, g_client_url_owned.?, g_client_token_owned.?);
     }
 
     if (!g_connected) {
@@ -95,12 +126,23 @@ fn getOrCreateClient(allocator: std.mem.Allocator, url: []const u8) !*WebSocketC
 }
 
 fn cleanupGlobalClient() void {
+    var maybe_allocator: ?std.mem.Allocator = g_client_allocator;
     if (g_client) |*client| {
+        maybe_allocator = client.allocator;
         client.deinit();
     }
     g_client = null;
+    if (g_client_url_owned) |value| {
+        if (maybe_allocator) |allocator| allocator.free(value);
+        g_client_url_owned = null;
+    }
+    if (g_client_token_owned) |value| {
+        if (maybe_allocator) |allocator| allocator.free(value);
+        g_client_token_owned = null;
+    }
     g_connected = false;
     g_control_ready = false;
+    g_client_allocator = null;
 }
 
 fn ensureUnifiedV2Control(allocator: std.mem.Allocator, client: *WebSocketClient) !void {
@@ -168,6 +210,16 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
                 .status => try executeWorkspaceStatus(allocator, options, cmd),
                 else => {
                     logger.err("Unknown workspace verb", .{});
+                    return error.InvalidArguments;
+                },
+            }
+        },
+        .auth => {
+            switch (cmd.verb) {
+                .status => try executeAuthStatus(allocator, options, cmd),
+                .rotate => try executeAuthRotate(allocator, options, cmd),
+                else => {
+                    logger.err("Unknown auth verb", .{});
                     return error.InvalidArguments;
                 },
             }
@@ -241,7 +293,7 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
                 return;
             }
 
-            const client = try getOrCreateClient(allocator, options.url);
+            const client = try getOrCreateClient(allocator, options);
             try ensureUnifiedV2Control(allocator, client);
             try stdout.print("Connected to {s}\n", .{options.url});
         },
@@ -425,7 +477,7 @@ fn maybeApplyProjectContext(
 fn executeProjectList(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     _ = cmd;
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    const client = try getOrCreateClient(allocator, options.url);
+    const client = try getOrCreateClient(allocator, options);
     try ensureUnifiedV2Control(allocator, client);
 
     var cfg = try loadCliConfig(allocator);
@@ -457,7 +509,7 @@ fn executeProjectInfo(allocator: std.mem.Allocator, options: args.Options, cmd: 
     }
 
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    const client = try getOrCreateClient(allocator, options.url);
+    const client = try getOrCreateClient(allocator, options);
     try ensureUnifiedV2Control(allocator, client);
 
     var detail = try control_plane.getProject(allocator, client, &g_control_request_counter, cmd.args[0]);
@@ -482,8 +534,7 @@ fn resolveOperatorToken(options: args.Options, cfg: *const Config) ?[]const u8 {
     if (options.operator_token) |value| {
         if (value.len > 0) return value;
     }
-    if (cfg.auth_token.len > 0) return cfg.auth_token;
-    if (cfg.token.len > 0) return cfg.token;
+    if (cfg.getRoleToken(.admin).len > 0) return cfg.getRoleToken(.admin);
     return null;
 }
 
@@ -504,7 +555,7 @@ fn executeProjectCreate(allocator: std.mem.Allocator, options: args.Options, cmd
     defer cfg.deinit();
 
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    const client = try getOrCreateClient(allocator, options.url);
+    const client = try getOrCreateClient(allocator, options);
     try ensureUnifiedV2Control(allocator, client);
 
     var created = try control_plane.createProject(
@@ -575,7 +626,7 @@ fn executeProjectUse(allocator: std.mem.Allocator, options: args.Options, cmd: a
     try cfg.setSelectedProject(project_id);
 
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    const client = try getOrCreateClient(allocator, options.url);
+    const client = try getOrCreateClient(allocator, options);
     try ensureUnifiedV2Control(allocator, client);
 
     const effective_token = if (cli_token) |token| token else cfg.getProjectToken(project_id);
@@ -614,7 +665,7 @@ fn parseProjectUpMountSpec(raw: []const u8) !ProjectUpMountSpec {
 
 fn executeProjectUp(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    const client = try getOrCreateClient(allocator, options.url);
+    const client = try getOrCreateClient(allocator, options);
     try ensureUnifiedV2Control(allocator, client);
 
     var cfg = try loadCliConfig(allocator);
@@ -769,7 +820,7 @@ fn executeProjectUp(allocator: std.mem.Allocator, options: args.Options, cmd: ar
 fn executeProjectDoctor(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     _ = cmd;
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    const client = try getOrCreateClient(allocator, options.url);
+    const client = try getOrCreateClient(allocator, options);
     try ensureUnifiedV2Control(allocator, client);
 
     var cfg = try loadCliConfig(allocator);
@@ -857,7 +908,7 @@ fn executeProjectDoctor(allocator: std.mem.Allocator, options: args.Options, cmd
 fn executeNodeList(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     _ = cmd;
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    const client = try getOrCreateClient(allocator, options.url);
+    const client = try getOrCreateClient(allocator, options);
     try ensureUnifiedV2Control(allocator, client);
 
     var nodes = try control_plane.listNodes(allocator, client, &g_control_request_counter);
@@ -883,7 +934,7 @@ fn executeNodeInfo(allocator: std.mem.Allocator, options: args.Options, cmd: arg
     }
 
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    const client = try getOrCreateClient(allocator, options.url);
+    const client = try getOrCreateClient(allocator, options);
     try ensureUnifiedV2Control(allocator, client);
 
     var node = try control_plane.getNode(allocator, client, &g_control_request_counter, cmd.args[0]);
@@ -898,7 +949,7 @@ fn executeNodeInfo(allocator: std.mem.Allocator, options: args.Options, cmd: arg
 
 fn executeWorkspaceStatus(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    const client = try getOrCreateClient(allocator, options.url);
+    const client = try getOrCreateClient(allocator, options);
     try ensureUnifiedV2Control(allocator, client);
 
     var cfg = try loadCliConfig(allocator);
@@ -953,6 +1004,156 @@ fn executeWorkspaceStatus(allocator: std.mem.Allocator, options: args.Options, c
     }
 }
 
+fn setLocalRoleToken(cfg: *Config, role: Config.TokenRole, token: []const u8) !void {
+    try cfg.setRoleToken(role, token);
+    try cfg.setActiveRole(role);
+}
+
+fn maskTokenForDisplay(allocator: std.mem.Allocator, token: []const u8) ![]u8 {
+    if (token.len == 0) return allocator.dupe(u8, "(empty)");
+    if (token.len <= 8) return allocator.dupe(u8, "****");
+    return std.fmt.allocPrint(
+        allocator,
+        "{s}...{s}",
+        .{ token[0..4], token[token.len - 4 ..] },
+    );
+}
+
+fn executeAuthStatus(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    var reveal_tokens = false;
+    for (cmd.args) |arg| {
+        if (std.mem.eql(u8, arg, "--reveal")) {
+            reveal_tokens = true;
+            continue;
+        }
+        logger.err("auth status only accepts --reveal", .{});
+        return error.InvalidArguments;
+    }
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    const payload_json = try control_plane.requestControlPayloadJson(
+        allocator,
+        client,
+        &g_control_request_counter,
+        "control.auth_status",
+        null,
+    );
+    defer allocator.free(payload_json);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) {
+        try stdout.print("{s}\n", .{payload_json});
+        return;
+    }
+
+    const admin_token = if (parsed.value.object.get("admin_token")) |value|
+        if (value == .string) value.string else "(invalid)"
+    else
+        "(missing)";
+    const user_token = if (parsed.value.object.get("user_token")) |value|
+        if (value == .string) value.string else "(invalid)"
+    else
+        "(missing)";
+    const path = if (parsed.value.object.get("path")) |value| switch (value) {
+        .string => value.string,
+        .null => "(none)",
+        else => "(invalid)",
+    } else "(missing)";
+
+    const mask_admin = !reveal_tokens and admin_token.len > 0 and admin_token[0] != '(';
+    const mask_user = !reveal_tokens and user_token.len > 0 and user_token[0] != '(';
+    const display_admin_owned = if (mask_admin)
+        try maskTokenForDisplay(allocator, admin_token)
+    else
+        null;
+    defer if (display_admin_owned) |value| allocator.free(value);
+    const display_user_owned = if (mask_user)
+        try maskTokenForDisplay(allocator, user_token)
+    else
+        null;
+    defer if (display_user_owned) |value| allocator.free(value);
+    const display_admin = if (display_admin_owned) |value| value else admin_token;
+    const display_user = if (display_user_owned) |value| value else user_token;
+
+    try stdout.print("Auth status\n", .{});
+    try stdout.print("  admin_token: {s}\n", .{display_admin});
+    try stdout.print("  user_token:  {s}\n", .{display_user});
+    try stdout.print("  path:        {s}\n", .{path});
+    if (!reveal_tokens) {
+        try stdout.print("  note: tokens are masked; run `auth status --reveal` to show full values\n", .{});
+    }
+}
+
+fn executeAuthRotate(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len == 0) {
+        logger.err("auth rotate requires a role: admin|user", .{});
+        return error.InvalidArguments;
+    }
+    const role = cmd.args[0];
+    var reveal_token = false;
+    for (cmd.args[1..]) |arg| {
+        if (std.mem.eql(u8, arg, "--reveal")) {
+            reveal_token = true;
+            continue;
+        }
+        logger.err("auth rotate only accepts role plus optional --reveal", .{});
+        return error.InvalidArguments;
+    }
+    if (!std.mem.eql(u8, role, "admin") and !std.mem.eql(u8, role, "user")) {
+        logger.err("auth rotate role must be admin or user", .{});
+        return error.InvalidArguments;
+    }
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    const escaped_role = try unified.jsonEscape(allocator, role);
+    defer allocator.free(escaped_role);
+    const request_payload = try std.fmt.allocPrint(allocator, "{{\"role\":\"{s}\"}}", .{escaped_role});
+    defer allocator.free(request_payload);
+
+    const payload_json = try control_plane.requestControlPayloadJson(
+        allocator,
+        client,
+        &g_control_request_counter,
+        "control.auth_rotate",
+        request_payload,
+    );
+    defer allocator.free(payload_json);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResponse;
+    const out_role = parsed.value.object.get("role") orelse return error.InvalidResponse;
+    if (out_role != .string) return error.InvalidResponse;
+    const token = parsed.value.object.get("token") orelse return error.InvalidResponse;
+    if (token != .string) return error.InvalidResponse;
+    const token_display_owned = if (reveal_token)
+        null
+    else
+        try maskTokenForDisplay(allocator, token.string);
+    defer if (token_display_owned) |value| allocator.free(value);
+    const token_display = if (token_display_owned) |value| value else token.string;
+
+    try stdout.print("Rotated auth token\n", .{});
+    try stdout.print("  role:  {s}\n", .{out_role.string});
+    try stdout.print("  token: {s}\n", .{token_display});
+    if (!reveal_token) {
+        try stdout.print("  note: token is masked; rerun with `--reveal` to print full value\n", .{});
+    }
+
+    var cfg = try loadCliConfig(allocator);
+    defer cfg.deinit();
+    const token_role: Config.TokenRole = if (std.mem.eql(u8, out_role.string, "admin")) .admin else .user;
+    try setLocalRoleToken(&cfg, token_role, token.string);
+    try cfg.save();
+    try stdout.print("  saved: local {s} token updated\n", .{if (token_role == .admin) "admin" else "user"});
+}
+
 fn executeChatSend(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     if (cmd.args.len == 0) {
         logger.err("chat send requires a message", .{});
@@ -963,7 +1164,7 @@ fn executeChatSend(allocator: std.mem.Allocator, options: args.Options, cmd: arg
     const message = try std.mem.join(allocator, " ", cmd.args);
     defer allocator.free(message);
 
-    const client = try getOrCreateClient(allocator, options.url);
+    const client = try getOrCreateClient(allocator, options);
     try maybeApplyProjectContext(allocator, options, client);
     logger.info("Negotiating FS-RPC session...", .{});
     try fsrpcBootstrap(allocator, client);
@@ -1058,7 +1259,7 @@ fn readJobStatus(allocator: std.mem.Allocator, client: *WebSocketClient, job_nam
 
 fn executeChatResume(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    const client = try getOrCreateClient(allocator, options.url);
+    const client = try getOrCreateClient(allocator, options);
     try maybeApplyProjectContext(allocator, options, client);
     try fsrpcBootstrap(allocator, client);
 
@@ -1123,7 +1324,7 @@ fn executeChatResume(allocator: std.mem.Allocator, options: args.Options, cmd: a
 
 fn executeFsLs(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    const client = try getOrCreateClient(allocator, options.url);
+    const client = try getOrCreateClient(allocator, options);
     try maybeApplyProjectContext(allocator, options, client);
     try fsrpcBootstrap(allocator, client);
 
@@ -1149,7 +1350,7 @@ fn executeFsRead(allocator: std.mem.Allocator, options: args.Options, cmd: args.
     }
 
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    const client = try getOrCreateClient(allocator, options.url);
+    const client = try getOrCreateClient(allocator, options);
     try maybeApplyProjectContext(allocator, options, client);
     try fsrpcBootstrap(allocator, client);
 
@@ -1169,7 +1370,7 @@ fn executeFsWrite(allocator: std.mem.Allocator, options: args.Options, cmd: args
     }
 
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    const client = try getOrCreateClient(allocator, options.url);
+    const client = try getOrCreateClient(allocator, options);
     try maybeApplyProjectContext(allocator, options, client);
     try fsrpcBootstrap(allocator, client);
 
@@ -1192,7 +1393,7 @@ fn executeFsStat(allocator: std.mem.Allocator, options: args.Options, cmd: args.
     }
 
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    const client = try getOrCreateClient(allocator, options.url);
+    const client = try getOrCreateClient(allocator, options);
     try maybeApplyProjectContext(allocator, options, client);
     try fsrpcBootstrap(allocator, client);
 
@@ -1206,7 +1407,7 @@ fn executeFsStat(allocator: std.mem.Allocator, options: args.Options, cmd: args.
 
 fn executeFsTree(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    const client = try getOrCreateClient(allocator, options.url);
+    const client = try getOrCreateClient(allocator, options);
     try maybeApplyProjectContext(allocator, options, client);
     try fsrpcBootstrap(allocator, client);
 

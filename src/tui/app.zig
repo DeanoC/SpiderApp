@@ -90,7 +90,7 @@ pub const AppState = struct {
         }
 
         // Create new client
-        self.ws_client = WebSocketClient.init(self.allocator, url, self.config.token);
+        self.ws_client = WebSocketClient.init(self.allocator, url, self.config.activeRoleToken());
 
         // Attempt connection
         self.ws_client.?.connect() catch |err| {

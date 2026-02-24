@@ -21,6 +21,7 @@ pub const Noun = enum {
     project,
     node,
     workspace,
+    auth,
     goal,
     task,
     worker,
@@ -39,6 +40,7 @@ pub const Verb = enum {
     tree,
     ls,
     status,
+    rotate,
     history,
     resume_job,
     list,
@@ -53,11 +55,17 @@ pub const Verb = enum {
 };
 
 pub const Options = struct {
+    pub const Role = enum {
+        admin,
+        user,
+    };
+
     url: []const u8 = default_server_url,
     url_explicitly_provided: bool = false,
     project: ?[]const u8 = null,
     project_token: ?[]const u8 = null,
     operator_token: ?[]const u8 = null,
+    role: ?Role = null,
     interactive: bool = false,
     tui: bool = false,
     verbose: bool = false,
@@ -103,6 +111,7 @@ const help_worker = @embedFile("docs/14-worker.md");
 const help_connection = @embedFile("docs/15-connection.md");
 const help_node = @embedFile("docs/16-node.md");
 const help_workspace = @embedFile("docs/17-workspace.md");
+const help_auth = @embedFile("docs/18-auth.md");
 
 pub fn printHelp() void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
@@ -116,6 +125,7 @@ pub fn printHelpForNoun(noun: Noun) void {
         .project => help_project,
         .node => help_node,
         .workspace => help_workspace,
+        .auth => help_auth,
         .goal => help_goal,
         .task => help_task,
         .worker => help_worker,
@@ -148,6 +158,7 @@ fn parseNoun(arg: []const u8) ?Noun {
     if (std.mem.eql(u8, arg, "project")) return .project;
     if (std.mem.eql(u8, arg, "node")) return .node;
     if (std.mem.eql(u8, arg, "workspace")) return .workspace;
+    if (std.mem.eql(u8, arg, "auth")) return .auth;
     if (std.mem.eql(u8, arg, "goal")) return .goal;
     if (std.mem.eql(u8, arg, "task")) return .task;
     if (std.mem.eql(u8, arg, "worker")) return .worker;
@@ -187,6 +198,10 @@ fn parseVerb(noun: Noun, arg: []const u8) ?Verb {
         .workspace => {
             if (std.mem.eql(u8, arg, "status")) return .status;
         },
+        .auth => {
+            if (std.mem.eql(u8, arg, "status")) return .status;
+            if (std.mem.eql(u8, arg, "rotate")) return .rotate;
+        },
         .goal => {
             if (std.mem.eql(u8, arg, "list")) return .list;
             if (std.mem.eql(u8, arg, "create")) return .create;
@@ -202,6 +217,12 @@ fn parseVerb(noun: Noun, arg: []const u8) ?Verb {
         },
         else => {},
     }
+    return null;
+}
+
+fn parseRole(arg: []const u8) ?Options.Role {
+    if (std.mem.eql(u8, arg, "admin")) return .admin;
+    if (std.mem.eql(u8, arg, "user")) return .user;
     return null;
 }
 
@@ -274,6 +295,18 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Options {
                 return error.InvalidArguments;
             }
             options.operator_token = try allocator.dupe(u8, args[i]);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--role")) {
+            i += 1;
+            if (i >= args.len) {
+                std.process.argsFree(allocator, args);
+                return error.InvalidArguments;
+            }
+            options.role = parseRole(args[i]) orelse {
+                std.process.argsFree(allocator, args);
+                return error.InvalidArguments;
+            };
             continue;
         }
         if (std.mem.eql(u8, arg, "--interactive") or std.mem.eql(u8, arg, "-i")) {

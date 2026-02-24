@@ -26,6 +26,8 @@ ziggystarspider --help
 - `node list` - List registered nodes
 - `node info <node_id>` - Show node details
 - `workspace status [project_id]` - Show active workspace mounts
+- `auth status` - Show Spiderweb auth token status (admin only)
+- `auth rotate <admin|user>` - Rotate Spiderweb auth token (admin only)
 - `goal list` - List goals for current project
 - `goal create <description>` - Create a new goal
 - `task list` - List active tasks
@@ -39,6 +41,7 @@ ziggystarspider --help
 - `--project <project_id>` - Set current project
 - `--project-token <token>` - Token used to activate project context
 - `--operator-token <token>` - Token for operator-scoped control mutations (for example `project create`)
+- `--role <admin|user>` - Select saved auth role token for this command
 - `--interactive` - Start interactive REPL mode
 - `--verbose` - Enable verbose logging
 - `--help` - Show this help
