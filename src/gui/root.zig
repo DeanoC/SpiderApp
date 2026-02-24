@@ -7392,7 +7392,10 @@ const App = struct {
         }
         const root = parsed.value.object;
 
-        const mt = protocol_messages.parseMessageType(msg) orelse return;
+        const mt = if (root.get("type")) |type_value| switch (type_value) {
+            .string => protocol_messages.classifyTypeString(type_value.string),
+            else => protocol_messages.parseMessageType(msg) orelse return,
+        } else protocol_messages.parseMessageType(msg) orelse return;
         switch (mt) {
             .session_receive => {
                 const payload = if (root.get("payload")) |payload| switch (payload) {
@@ -7528,6 +7531,16 @@ const App = struct {
                     } else "Unknown error",
                     else => "Unknown error",
                 } else "Unknown error";
+                const err_code = if (payload.get("code")) |value| switch (value) {
+                    .string => value.string,
+                    else => null,
+                } else if (root.get("error")) |value| switch (value) {
+                    .object => if (value.object.get("code")) |err_code_value| switch (err_code_value) {
+                        .string => err_code_value.string,
+                        else => null,
+                    } else null,
+                    else => null,
+                } else null;
                 if (extractRequestId(root, payload)) |request_id| {
                     if (self.isPendingDebugRequest(request_id)) {
                         self.debug_stream_pending = false;
@@ -7542,7 +7555,12 @@ const App = struct {
                         }
                     }
                 }
-                try self.appendMessage("system", err_message, null);
+                const detail = if (err_code) |code|
+                    try std.fmt.allocPrint(self.allocator, "{s} [{s}]", .{ err_message, code })
+                else
+                    try self.allocator.dupe(u8, err_message);
+                defer self.allocator.free(detail);
+                try self.appendMessage("system", detail, null);
             },
             .debug_event => {
                 try self.handleDebugEventMessage(root);
