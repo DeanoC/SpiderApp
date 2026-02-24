@@ -18,7 +18,7 @@
         },
         .ziggy_ui = .{
             .url = "https://github.com/DeanoC/ziggy-ui/archive/refs/heads/feat/form-layout-and-panel-kinds.tar.gz",
-            .hash = "ziggy_ui-0.1.0-dS4PqImB8QFt5ro1LsiIbOw2Ym6hQ6IkDNMLUgFRqDaj",
+            .hash = "ziggy_ui-0.1.0-dS4PqBmS8QGQTPfpDBrfeuWhvB4jAovKSX3hiFa-v-A1",
         },
         .sdl3 = .{
             .url = "https://github.com/castholm/SDL/archive/refs/heads/main.zip",
