@@ -8,18 +8,25 @@ pub const ProjectTokenEntry = struct {
 };
 
 pub const Config = struct {
+    pub const TokenRole = enum {
+        admin,
+        user,
+    };
+
     allocator: std.mem.Allocator,
 
     // Connection settings
     server_url: []const u8,
-    auth_token: []const u8,
-    token: []const u8,
+    admin_token: []const u8,
+    user_token: []const u8,
+    active_role: TokenRole = .admin,
     insecure_tls: bool = false,
 
     // UI and workflow defaults
     auto_connect_on_launch: bool = true,
     connect_host_override: ?[]const u8 = null,
     default_project: ?[]const u8 = null,
+    default_agent: ?[]const u8 = null,
     project_tokens: ?[]ProjectTokenEntry = null,
     default_session: ?[]const u8 = null,
 
@@ -36,26 +43,27 @@ pub const Config = struct {
     pub fn init(allocator: std.mem.Allocator) !Config {
         const server_url = try allocator.dupe(u8, default_server_url);
         errdefer allocator.free(server_url);
-        const auth_token = try allocator.dupe(u8, "");
-        errdefer allocator.free(auth_token);
-        const token = try allocator.dupe(u8, "");
-        errdefer allocator.free(token);
+        const admin_token = try allocator.dupe(u8, "");
+        errdefer allocator.free(admin_token);
+        const user_token = try allocator.dupe(u8, "");
+        errdefer allocator.free(user_token);
         const update_manifest_url = try allocator.dupe(u8, "https://github.com/DeanoC/ZiggyStarSpider/releases/latest/download/update.json");
         errdefer allocator.free(update_manifest_url);
 
         return .{
             .allocator = allocator,
             .server_url = server_url,
-            .auth_token = auth_token,
-            .token = token,
+            .admin_token = admin_token,
+            .user_token = user_token,
+            .active_role = .admin,
             .update_manifest_url = update_manifest_url,
         };
     }
 
     pub fn deinit(self: *Config) void {
         self.allocator.free(self.server_url);
-        self.allocator.free(self.auth_token);
-        self.allocator.free(self.token);
+        self.allocator.free(self.admin_token);
+        self.allocator.free(self.user_token);
         self.allocator.free(self.update_manifest_url);
         if (self.connect_host_override) |value| {
             self.allocator.free(value);
@@ -64,6 +72,10 @@ pub const Config = struct {
         if (self.default_project) |value| {
             self.allocator.free(value);
             self.default_project = null;
+        }
+        if (self.default_agent) |value| {
+            self.allocator.free(value);
+            self.default_agent = null;
         }
         if (self.project_tokens) |entries| {
             for (entries) |entry| {
@@ -102,13 +114,38 @@ pub const Config = struct {
         self.server_url = new_url;
     }
 
-    pub fn setAuthToken(self: *Config, token: []const u8) !void {
-        const auth_copy = try self.allocator.dupe(u8, token);
-        const token_copy = try self.allocator.dupe(u8, token);
-        self.allocator.free(self.auth_token);
-        self.allocator.free(self.token);
-        self.auth_token = auth_copy;
-        self.token = token_copy;
+    pub fn getRoleToken(self: *const Config, role: TokenRole) []const u8 {
+        return switch (role) {
+            .admin => self.admin_token,
+            .user => self.user_token,
+        };
+    }
+
+    pub fn activeRoleToken(self: *const Config) []const u8 {
+        const primary = self.getRoleToken(self.active_role);
+        if (primary.len > 0) return primary;
+        return switch (self.active_role) {
+            .admin => self.user_token,
+            .user => self.admin_token,
+        };
+    }
+
+    pub fn setActiveRole(self: *Config, role: TokenRole) !void {
+        self.active_role = role;
+    }
+
+    pub fn setRoleToken(self: *Config, role: TokenRole, value: []const u8) !void {
+        const copy = try self.allocator.dupe(u8, value);
+        switch (role) {
+            .admin => {
+                self.allocator.free(self.admin_token);
+                self.admin_token = copy;
+            },
+            .user => {
+                self.allocator.free(self.user_token);
+                self.user_token = copy;
+            },
+        }
     }
 
     pub fn setDefaultSession(self: *Config, default_session: []const u8) !void {
@@ -133,6 +170,19 @@ pub const Config = struct {
 
     pub fn selectedProject(self: *const Config) ?[]const u8 {
         return self.default_project;
+    }
+
+    pub fn setDefaultAgent(self: *Config, agent_id: ?[]const u8) !void {
+        const next = if (agent_id) |value| blk: {
+            if (value.len == 0) break :blk null;
+            break :blk try self.allocator.dupe(u8, value);
+        } else null;
+        if (self.default_agent) |value| self.allocator.free(value);
+        self.default_agent = next;
+    }
+
+    pub fn selectedAgent(self: *const Config) ?[]const u8 {
+        return self.default_agent;
     }
 
     pub fn getProjectToken(self: *const Config, project_id: []const u8) ?[]const u8 {
@@ -325,19 +375,35 @@ pub const Config = struct {
         defer parsed.deinit();
 
         const json = parsed.value;
-        const auth_token = if (json.auth_token) |value| value else json.token orelse "";
-        const token = if (json.token) |value| value else auth_token;
+        const legacy_token = if (json.auth_token) |value|
+            value
+        else if (json.token) |value|
+            value
+        else
+            "";
+        const loaded_admin = if (json.admin_token) |value|
+            value
+        else
+            legacy_token;
+        const loaded_user = if (json.user_token) |value|
+            value
+        else
+            legacy_token;
+
+        const active_role = parseTokenRole(json.active_role);
 
         return .{
             .allocator = allocator,
             .server_url = try duplicateOptionalString(allocator, json.server_url) orelse
                 try allocator.dupe(u8, default_server_url),
-            .auth_token = try allocator.dupe(u8, auth_token),
-            .token = try allocator.dupe(u8, token),
+            .admin_token = try allocator.dupe(u8, loaded_admin),
+            .user_token = try allocator.dupe(u8, loaded_user),
+            .active_role = active_role,
             .insecure_tls = json.insecure_tls orelse false,
             .auto_connect_on_launch = json.auto_connect_on_launch orelse true,
             .connect_host_override = try duplicateOptionalString(allocator, json.connect_host_override),
             .default_project = try duplicateOptionalString(allocator, json.default_project),
+            .default_agent = try duplicateOptionalString(allocator, json.default_agent),
             .project_tokens = try duplicateOptionalProjectTokens(allocator, json.project_tokens),
             .default_session = try duplicateOptionalString(allocator, json.default_session),
             .update_manifest_url = try duplicateOptionalString(allocator, json.update_manifest_url) orelse
@@ -366,12 +432,14 @@ pub const Config = struct {
 
         const payload = ConfigJson{
             .server_url = self.server_url,
-            .auth_token = self.auth_token,
-            .token = self.token,
+            .admin_token = self.admin_token,
+            .user_token = self.user_token,
+            .active_role = tokenRoleName(self.active_role),
             .insecure_tls = self.insecure_tls,
             .auto_connect_on_launch = self.auto_connect_on_launch,
             .connect_host_override = self.connect_host_override,
             .default_project = self.default_project,
+            .default_agent = self.default_agent,
             .project_tokens = self.project_tokens,
             .default_session = self.default_session,
             .update_manifest_url = self.update_manifest_url,
@@ -394,12 +462,17 @@ pub const Config = struct {
 // JSON-compatible config struct for serialization
 const ConfigJson = struct {
     server_url: ?[]const u8 = null,
+    // Legacy fields kept for backwards-compatible config migration.
     auth_token: ?[]const u8 = null,
     token: ?[]const u8 = null,
+    admin_token: ?[]const u8 = null,
+    user_token: ?[]const u8 = null,
+    active_role: ?[]const u8 = null,
     insecure_tls: ?bool = null,
     auto_connect_on_launch: ?bool = null,
     connect_host_override: ?[]const u8 = null,
     default_project: ?[]const u8 = null,
+    default_agent: ?[]const u8 = null,
     project_tokens: ?[]const ProjectTokenEntry = null,
     default_session: ?[]const u8 = null,
     update_manifest_url: ?[]const u8 = null,
@@ -409,3 +482,17 @@ const ConfigJson = struct {
     ui_theme_pack_recent: ?[]const []const u8 = null,
     ui_profile: ?[]const u8 = null,
 };
+
+fn parseTokenRole(value: ?[]const u8) Config.TokenRole {
+    if (value) |raw| {
+        if (std.mem.eql(u8, raw, "user")) return .user;
+    }
+    return .admin;
+}
+
+fn tokenRoleName(role: Config.TokenRole) []const u8 {
+    return switch (role) {
+        .admin => "admin",
+        .user => "user",
+    };
+}

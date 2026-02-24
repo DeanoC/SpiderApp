@@ -10,10 +10,30 @@ Checks:
 - verify `--operator-token` for operator-scoped mutations
 - verify project token used by `project use` / `project activate`
 - confirm selected project token in local config matches server token
+- inspect auth role tokens:
+  - `zss auth status`
+  - `zss auth status --reveal` (full values)
 
 Actions:
 - rotate/reissue token server-side, then update local token
 - retry command with explicit token flags
+- emergency reset when admin token is lost:
+  - `spiderweb-config auth reset --yes` (run on Spiderweb host)
+  - restart Spiderweb and update local admin/user tokens
+
+## session_busy on Session/Project Attach
+
+Symptoms:
+- `control.session_attach` fails with `code=session_busy`
+- project/agent switch from GUI Settings fails while chat work is still running
+
+Checks:
+- confirm in-flight chat work (`zss chat resume`)
+- wait for queued/running jobs to complete for the target/current agent
+
+Actions:
+- retry attach/switch once jobs are terminal (`done`/`failed`)
+- avoid switching project context for an agent mid-job
 
 ## No Nodes / Lease Expiry
 

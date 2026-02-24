@@ -74,6 +74,34 @@ fn controlErrorCodeFromRoot(root: std.json.ObjectMap) ?[]const u8 {
     return null;
 }
 
+fn legacyErrorMessageFromRoot(root: std.json.ObjectMap) ?[]const u8 {
+    if (root.get("message")) |value| {
+        if (value == .string and value.string.len > 0) return value.string;
+    }
+    if (root.get("payload")) |payload| {
+        if (payload == .object) {
+            if (payload.object.get("message")) |message| {
+                if (message == .string and message.string.len > 0) return message.string;
+            }
+        }
+    }
+    return null;
+}
+
+fn legacyErrorCodeFromRoot(root: std.json.ObjectMap) ?[]const u8 {
+    if (root.get("code")) |value| {
+        if (value == .string and value.string.len > 0) return value.string;
+    }
+    if (root.get("payload")) |payload| {
+        if (payload == .object) {
+            if (payload.object.get("code")) |code| {
+                if (code == .string and code.string.len > 0) return code.string;
+            }
+        }
+    }
+    return null;
+}
+
 pub fn sendControlVersionAndConnect(
     allocator: std.mem.Allocator,
     client: anytype,
@@ -237,6 +265,29 @@ fn awaitControlReply(
                     allocator.free(raw);
                     return error.RemoteError;
                 }
+
+                // Legacy spiderweb bootstrap errors can arrive before unified-v2 control
+                // negotiation completes (for example auth failures on websocket connect).
+                // Only treat the in-flight control exchange as fatal; unrelated error
+                // frames from other channels should not fail the control request.
+                if (matchesLegacyBootstrapError(obj, request_id)) {
+                    const legacy_message = legacyErrorMessageFromRoot(obj);
+                    const legacy_code = legacyErrorCodeFromRoot(obj);
+                    if (legacy_message != null and legacy_code != null) {
+                        var detail_buf: [MAX_REMOTE_ERROR_LEN]u8 = undefined;
+                        const detail = std.fmt.bufPrint(&detail_buf, "{s} [{s}]", .{ legacy_message.?, legacy_code.? }) catch legacy_message.?;
+                        setLastRemoteError(detail);
+                    } else if (legacy_message) |value| {
+                        setLastRemoteError(value);
+                    } else if (legacy_code) |value| {
+                        setLastRemoteError(value);
+                    } else {
+                        setLastRemoteError("remote error");
+                    }
+                    parsed.deinit();
+                    allocator.free(raw);
+                    return error.RemoteError;
+                }
             }
 
             parsed.deinit();
@@ -249,6 +300,19 @@ fn awaitControlReply(
 
 fn matchesControlReply(root: std.json.ObjectMap, request_id: []const u8, expected_type: []const u8) bool {
     return matchesControlReplyType(root, request_id, expected_type);
+}
+
+fn matchesLegacyBootstrapError(root: std.json.ObjectMap, request_id: []const u8) bool {
+    const typ = root.get("type") orelse return false;
+    if (typ != .string or !std.mem.eql(u8, typ.string, "error")) return false;
+
+    if (root.get("channel")) |channel| {
+        if (channel != .string or !std.mem.eql(u8, channel.string, "control")) return false;
+    }
+
+    const id = root.get("id") orelse return false;
+    if (id != .string) return false;
+    return std.mem.eql(u8, id.string, request_id) or std.mem.eql(u8, id.string, "unknown");
 }
 
 fn matchesControlReplyType(root: std.json.ObjectMap, request_id: []const u8, expected_type: []const u8) bool {
@@ -271,7 +335,11 @@ fn readClientFrameWithTimeout(client: anytype, timeout_ms: u32) !?[]u8 {
     const client_type = @TypeOf(client.*);
     if (comptime @hasDecl(client_type, "receive")) {
         const result = client.receive(timeout_ms);
-        return result;
+        if (result) |raw| return raw;
+        if (comptime @hasDecl(client_type, "isAlive")) {
+            if (!client.isAlive()) return error.ConnectionClosed;
+        }
+        return null;
     }
 
     if (comptime @hasDecl(client_type, "readTimeout")) {

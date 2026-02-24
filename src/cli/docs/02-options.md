@@ -36,7 +36,12 @@ ziggystarspider --project-token proj-abc project use proj-1
 ### `--operator-token <token>`
 Operator token used for protected control mutations (for example `control.project_create`).
 
-If omitted, ZSS uses the saved config auth token when available.
+If omitted, ZSS uses the saved admin role token when available.
+
+### `--role <admin|user>`
+Select which saved role token is used for connection/auth on this command.
+
+If omitted, ZSS uses the locally saved active role.
 
 **Examples:**
 ```bash

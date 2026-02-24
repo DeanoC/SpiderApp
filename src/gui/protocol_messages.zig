@@ -9,6 +9,23 @@ pub const MessageType = enum {
     other,
 };
 
+pub fn classifyTypeString(type_str: []const u8) MessageType {
+    if (std.mem.eql(u8, type_str, "session.send")) return .session_send;
+    if (std.mem.eql(u8, type_str, "chat.send")) return .session_send; // legacy
+    if (std.mem.eql(u8, type_str, "session.receive")) return .session_receive;
+    if (std.mem.eql(u8, type_str, "chat.receive")) return .session_receive; // legacy
+    if (std.mem.eql(u8, type_str, "connect.ack")) return .connect_ack;
+    if (std.mem.eql(u8, type_str, "control.connect_ack")) return .connect_ack;
+    if (std.mem.eql(u8, type_str, "control.session_attach")) return .connect_ack;
+    if (std.mem.eql(u8, type_str, "control.session_resume")) return .connect_ack;
+    if (std.mem.eql(u8, type_str, "debug.event")) return .debug_event;
+    if (std.mem.eql(u8, type_str, "session.ack")) return .connect_ack; // legacy
+    if (std.mem.eql(u8, type_str, "chat_ack")) return .connect_ack; // legacy
+    if (std.mem.eql(u8, type_str, "error")) return .error_response;
+    if (std.mem.eql(u8, type_str, "control.error")) return .error_response;
+    return .other;
+}
+
 pub fn buildSessionSend(allocator: std.mem.Allocator, id: []const u8, content: []const u8, context: ?[]const u8) ![]const u8 {
     var buffer = std.ArrayListUnmanaged(u8).empty;
     defer buffer.deinit(allocator);
@@ -133,20 +150,7 @@ pub fn parseMessageType(json: []const u8) ?MessageType {
     const end = std.mem.indexOfScalarPos(u8, json, type_start, '"') orelse return null;
     const type_str = json[type_start..end];
 
-    if (std.mem.eql(u8, type_str, "session.send")) return .session_send;
-    if (std.mem.eql(u8, type_str, "chat.send")) return .session_send; // legacy
-    if (std.mem.eql(u8, type_str, "session.receive")) return .session_receive;
-    if (std.mem.eql(u8, type_str, "chat.receive")) return .session_receive; // legacy
-    if (std.mem.eql(u8, type_str, "connect.ack")) return .connect_ack;
-    if (std.mem.eql(u8, type_str, "control.connect_ack")) return .connect_ack;
-    if (std.mem.eql(u8, type_str, "control.session_attach")) return .connect_ack;
-    if (std.mem.eql(u8, type_str, "control.session_resume")) return .connect_ack;
-    if (std.mem.eql(u8, type_str, "debug.event")) return .debug_event;
-    if (std.mem.eql(u8, type_str, "session.ack")) return .connect_ack; // legacy
-    if (std.mem.eql(u8, type_str, "chat_ack")) return .connect_ack; // legacy
-    if (std.mem.eql(u8, type_str, "error")) return .error_response;
-    if (std.mem.eql(u8, type_str, "control.error")) return .error_response;
-    return .other;
+    return classifyTypeString(type_str);
 }
 
 test "protocol_messages: parseMessageType recognizes debug.event" {

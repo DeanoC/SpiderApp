@@ -12,6 +12,7 @@ SMOKE_CHAT_PROMPT="${SMOKE_CHAT_PROMPT:-smoke test: summarize active project mou
 SMOKE_SKIP_BUILD="${SMOKE_SKIP_BUILD:-0}"
 SMOKE_SKIP_GUI_BUILD="${SMOKE_SKIP_GUI_BUILD:-0}"
 SMOKE_SKIP_CHAT="${SMOKE_SKIP_CHAT:-0}"
+SMOKE_SKIP_AUTH_SESSION="${SMOKE_SKIP_AUTH_SESSION:-0}"
 
 log() {
     printf '[smoke] %s\n' "$1"
@@ -40,6 +41,13 @@ fi
 log "connect + topology checks"
 run_cli connect
 run_cli node list
+
+if [[ "$SMOKE_SKIP_AUTH_SESSION" != "1" ]]; then
+    log "auth/session checks"
+    "$ROOT_DIR/scripts/smoke-auth-session.sh"
+else
+    log "auth/session checks skipped (SMOKE_SKIP_AUTH_SESSION=1)"
+fi
 
 log "project bootstrap and validation"
 run_cli project up "$SMOKE_PROJECT_NAME"
