@@ -6917,7 +6917,8 @@ const App = struct {
             return error.RuntimeWarming;
         }
         if (self.session_attach_state == .err) {
-            try self.appendMessage("system", "Sandbox runtime is unavailable for this session.", null);
+            const detail = self.workspace_last_error orelse "Sandbox runtime is unavailable for this session.";
+            try self.appendMessage("system", detail, null);
             return error.RemoteError;
         }
 
