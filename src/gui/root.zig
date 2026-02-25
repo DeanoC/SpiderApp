@@ -6870,7 +6870,7 @@ const App = struct {
             try self.appendMessage("system", "No active session available", null);
             return;
         }
-        if (self.session_attach_state != .ready) {
+        if (self.session_attach_state == .unknown or self.session_attach_state == .err) {
             self.attachSessionBinding(client, session_key) catch |err| {
                 const primary_detail_owned = try self.allocator.dupe(
                     u8,
@@ -6910,6 +6910,10 @@ const App = struct {
                     return err;
                 }
             };
+            self.refreshSessionAttachStatusOnce(client, session_key);
+        } else if (self.session_attach_state == .warming) {
+            // Avoid re-attaching while warmup is in-flight; that re-arms backend warmup and can
+            // keep the session in warming forever when the user retries quickly.
             self.refreshSessionAttachStatusOnce(client, session_key);
         }
         if (self.session_attach_state == .warming) {
