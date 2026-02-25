@@ -7120,7 +7120,7 @@ const App = struct {
                 if (parsed.value == .object) {
                     const obj = parsed.value.object;
                     if (obj.get("channel")) |channel| {
-                        if (channel == .string and std.mem.eql(u8, channel.string, "fsrpc")) {
+                        if (channel == .string and std.mem.eql(u8, channel.string, "acheron")) {
                             if (obj.get("tag")) |raw_tag| {
                                 if (raw_tag == .integer and raw_tag.integer >= 0 and @as(u32, @intCast(raw_tag.integer)) == tag) {
                                     matched = true;
@@ -7229,7 +7229,7 @@ const App = struct {
         const version_tag = self.nextFsrpcTag();
         const version_req = try std.fmt.allocPrint(
             self.allocator,
-            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_version\",\"tag\":{d},\"msize\":1048576,\"version\":\"styx-lite-1\"}}",
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_version\",\"tag\":{d},\"msize\":1048576,\"version\":\"acheron-1\"}}",
             .{version_tag},
         );
         defer self.allocator.free(version_req);
@@ -7240,7 +7240,7 @@ const App = struct {
         const attach_tag = self.nextFsrpcTag();
         const attach_req = try std.fmt.allocPrint(
             self.allocator,
-            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_attach\",\"tag\":{d},\"fid\":1}}",
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_attach\",\"tag\":{d},\"fid\":1}}",
             .{attach_tag},
         );
         defer self.allocator.free(attach_req);
@@ -7253,7 +7253,7 @@ const App = struct {
         const tag = self.nextFsrpcTag();
         const req = std.fmt.allocPrint(
             self.allocator,
-            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_clunk\",\"tag\":{d},\"fid\":{d}}}",
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_clunk\",\"tag\":{d},\"fid\":{d}}}",
             .{ tag, fid },
         ) catch return;
         defer self.allocator.free(req);
@@ -7273,7 +7273,7 @@ const App = struct {
         const walk_input_tag = self.nextFsrpcTag();
         const walk_input_req = try std.fmt.allocPrint(
             self.allocator,
-            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":[\"capabilities\",\"chat\",\"control\",\"input\"]}}",
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":[\"agents\",\"self\",\"chat\",\"control\",\"input\"]}}",
             .{ walk_input_tag, input_fid },
         );
         defer self.allocator.free(walk_input_req);
@@ -7284,7 +7284,7 @@ const App = struct {
         const open_input_tag = self.nextFsrpcTag();
         const open_input_req = try std.fmt.allocPrint(
             self.allocator,
-            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"rw\"}}",
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"rw\"}}",
             .{ open_input_tag, input_fid },
         );
         defer self.allocator.free(open_input_req);
@@ -7297,7 +7297,7 @@ const App = struct {
         const write_tag = self.nextFsrpcTag();
         const write_req = try std.fmt.allocPrint(
             self.allocator,
-            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_write\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"data_b64\":\"{s}\"}}",
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_write\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"data_b64\":\"{s}\"}}",
             .{ write_tag, input_fid, encoded },
         );
         defer self.allocator.free(write_req);
@@ -7315,7 +7315,7 @@ const App = struct {
         const walk_result_tag = self.nextFsrpcTag();
         const walk_result_req = try std.fmt.allocPrint(
             self.allocator,
-            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":[\"jobs\",\"{s}\",\"result.txt\"]}}",
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":[\"agents\",\"self\",\"jobs\",\"{s}\",\"result.txt\"]}}",
             .{ walk_result_tag, result_fid, escaped_job },
         );
         defer self.allocator.free(walk_result_req);
@@ -7326,7 +7326,7 @@ const App = struct {
         const open_result_tag = self.nextFsrpcTag();
         const open_result_req = try std.fmt.allocPrint(
             self.allocator,
-            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"r\"}}",
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"r\"}}",
             .{ open_result_tag, result_fid },
         );
         defer self.allocator.free(open_result_req);
@@ -7337,7 +7337,7 @@ const App = struct {
         const read_tag = self.nextFsrpcTag();
         const read_req = try std.fmt.allocPrint(
             self.allocator,
-            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_read\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"count\":1048576}}",
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_read\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"count\":1048576}}",
             .{ read_tag, result_fid },
         );
         defer self.allocator.free(read_req);
@@ -7406,7 +7406,7 @@ const App = struct {
         const tag = self.nextFsrpcTag();
         const req = try std.fmt.allocPrint(
             self.allocator,
-            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":{s}}}",
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":{s}}}",
             .{ tag, new_fid, path_json },
         );
         defer self.allocator.free(req);
@@ -7423,7 +7423,7 @@ const App = struct {
         const tag = self.nextFsrpcTag();
         const req = try std.fmt.allocPrint(
             self.allocator,
-            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"{s}\"}}",
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"{s}\"}}",
             .{ tag, fid, escaped_mode },
         );
         defer self.allocator.free(req);
@@ -7437,7 +7437,7 @@ const App = struct {
         const tag = self.nextFsrpcTag();
         const req = try std.fmt.allocPrint(
             self.allocator,
-            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_read\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"count\":1048576}}",
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_read\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"count\":1048576}}",
             .{ tag, fid },
         );
         defer self.allocator.free(req);
@@ -7461,7 +7461,7 @@ const App = struct {
         const tag = self.nextFsrpcTag();
         const req = try std.fmt.allocPrint(
             self.allocator,
-            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_stat\",\"tag\":{d},\"fid\":{d}}}",
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_stat\",\"tag\":{d},\"fid\":{d}}}",
             .{ tag, fid },
         );
         defer self.allocator.free(req);
@@ -7524,7 +7524,7 @@ const App = struct {
     }
 
     fn readJobStatusGui(self: *App, client: *ws_client_mod.WebSocketClient, job_id: []const u8) !JobStatusInfo {
-        const status_path = try std.fmt.allocPrint(self.allocator, "/jobs/{s}/status.json", .{job_id});
+        const status_path = try std.fmt.allocPrint(self.allocator, "/agents/self/jobs/{s}/status.json", .{job_id});
         defer self.allocator.free(status_path);
         const raw = try self.readFsPathTextGui(client, status_path);
         defer self.allocator.free(raw);
@@ -7549,7 +7549,7 @@ const App = struct {
             return false;
         }
 
-        const result_path = try std.fmt.allocPrint(self.allocator, "/jobs/{s}/result.txt", .{job_id});
+        const result_path = try std.fmt.allocPrint(self.allocator, "/agents/self/jobs/{s}/result.txt", .{job_id});
         defer self.allocator.free(result_path);
         const result = self.readFsPathTextGui(client, result_path) catch |err| blk: {
             const msg = try std.fmt.allocPrint(self.allocator, "resume read failed: {s}", .{@errorName(err)});

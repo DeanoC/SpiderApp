@@ -10,11 +10,11 @@ ZiggyStarSpider exposes one project-oriented view of a distributed Spiderweb wor
 - select or create projects
 - activate project workspace mounts
 - inspect nodes and workspace topology
-- browse and read/write the unified filesystem via `fsrpc.*`
+- browse and read/write the unified filesystem via `acheron.*`
 - chat with the agent through FS-RPC chat capabilities
 
 `control.*` is used for out-of-band control API operations.  
-`fsrpc.*` is used for filesystem and capability IO.
+`acheron.*` is used for filesystem and capability IO.
 
 ## Build
 
@@ -95,9 +95,9 @@ Useful options:
   - `control.node_list`
   - `control.node_get`
 - FS-RPC examples:
-  - `fsrpc.t_version` / `fsrpc.r_version`
-  - `fsrpc.t_attach` / `fsrpc.r_attach`
-  - `fsrpc.t_walk`, `fsrpc.t_open`, `fsrpc.t_read`, `fsrpc.t_write`, `fsrpc.t_stat`, `fsrpc.t_clunk`
+  - `acheron.t_version` / `acheron.r_version`
+  - `acheron.t_attach` / `acheron.r_attach`
+  - `acheron.t_walk`, `acheron.t_open`, `acheron.t_read`, `acheron.t_write`, `acheron.t_stat`, `acheron.t_clunk`
 
 ## Docs
 

@@ -1170,7 +1170,7 @@ fn executeChatSend(allocator: std.mem.Allocator, options: args.Options, cmd: arg
     try fsrpcBootstrap(allocator, client);
 
     logger.info("Submitting chat job...", .{});
-    const chat_input_fid = try fsrpcWalkPath(allocator, client, "/capabilities/chat/control/input");
+    const chat_input_fid = try fsrpcWalkPath(allocator, client, "/agents/self/chat/control/input");
     defer fsrpcClunkBestEffort(allocator, client, chat_input_fid);
     try fsrpcOpen(allocator, client, chat_input_fid, "rw");
 
@@ -1184,7 +1184,7 @@ fn executeChatSend(allocator: std.mem.Allocator, options: args.Options, cmd: arg
         return error.InvalidResponse;
     };
 
-    const result_path = try std.fmt.allocPrint(allocator, "/jobs/{s}/result.txt", .{job_name});
+    const result_path = try std.fmt.allocPrint(allocator, "/agents/self/jobs/{s}/result.txt", .{job_name});
     defer allocator.free(result_path);
 
     const result_fid = try fsrpcWalkPath(allocator, client, result_path);
@@ -1247,7 +1247,7 @@ fn parseJobStatusInfo(allocator: std.mem.Allocator, status_json: []const u8) !Jo
 }
 
 fn readJobStatus(allocator: std.mem.Allocator, client: *WebSocketClient, job_name: []const u8) !JobStatusInfo {
-    const status_path = try std.fmt.allocPrint(allocator, "/jobs/{s}/status.json", .{job_name});
+    const status_path = try std.fmt.allocPrint(allocator, "/agents/self/jobs/{s}/status.json", .{job_name});
     defer allocator.free(status_path);
     const status_fid = try fsrpcWalkPath(allocator, client, status_path);
     defer fsrpcClunkBestEffort(allocator, client, status_fid);
@@ -1264,7 +1264,7 @@ fn executeChatResume(allocator: std.mem.Allocator, options: args.Options, cmd: a
     try fsrpcBootstrap(allocator, client);
 
     if (cmd.args.len == 0) {
-        const jobs_fid = try fsrpcWalkPath(allocator, client, "/jobs");
+        const jobs_fid = try fsrpcWalkPath(allocator, client, "/agents/self/jobs");
         defer fsrpcClunkBestEffort(allocator, client, jobs_fid);
         try fsrpcOpen(allocator, client, jobs_fid, "r");
         const listing = try fsrpcReadAllText(allocator, client, jobs_fid);
@@ -1307,7 +1307,7 @@ fn executeChatResume(allocator: std.mem.Allocator, options: args.Options, cmd: a
         return;
     }
 
-    const result_path = try std.fmt.allocPrint(allocator, "/jobs/{s}/result.txt", .{job_name});
+    const result_path = try std.fmt.allocPrint(allocator, "/agents/self/jobs/{s}/result.txt", .{job_name});
     defer allocator.free(result_path);
     const result_fid = try fsrpcWalkPath(allocator, client, result_path);
     defer fsrpcClunkBestEffort(allocator, client, result_fid);
@@ -1530,7 +1530,7 @@ fn fsrpcBootstrap(allocator: std.mem.Allocator, client: *WebSocketClient) !void 
     const version_tag = nextFsrpcTag();
     const version_req = try std.fmt.allocPrint(
         allocator,
-        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_version\",\"tag\":{d},\"msize\":1048576,\"version\":\"styx-lite-1\"}}",
+        "{{\"channel\":\"acheron\",\"type\":\"acheron.t_version\",\"tag\":{d},\"msize\":1048576,\"version\":\"acheron-1\"}}",
         .{version_tag},
     );
     defer allocator.free(version_req);
@@ -1541,7 +1541,7 @@ fn fsrpcBootstrap(allocator: std.mem.Allocator, client: *WebSocketClient) !void 
     const attach_tag = nextFsrpcTag();
     const attach_req = try std.fmt.allocPrint(
         allocator,
-        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_attach\",\"tag\":{d},\"fid\":1}}",
+        "{{\"channel\":\"acheron\",\"type\":\"acheron.t_attach\",\"tag\":{d},\"fid\":1}}",
         .{attach_tag},
     );
     defer allocator.free(attach_req);
@@ -1561,7 +1561,7 @@ fn fsrpcWalkPath(allocator: std.mem.Allocator, client: *WebSocketClient, path: [
     const tag = nextFsrpcTag();
     const req = try std.fmt.allocPrint(
         allocator,
-        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":{s}}}",
+        "{{\"channel\":\"acheron\",\"type\":\"acheron.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":{s}}}",
         .{ tag, new_fid, path_json },
     );
     defer allocator.free(req);
@@ -1579,7 +1579,7 @@ fn fsrpcOpen(allocator: std.mem.Allocator, client: *WebSocketClient, fid: u32, m
     const tag = nextFsrpcTag();
     const req = try std.fmt.allocPrint(
         allocator,
-        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"{s}\"}}",
+        "{{\"channel\":\"acheron\",\"type\":\"acheron.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"{s}\"}}",
         .{ tag, fid, escaped_mode },
     );
     defer allocator.free(req);
@@ -1593,7 +1593,7 @@ fn fsrpcReadAllText(allocator: std.mem.Allocator, client: *WebSocketClient, fid:
     const tag = nextFsrpcTag();
     const req = try std.fmt.allocPrint(
         allocator,
-        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_read\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"count\":1048576}}",
+        "{{\"channel\":\"acheron\",\"type\":\"acheron.t_read\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"count\":1048576}}",
         .{ tag, fid },
     );
     defer allocator.free(req);
@@ -1631,12 +1631,12 @@ fn fsrpcWriteText(
         defer allocator.free(escaped);
         break :blk try std.fmt.allocPrint(
             allocator,
-            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_write\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"data_b64\":\"{s}\",\"correlation_id\":\"{s}\"}}",
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_write\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"data_b64\":\"{s}\",\"correlation_id\":\"{s}\"}}",
             .{ tag, fid, encoded, escaped },
         );
     } else try std.fmt.allocPrint(
         allocator,
-        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_write\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"data_b64\":\"{s}\"}}",
+        "{{\"channel\":\"acheron\",\"type\":\"acheron.t_write\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"data_b64\":\"{s}\"}}",
         .{ tag, fid, encoded },
     );
     defer allocator.free(req);
@@ -1671,7 +1671,7 @@ fn fsrpcStatRaw(allocator: std.mem.Allocator, client: *WebSocketClient, fid: u32
     const tag = nextFsrpcTag();
     const req = try std.fmt.allocPrint(
         allocator,
-        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_stat\",\"tag\":{d},\"fid\":{d}}}",
+        "{{\"channel\":\"acheron\",\"type\":\"acheron.t_stat\",\"tag\":{d},\"fid\":{d}}}",
         .{ tag, fid },
     );
     defer allocator.free(req);
@@ -1692,7 +1692,7 @@ fn fsrpcClunkBestEffort(allocator: std.mem.Allocator, client: *WebSocketClient, 
     const tag = nextFsrpcTag();
     const req = std.fmt.allocPrint(
         allocator,
-        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_clunk\",\"tag\":{d},\"fid\":{d}}}",
+        "{{\"channel\":\"acheron\",\"type\":\"acheron.t_clunk\",\"tag\":{d},\"fid\":{d}}}",
         .{ tag, fid },
     ) catch return;
     defer allocator.free(req);
@@ -1731,7 +1731,7 @@ fn sendAndAwaitFsrpcWithTimeout(
             if (parsed.value == .object) {
                 const obj = parsed.value.object;
                 if (obj.get("channel")) |channel| {
-                    if (channel == .string and std.mem.eql(u8, channel.string, "fsrpc")) {
+                    if (channel == .string and std.mem.eql(u8, channel.string, "acheron")) {
                         if (obj.get("tag")) |raw_tag| {
                             if (raw_tag == .integer and raw_tag.integer >= 0 and @as(u32, @intCast(raw_tag.integer)) == tag) {
                                 matched = true;
