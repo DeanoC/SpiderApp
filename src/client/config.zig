@@ -391,6 +391,40 @@ pub const Config = struct {
             legacy_token;
 
         const active_role = parseTokenRole(json.active_role);
+        var loaded_default_project = try duplicateOptionalString(allocator, json.default_project);
+        if (loaded_default_project) |value| {
+            if (std.mem.eql(u8, value, "spider-web")) {
+                allocator.free(value);
+                loaded_default_project = null;
+            }
+        }
+        var loaded_default_agent = try duplicateOptionalString(allocator, json.default_agent);
+        if (loaded_default_agent) |value| {
+            if (std.mem.eql(u8, value, "default")) {
+                allocator.free(value);
+                loaded_default_agent = null;
+            }
+        }
+        var loaded_project_tokens = try duplicateOptionalProjectTokens(allocator, json.project_tokens);
+        if (loaded_project_tokens) |entries_const| {
+            var entries = entries_const;
+            var keep: usize = 0;
+            for (entries) |entry| {
+                if (std.mem.eql(u8, entry.project_id, "spider-web")) {
+                    allocator.free(entry.project_id);
+                    allocator.free(entry.token);
+                    continue;
+                }
+                entries[keep] = entry;
+                keep += 1;
+            }
+            if (keep == 0) {
+                allocator.free(entries);
+                loaded_project_tokens = null;
+            } else if (keep < entries.len) {
+                loaded_project_tokens = try allocator.realloc(entries, keep);
+            }
+        }
 
         return .{
             .allocator = allocator,
@@ -402,9 +436,9 @@ pub const Config = struct {
             .insecure_tls = json.insecure_tls orelse false,
             .auto_connect_on_launch = json.auto_connect_on_launch orelse true,
             .connect_host_override = try duplicateOptionalString(allocator, json.connect_host_override),
-            .default_project = try duplicateOptionalString(allocator, json.default_project),
-            .default_agent = try duplicateOptionalString(allocator, json.default_agent),
-            .project_tokens = try duplicateOptionalProjectTokens(allocator, json.project_tokens),
+            .default_project = loaded_default_project,
+            .default_agent = loaded_default_agent,
+            .project_tokens = loaded_project_tokens,
             .default_session = try duplicateOptionalString(allocator, json.default_session),
             .update_manifest_url = try duplicateOptionalString(allocator, json.update_manifest_url) orelse
                 try allocator.dupe(u8, "https://github.com/DeanoC/ZiggyStarSpider/releases/latest/download/update.json"),
