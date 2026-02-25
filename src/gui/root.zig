@@ -6230,7 +6230,14 @@ const App = struct {
             &self.message_counter,
             session_key,
             CONTROL_SESSION_STATUS_TIMEOUT_MS,
-        ) catch return;
+        ) catch {
+            // Do not keep stale warming/error gate when status refresh fails.
+            self.session_attach_state = .unknown;
+            if (self.connection_state == .connected) {
+                self.setConnectionState(.connected, "Connected");
+            }
+            return;
+        };
         defer status.deinit(self.allocator);
 
         if (std.mem.eql(u8, status.state, "ready")) {

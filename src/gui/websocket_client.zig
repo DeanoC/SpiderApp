@@ -1,6 +1,7 @@
 const std = @import("std");
 const ws = @import("websocket");
 const builtin = @import("builtin");
+const protocol_messages = @import("protocol_messages.zig");
 
 const MessageQueue = struct {
     const capacity: usize = 4096;
@@ -11,14 +12,16 @@ const MessageQueue = struct {
     tail: std.atomic.Value(usize),
     dropped_messages: std.atomic.Value(u32),
     allocator: std.mem.Allocator,
+    label: []const u8,
 
-    fn init(allocator: std.mem.Allocator) MessageQueue {
+    fn init(allocator: std.mem.Allocator, label: []const u8) MessageQueue {
         return .{
             .slots = [_]?[]u8{null} ** capacity,
             .head = std.atomic.Value(usize).init(0),
             .tail = std.atomic.Value(usize).init(0),
             .dropped_messages = std.atomic.Value(u32).init(0),
             .allocator = allocator,
+            .label = label,
         };
     }
 
@@ -28,21 +31,22 @@ const MessageQueue = struct {
         }
     }
 
-    fn push(self: *MessageQueue, msg: []u8) void {
+    fn push(self: *MessageQueue, msg: []u8) bool {
         const tail = self.tail.load(.monotonic);
         const head = self.head.load(.acquire);
         if (tail - head >= capacity) {
             const dropped = self.dropped_messages.fetchAdd(1, .monotonic) + 1;
             if (dropped == 1 or dropped % 256 == 0) {
-                std.log.warn("[WS] inbound queue full, dropped {d} messages", .{dropped});
+                std.log.warn("[WS] {s} queue full, dropped {d} messages", .{ self.label, dropped });
             }
             self.allocator.free(msg);
-            return;
+            return false;
         }
 
         const slot_index = tail % capacity;
         self.slots[slot_index] = msg;
         self.tail.store(tail + 1, .release);
+        return true;
     }
 
     fn pop(self: *MessageQueue) ?[]u8 {
@@ -69,6 +73,53 @@ const MessageQueue = struct {
     }
 };
 
+const InboundLane = enum {
+    protocol,
+    debug,
+};
+
+const InboundMessageQueues = struct {
+    protocol: MessageQueue,
+    debug: MessageQueue,
+
+    fn init(allocator: std.mem.Allocator) InboundMessageQueues {
+        return .{
+            .protocol = MessageQueue.init(allocator, "protocol"),
+            .debug = MessageQueue.init(allocator, "debug"),
+        };
+    }
+
+    fn deinit(self: *InboundMessageQueues) void {
+        self.protocol.deinit();
+        self.debug.deinit();
+    }
+
+    fn push(self: *InboundMessageQueues, msg: []u8) void {
+        switch (classifyInboundLane(msg)) {
+            .protocol => _ = self.protocol.push(msg),
+            .debug => _ = self.debug.push(msg),
+        }
+    }
+
+    fn pop(self: *InboundMessageQueues) ?[]u8 {
+        return self.protocol.pop() orelse self.debug.pop();
+    }
+
+    fn popWait(self: *InboundMessageQueues, timeout_ms: u32) ?[]u8 {
+        const deadline_ms = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+        while (std.time.milliTimestamp() <= deadline_ms) {
+            if (self.pop()) |item| return item;
+            std.Thread.sleep(1 * std.time.ns_per_ms);
+        }
+        return null;
+    }
+};
+
+fn classifyInboundLane(msg: []const u8) InboundLane {
+    const message_type = protocol_messages.parseMessageType(msg) orelse return .protocol;
+    return if (message_type == .debug_event) .debug else .protocol;
+}
+
 fn normalizedAuthorizationToken(token: []const u8) ?[]const u8 {
     const trimmed = std.mem.trim(u8, token, " \t");
     if (trimmed.len == 0) return null;
@@ -86,7 +137,7 @@ pub const WebSocketClient = struct {
     read_thread: ?std.Thread = null,
     should_stop: std.atomic.Value(bool),
     connection_alive: std.atomic.Value(bool),
-    message_queue: MessageQueue,
+    inbound_queues: InboundMessageQueues,
 
     pub fn init(allocator: std.mem.Allocator, url: []const u8, token: []const u8) !WebSocketClient {
         return .{
@@ -95,7 +146,7 @@ pub const WebSocketClient = struct {
             .token_buf = try allocator.dupe(u8, token),
             .should_stop = std.atomic.Value(bool).init(false),
             .connection_alive = std.atomic.Value(bool).init(false),
-            .message_queue = MessageQueue.init(allocator),
+            .inbound_queues = InboundMessageQueues.init(allocator),
         };
     }
 
@@ -115,7 +166,7 @@ pub const WebSocketClient = struct {
         self.disconnect();
         self.allocator.free(self.url_buf);
         self.allocator.free(self.token_buf);
-        self.message_queue.deinit();
+        self.inbound_queues.deinit();
     }
 
     pub fn connect(self: *WebSocketClient) !void {
@@ -196,7 +247,7 @@ pub const WebSocketClient = struct {
                             std.log.err("[WS] Failed to allocate copy: {s}", .{@errorName(err)});
                             continue;
                         };
-                        self.message_queue.push(copy);
+                        self.inbound_queues.push(copy);
                     },
                     .ping => {
                         client.writePong(@constCast(msg.data)) catch {};
@@ -221,17 +272,17 @@ pub const WebSocketClient = struct {
         // Signal thread to stop
         self.should_stop.store(true, .release);
         self.connection_alive.store(false, .release);
-        
+
         // Close connection
         if (self.client) |*client| {
             client.close(.{}) catch {};
-            
+
             // Wait for read thread to finish
             if (self.read_thread) |thread| {
                 thread.join();
                 self.read_thread = null;
             }
-            
+
             client.deinit();
             self.client = null;
         }
@@ -259,12 +310,12 @@ pub const WebSocketClient = struct {
 
     /// Non-blocking check for messages. Returns null if none available.
     pub fn tryReceive(self: *WebSocketClient) ?[]u8 {
-        return self.message_queue.pop();
+        return self.inbound_queues.pop();
     }
 
     /// Wait up to timeout_ms for a message. Returns null on timeout.
     pub fn receive(self: *WebSocketClient, timeout_ms: u32) ?[]u8 {
-        return self.message_queue.popWait(timeout_ms);
+        return self.inbound_queues.popWait(timeout_ms);
     }
 
     /// Backwards compatibility - polls for a message (non-blocking)
@@ -384,12 +435,12 @@ test "parseUrl preserves non-fsrpc websocket path" {
 
 test "MessageQueue preserves FIFO order" {
     const allocator = std.testing.allocator;
-    var q = MessageQueue.init(allocator);
+    var q = MessageQueue.init(allocator, "test");
     defer q.deinit();
 
-    q.push(try allocator.dupe(u8, "one"));
-    q.push(try allocator.dupe(u8, "two"));
-    q.push(try allocator.dupe(u8, "three"));
+    try std.testing.expect(q.push(try allocator.dupe(u8, "one")));
+    try std.testing.expect(q.push(try allocator.dupe(u8, "two")));
+    try std.testing.expect(q.push(try allocator.dupe(u8, "three")));
 
     const first = q.pop().?;
     defer allocator.free(first);
@@ -404,4 +455,21 @@ test "MessageQueue preserves FIFO order" {
     try std.testing.expectEqualStrings("three", third);
 
     try std.testing.expect(q.pop() == null);
+}
+
+test "InboundMessageQueues prioritizes protocol frames over debug frames" {
+    const allocator = std.testing.allocator;
+    var queues = InboundMessageQueues.init(allocator);
+    defer queues.deinit();
+
+    queues.push(try allocator.dupe(u8, "{\"type\":\"debug.event\",\"payload\":{}}"));
+    queues.push(try allocator.dupe(u8, "{\"type\":\"session.receive\",\"payload\":{\"content\":\"ok\"}}"));
+
+    const first = queues.pop().?;
+    defer allocator.free(first);
+    try std.testing.expectEqualStrings("{\"type\":\"session.receive\",\"payload\":{\"content\":\"ok\"}}", first);
+
+    const second = queues.pop().?;
+    defer allocator.free(second);
+    try std.testing.expectEqualStrings("{\"type\":\"debug.event\",\"payload\":{}}", second);
 }
