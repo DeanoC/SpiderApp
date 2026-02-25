@@ -3250,10 +3250,24 @@ const App = struct {
                 "Selected project is not available for this session. Choose another project or clear project selection.",
             ) catch null;
         }
+        if (std.mem.indexOf(u8, remote, "project_not_found") != null) {
+            return self.allocator.dupe(
+                u8,
+                "Selected project no longer exists. Clear project selection and reconnect.",
+            ) catch null;
+        }
         if (std.mem.indexOf(u8, remote, "project_assignment_forbidden") != null) {
             return self.allocator.dupe(
                 u8,
                 "This agent is not allowed on that project (system project is Mother-only).",
+            ) catch null;
+        }
+        if (std.mem.indexOf(u8, remote, "control_plane_error") != null and
+            std.mem.indexOf(u8, remote, "SyntaxError") != null)
+        {
+            return self.allocator.dupe(
+                u8,
+                "Selected project settings are invalid for this server. Clear project/token in Settings and retry.",
             ) catch null;
         }
         if (std.mem.indexOf(u8, remote, "provisioning_required") != null) {
@@ -3294,6 +3308,18 @@ const App = struct {
             std.mem.indexOf(u8, remote, "ProjectAuthFailed") != null;
     }
 
+    fn isSelectedProjectAttachRemoteError(remote: []const u8) bool {
+        if (isProjectAuthRemoteError(remote)) return true;
+        if (std.mem.indexOf(u8, remote, "project_not_found") != null) return true;
+        if (std.mem.indexOf(u8, remote, "project_assignment_forbidden") != null) return true;
+        if (std.mem.indexOf(u8, remote, "control_plane_error") != null and
+            std.mem.indexOf(u8, remote, "SyntaxError") != null)
+        {
+            return true;
+        }
+        return false;
+    }
+
     fn isTokenAuthRemoteError(remote: []const u8) bool {
         return std.mem.indexOf(u8, remote, "auth_failed") != null or
             std.mem.indexOf(u8, remote, "auth_required") != null or
@@ -3317,12 +3343,12 @@ const App = struct {
         };
     }
 
-    fn clearSelectedProjectAfterAuthFailure(self: *App) void {
+    fn clearSelectedProjectAfterAttachFailure(self: *App) void {
         self.settings_panel.project_id.clearRetainingCapacity();
         self.settings_panel.project_token.clearRetainingCapacity();
         self.session_attach_state = .unknown;
         self.syncSettingsToConfig() catch |err| {
-            std.log.warn("Failed to persist cleared selected project after auth failure: {s}", .{@errorName(err)});
+            std.log.warn("Failed to persist cleared selected project after attach failure: {s}", .{@errorName(err)});
         };
     }
 
@@ -3387,8 +3413,8 @@ const App = struct {
         ) catch |err| blk: {
             if (selected_project_id != null and err == error.RemoteError) {
                 if (control_plane.lastRemoteError()) |remote| {
-                    if (isProjectAuthRemoteError(remote)) {
-                        self.clearSelectedProjectAfterAuthFailure();
+                    if (isSelectedProjectAttachRemoteError(remote)) {
+                        self.clearSelectedProjectAfterAttachFailure();
                     }
                     selected_project_warning = self.formatControlRemoteMessage("Selected project unavailable", remote);
                 } else {
@@ -6718,9 +6744,9 @@ const App = struct {
                         "Session attach with selected project failed; retrying default attach: {s}",
                         .{primary_detail_owned},
                     );
-                    const primary_is_project_auth = isProjectAuthRemoteError(primary_detail_owned);
-                    if (primary_is_project_auth) {
-                        self.clearSelectedProjectAfterAuthFailure();
+                    const selected_project_invalid = isSelectedProjectAttachRemoteError(primary_detail_owned);
+                    if (selected_project_invalid) {
+                        self.clearSelectedProjectAfterAttachFailure();
                     }
                     var fallback_ok = true;
                     self.attachSessionBindingWithProject(client, attach_session, null, null) catch |fallback_err| {
@@ -6739,7 +6765,7 @@ const App = struct {
                     if (fallback_ok) {
                         worker_attach_project_id = null;
                         worker_attach_project_token = null;
-                        if (primary_is_project_auth) {
+                        if (selected_project_invalid) {
                             attach_warning = try self.allocator.dupe(
                                 u8,
                                 "Selected project is not available for this session; connected using default project.",
@@ -6981,9 +7007,9 @@ const App = struct {
 
                 const has_selected_project = self.selectedProjectId() != null;
                 if (has_selected_project) {
-                    const primary_is_project_auth = isProjectAuthRemoteError(primary_detail_owned);
-                    if (primary_is_project_auth) {
-                        self.clearSelectedProjectAfterAuthFailure();
+                    const selected_project_invalid = isSelectedProjectAttachRemoteError(primary_detail_owned);
+                    if (selected_project_invalid) {
+                        self.clearSelectedProjectAfterAttachFailure();
                     }
                     self.attachSessionBindingWithProject(client, session_key, null, null) catch |fallback_err| {
                         const fallback_detail = control_plane.lastRemoteError() orelse @errorName(fallback_err);
@@ -6997,7 +7023,7 @@ const App = struct {
                         return fallback_err;
                     };
 
-                    const warning = if (primary_is_project_auth) blk: {
+                    const warning = if (selected_project_invalid) blk: {
                         break :blk "Selected project is not available for this session; using default project for this message.";
                     } else blk: {
                         break :blk "Selected project attach failed; using default project for this message.";
