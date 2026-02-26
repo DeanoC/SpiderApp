@@ -619,8 +619,6 @@ fn executeProjectCreate(allocator: std.mem.Allocator, options: args.Options, cmd
         if (status.workspace_root) |workspace_root| {
             try stdout.print("  Workspace root: {s}\n", .{workspace_root});
         }
-    } else {
-        logger.warn("project created without project token in response", .{});
     }
 }
 

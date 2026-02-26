@@ -3265,7 +3265,7 @@ const App = struct {
         if (std.mem.indexOf(u8, remote, "project_auth_failed") != null) {
             return self.allocator.dupe(
                 u8,
-                "Selected project is not available for this session. Choose another project or clear project selection.",
+                "Project access denied. If the project is locked, provide its Project Token.",
             ) catch null;
         }
         if (std.mem.indexOf(u8, remote, "project_not_found") != null) {
@@ -3746,7 +3746,7 @@ const App = struct {
     fn setProjectMountFromPanel(self: *App) !void {
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
         const project_id = self.selectedProjectId() orelse return error.MissingField;
-        const project_token = self.selectedProjectToken(project_id) orelse return error.MissingField;
+        const project_token = self.selectedProjectToken(project_id);
         const mount_path = std.mem.trim(u8, self.settings_panel.project_mount_path.items, " \t");
         const node_id = std.mem.trim(u8, self.settings_panel.project_mount_node_id.items, " \t");
         const export_name = std.mem.trim(u8, self.settings_panel.project_mount_export_name.items, " \t");
@@ -3770,10 +3770,7 @@ const App = struct {
     }
 
     fn validateProjectMountAddInput(self: *App) ?[]const u8 {
-        const project_id = self.selectedProjectId() orelse return "Select a project before adding mounts.";
-        if (self.selectedProjectToken(project_id) == null) {
-            return "Project token required for mount changes. Paste it into Project Token.";
-        }
+        _ = self.selectedProjectId() orelse return "Select a project before adding mounts.";
         const mount_path = std.mem.trim(u8, self.settings_panel.project_mount_path.items, " \t");
         if (mount_path.len == 0) return "Mount path is required.";
         const node_id = std.mem.trim(u8, self.settings_panel.project_mount_node_id.items, " \t");
@@ -3784,10 +3781,7 @@ const App = struct {
     }
 
     fn validateProjectMountRemoveInput(self: *App) ?[]const u8 {
-        const project_id = self.selectedProjectId() orelse return "Select a project before removing mounts.";
-        if (self.selectedProjectToken(project_id) == null) {
-            return "Project token required for mount changes. Paste it into Project Token.";
-        }
+        _ = self.selectedProjectId() orelse return "Select a project before removing mounts.";
         const mount_path = std.mem.trim(u8, self.settings_panel.project_mount_path.items, " \t");
         if (mount_path.len == 0) return "Mount path is required.";
         const node_id = std.mem.trim(u8, self.settings_panel.project_mount_node_id.items, " \t");
@@ -3801,7 +3795,7 @@ const App = struct {
     fn removeProjectMountFromPanel(self: *App) !void {
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
         const project_id = self.selectedProjectId() orelse return error.MissingField;
-        const project_token = self.selectedProjectToken(project_id) orelse return error.MissingField;
+        const project_token = self.selectedProjectToken(project_id);
         const mount_path = std.mem.trim(u8, self.settings_panel.project_mount_path.items, " \t");
         if (mount_path.len == 0) return error.MissingField;
 
@@ -4901,7 +4895,7 @@ const App = struct {
         self.project_selector_open = false;
 
         y += layout.row_gap * 0.65;
-        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "Project Token (required for project mutations/mounts)");
+        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "Project Token (optional; required only for locked projects)");
         const project_token_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
