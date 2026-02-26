@@ -20,6 +20,7 @@ pub const Noun = enum {
     fs,
     project,
     node,
+    pairing,
     workspace,
     auth,
     goal,
@@ -55,6 +56,7 @@ pub const Verb = enum {
     up,
     doctor,
     info,
+    refresh,
     complete,
     logs,
     none,
@@ -118,6 +120,7 @@ const help_connection = @embedFile("docs/15-connection.md");
 const help_node = @embedFile("docs/16-node.md");
 const help_workspace = @embedFile("docs/17-workspace.md");
 const help_auth = @embedFile("docs/18-auth.md");
+const help_pairing = @embedFile("docs/19-pairing.md");
 
 pub fn printHelp() void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
@@ -130,6 +133,7 @@ pub fn printHelpForNoun(noun: Noun) void {
         .chat => help_chat,
         .project => help_project,
         .node => help_node,
+        .pairing => help_pairing,
         .workspace => help_workspace,
         .auth => help_auth,
         .goal => help_goal,
@@ -163,6 +167,7 @@ fn parseNoun(arg: []const u8) ?Noun {
     if (std.mem.eql(u8, arg, "fs")) return .fs;
     if (std.mem.eql(u8, arg, "project")) return .project;
     if (std.mem.eql(u8, arg, "node")) return .node;
+    if (std.mem.eql(u8, arg, "pairing")) return .pairing;
     if (std.mem.eql(u8, arg, "workspace")) return .workspace;
     if (std.mem.eql(u8, arg, "auth")) return .auth;
     if (std.mem.eql(u8, arg, "goal")) return .goal;
@@ -206,6 +211,14 @@ fn parseVerb(noun: Noun, arg: []const u8) ?Verb {
             if (std.mem.eql(u8, arg, "join-request")) return .join_request;
             if (std.mem.eql(u8, arg, "service-get")) return .service_get;
             if (std.mem.eql(u8, arg, "service-upsert")) return .service_upsert;
+        },
+        .pairing => {
+            if (std.mem.eql(u8, arg, "pending")) return .pending;
+            if (std.mem.eql(u8, arg, "approve")) return .approve;
+            if (std.mem.eql(u8, arg, "deny")) return .deny;
+            if (std.mem.eql(u8, arg, "list")) return .list;
+            if (std.mem.eql(u8, arg, "create")) return .create;
+            if (std.mem.eql(u8, arg, "refresh")) return .refresh;
         },
         .workspace => {
             if (std.mem.eql(u8, arg, "status")) return .status;

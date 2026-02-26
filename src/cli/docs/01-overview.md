@@ -31,6 +31,12 @@ ziggystarspider --help
 - `node deny <request_id>` - Deny pending node join request
 - `node service-get <node_id>` - Show node service catalog
 - `node service-upsert <node_id> <node_secret>` - Update node service catalog metadata
+- `pairing pending` - Refresh and list pending pairing join requests
+- `pairing approve <request_id> [--lease-ttl-ms <ms>]` - Approve pending pairing request
+- `pairing deny <request_id>` - Deny pending pairing request
+- `pairing list` - Refresh and list active pairing invites
+- `pairing create [--expires-in-ms <ms>]` - Create a new pairing invite
+- `pairing refresh [pending|invites|all]` - Refresh pairing snapshots and print results
 - `workspace status [project_id]` - Show active workspace mounts
 - `auth status` - Show Spiderweb auth token status (admin only)
 - `auth rotate <admin|user>` - Rotate Spiderweb auth token (admin only)
