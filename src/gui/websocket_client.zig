@@ -77,6 +77,11 @@ const InboundLane = enum {
     debug,
 };
 
+pub const Mode = enum {
+    threaded_queue,
+    direct,
+};
+
 const InboundMessageQueues = struct {
     protocol: MessageQueue,
     debug: MessageQueue,
@@ -130,6 +135,7 @@ pub const WebSocketClient = struct {
     allocator: std.mem.Allocator,
     url_buf: []u8,
     token_buf: []u8,
+    mode: Mode = .threaded_queue,
     client: ?ws.Client = null,
 
     // Threading - using manual read loop (like ZSC)
@@ -139,10 +145,20 @@ pub const WebSocketClient = struct {
     inbound_queues: InboundMessageQueues,
 
     pub fn init(allocator: std.mem.Allocator, url: []const u8, token: []const u8) !WebSocketClient {
+        return initWithMode(allocator, url, token, .threaded_queue);
+    }
+
+    pub fn initWithMode(
+        allocator: std.mem.Allocator,
+        url: []const u8,
+        token: []const u8,
+        mode: Mode,
+    ) !WebSocketClient {
         return .{
             .allocator = allocator,
             .url_buf = try allocator.dupe(u8, url),
             .token_buf = try allocator.dupe(u8, token),
+            .mode = mode,
             .should_stop = std.atomic.Value(bool).init(false),
             .connection_alive = std.atomic.Value(bool).init(false),
             .inbound_queues = InboundMessageQueues.init(allocator),
@@ -208,8 +224,10 @@ pub const WebSocketClient = struct {
         self.should_stop.store(false, .release);
         self.connection_alive.store(true, .release);
 
-        // Start our own read loop thread (like ZSC does)
-        self.read_thread = try std.Thread.spawn(.{}, readLoop, .{self});
+        // Threaded mode mirrors the GUI main websocket usage.
+        if (self.mode == .threaded_queue) {
+            self.read_thread = try std.Thread.spawn(.{}, readLoop, .{self});
+        }
         std.log.info("WebSocket connected to {s}:{d}", .{ parsed.host, parsed.port });
     }
 
@@ -309,11 +327,23 @@ pub const WebSocketClient = struct {
 
     /// Non-blocking check for messages. Returns null if none available.
     pub fn tryReceive(self: *WebSocketClient) ?[]u8 {
+        if (self.mode == .direct) {
+            return self.tryReceiveDirect();
+        }
         return self.inbound_queues.pop();
     }
 
     /// Wait up to timeout_ms for a message. Returns null on timeout.
     pub fn receive(self: *WebSocketClient, timeout_ms: u32) ?[]u8 {
+        if (self.mode == .direct) {
+            const deadline_ms = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+            while (std.time.milliTimestamp() <= deadline_ms) {
+                if (self.tryReceiveDirect()) |msg| return msg;
+                if (!self.connection_alive.load(.acquire)) return null;
+                std.Thread.sleep(1 * std.time.ns_per_ms);
+            }
+            return null;
+        }
         return self.inbound_queues.popWait(timeout_ms);
     }
 
@@ -327,6 +357,48 @@ pub const WebSocketClient = struct {
         }
         if (!self.connection_alive.load(.acquire)) return error.ConnectionClosed;
         return error.WouldBlock;
+    }
+
+    fn tryReceiveDirect(self: *WebSocketClient) ?[]u8 {
+        if (self.client == null) return null;
+        if (!self.connection_alive.load(.acquire)) return null;
+
+        if (self.client) |*client| {
+            const msg = client.read() catch |err| switch (err) {
+                error.WouldBlock => return null,
+                error.Closed, error.ConnectionResetByPeer => {
+                    std.log.info("[WS] Connection closed", .{});
+                    self.connection_alive.store(false, .release);
+                    return null;
+                },
+                else => {
+                    std.log.err("[WS] read error: {s}", .{@errorName(err)});
+                    self.connection_alive.store(false, .release);
+                    return null;
+                },
+            } orelse return null;
+            defer client.done(msg);
+
+            switch (msg.type) {
+                .text, .binary => {
+                    return self.allocator.dupe(u8, msg.data) catch |err| {
+                        std.log.err("[WS] Failed to allocate copy: {s}", .{@errorName(err)});
+                        return null;
+                    };
+                },
+                .ping => {
+                    client.writePong(@constCast(msg.data)) catch {};
+                    return null;
+                },
+                .close => {
+                    self.connection_alive.store(false, .release);
+                    return null;
+                },
+                .pong => return null,
+            }
+        }
+
+        return null;
     }
 };
 

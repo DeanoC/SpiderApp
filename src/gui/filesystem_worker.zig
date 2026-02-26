@@ -324,7 +324,12 @@ pub const FilesystemWorker = struct {
 
     fn ensureConnected(self: *FilesystemWorker) !*ws_client_mod.WebSocketClient {
         if (self.client == null) {
-            var client = try ws_client_mod.WebSocketClient.init(self.allocator, self.url, self.token);
+            var client = try ws_client_mod.WebSocketClient.initWithMode(
+                self.allocator,
+                self.url,
+                self.token,
+                .direct,
+            );
             errdefer client.deinit();
             try client.connect();
             self.client = client;
