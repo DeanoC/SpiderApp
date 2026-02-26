@@ -3385,9 +3385,32 @@ const App = struct {
         }
     }
 
-    fn selectedProjectId(self: *App) ?[]const u8 {
+    fn selectedProjectId(self: *const App) ?[]const u8 {
         if (self.settings_panel.project_id.items.len > 0) return self.settings_panel.project_id.items;
         return self.config.selectedProject();
+    }
+
+    fn selectedProjectSummary(self: *const App) ?*const workspace_types.ProjectSummary {
+        const project_id = self.selectedProjectId() orelse return null;
+        for (self.projects.items) |*project| {
+            if (std.mem.eql(u8, project.id, project_id)) return project;
+        }
+        return null;
+    }
+
+    fn selectedProjectTokenLocked(self: *const App) ?bool {
+        const project = self.selectedProjectSummary() orelse return null;
+        return project.token_locked;
+    }
+
+    fn ensureSelectedProjectInSettings(self: *App, project_id: []const u8) !void {
+        if (self.settings_panel.project_id.items.len > 0 and
+            std.mem.eql(u8, self.settings_panel.project_id.items, project_id))
+        {
+            return;
+        }
+        self.settings_panel.project_id.clearRetainingCapacity();
+        try self.settings_panel.project_id.appendSlice(self.allocator, project_id);
     }
 
     fn selectProjectInSettings(self: *App, project_id: []const u8) !void {
@@ -3739,6 +3762,54 @@ const App = struct {
         try self.syncSettingsToConfig();
         self.settings_panel.project_create_name.clearRetainingCapacity();
         self.activateSelectedProject() catch {};
+        self.refreshWorkspaceData() catch {};
+        self.clearWorkspaceError();
+    }
+
+    fn lockSelectedProjectFromPanel(self: *App) !void {
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        const project_id = self.selectedProjectId() orelse return error.MissingField;
+        const current_token = self.selectedProjectToken(project_id);
+        try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
+
+        var result = try control_plane.rotateProjectToken(
+            self.allocator,
+            client,
+            &self.message_counter,
+            project_id,
+            current_token,
+        );
+        defer result.deinit(self.allocator);
+
+        const next_token = result.project_token orelse return error.InvalidResponse;
+        try self.ensureSelectedProjectInSettings(project_id);
+        self.settings_panel.project_token.clearRetainingCapacity();
+        try self.settings_panel.project_token.appendSlice(self.allocator, next_token);
+        try self.syncSettingsToConfig();
+
+        self.refreshWorkspaceData() catch {};
+        self.clearWorkspaceError();
+    }
+
+    fn unlockSelectedProjectFromPanel(self: *App) !void {
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        const project_id = self.selectedProjectId() orelse return error.MissingField;
+        const current_token = self.selectedProjectToken(project_id);
+        try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
+
+        var result = try control_plane.revokeProjectToken(
+            self.allocator,
+            client,
+            &self.message_counter,
+            project_id,
+            current_token,
+        );
+        defer result.deinit(self.allocator);
+
+        try self.ensureSelectedProjectInSettings(project_id);
+        self.settings_panel.project_token.clearRetainingCapacity();
+        try self.syncSettingsToConfig();
+
         self.refreshWorkspaceData() catch {};
         self.clearWorkspaceError();
     }
@@ -4871,8 +4942,12 @@ const App = struct {
                 if (std.mem.eql(u8, project.id, selected_id)) {
                     selected_project_label_buf = std.fmt.allocPrint(
                         self.allocator,
-                        "{s} ({s})",
-                        .{ project.name, project.id },
+                        "{s} ({s}) [{s}]",
+                        .{
+                            project.name,
+                            project.id,
+                            if (project.token_locked) "locked" else "open",
+                        },
                     ) catch null;
                     if (selected_project_label_buf) |label| break :blk label;
                     break :blk selected_id;
@@ -4894,7 +4969,24 @@ const App = struct {
         const project_dropdown_rect: ?Rect = null;
         self.project_selector_open = false;
 
-        y += layout.row_gap * 0.65;
+        const selected_project_lock_state = self.selectedProjectTokenLocked();
+        const lock_state_text: []const u8 = if (self.selectedProjectId() == null)
+            "Project lock state: select a project"
+        else if (selected_project_lock_state) |locked|
+            if (locked)
+                "Project lock state: locked (project token required for non-admin)"
+            else
+                "Project lock state: unlocked (project token optional)"
+        else
+            "Project lock state: unknown (project not in current list)";
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            y,
+            input_width,
+            lock_state_text,
+            self.theme.colors.text_secondary,
+        );
+        y += layout.line_height + layout.row_gap * 0.45;
         self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "Project Token (optional; required only for locked projects)");
         const project_token_rect = Rect.fromXYWH(
             rect.min[0] + pad,
@@ -4998,10 +5090,45 @@ const App = struct {
         if (self.drawButtonWidget(
             activate_rect,
             "Activate Project",
-            .{ .variant = .secondary, .disabled = self.connection_state != .connected or self.settings_panel.project_id.items.len == 0 },
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected or self.selectedProjectId() == null },
         )) {
             self.activateSelectedProject() catch |err| {
                 const msg = self.formatControlOpError("Project activate failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setWorkspaceError(text);
+                }
+            };
+        }
+
+        y += button_height + layout.row_gap;
+        const lock_rect = Rect.fromXYWH(rect.min[0] + pad, y, button_width, button_height);
+        const unlock_rect = Rect.fromXYWH(lock_rect.max[0] + pad, y, button_width, button_height);
+        const selected_project_known = selected_project_lock_state != null;
+        const selected_is_locked = if (selected_project_lock_state) |locked| locked else false;
+        const lock_disabled = self.connection_state != .connected or !selected_project_known or selected_is_locked;
+        const unlock_disabled = self.connection_state != .connected or !selected_project_known or !selected_is_locked;
+
+        if (self.drawButtonWidget(
+            lock_rect,
+            "Lock Project",
+            .{ .variant = .secondary, .disabled = lock_disabled },
+        )) {
+            self.lockSelectedProjectFromPanel() catch |err| {
+                const msg = self.formatControlOpError("Project lock failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setWorkspaceError(text);
+                }
+            };
+        }
+        if (self.drawButtonWidget(
+            unlock_rect,
+            "Unlock Project",
+            .{ .variant = .secondary, .disabled = unlock_disabled },
+        )) {
+            self.unlockSelectedProjectFromPanel() catch |err| {
+                const msg = self.formatControlOpError("Project unlock failed", err);
                 if (msg) |text| {
                     defer self.allocator.free(text);
                     self.setWorkspaceError(text);
@@ -5262,10 +5389,14 @@ const App = struct {
             self.settings_panel.project_id.items
         else
             "(none)";
+        const selected_project_lock_suffix: []const u8 = if (selected_project_lock_state) |locked|
+            if (locked) " [locked]" else " [open]"
+        else
+            "";
         const selected_project_line = std.fmt.allocPrint(
             self.allocator,
-            "Selected project: {s}",
-            .{selected_project_text},
+            "Selected project: {s}{s}",
+            .{ selected_project_text, selected_project_lock_suffix },
         ) catch null;
         if (selected_project_line) |line| {
             defer self.allocator.free(line);
@@ -5332,8 +5463,13 @@ const App = struct {
                 const project = self.projects.items[idx];
                 const line = std.fmt.allocPrint(
                     self.allocator,
-                    "{s} [{s}] mounts={d}",
-                    .{ project.id, project.status, project.mount_count },
+                    "{s} [{s}] access={s} mounts={d}",
+                    .{
+                        project.id,
+                        project.status,
+                        if (project.token_locked) "locked" else "open",
+                        project.mount_count,
+                    },
                 ) catch null;
                 if (line) |value| {
                     defer self.allocator.free(value);

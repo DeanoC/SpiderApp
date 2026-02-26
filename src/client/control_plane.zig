@@ -324,6 +324,98 @@ pub fn removeProjectMount(
     return parseProjectDetail(allocator, parsed.value.object);
 }
 
+pub const ProjectTokenMutation = struct {
+    project_id: []u8,
+    project_token: ?[]u8 = null,
+    updated_at_ms: i64 = 0,
+    rotated: bool = false,
+    revoked: bool = false,
+
+    pub fn deinit(self: *ProjectTokenMutation, allocator: std.mem.Allocator) void {
+        allocator.free(self.project_id);
+        if (self.project_token) |value| allocator.free(value);
+        self.* = undefined;
+    }
+};
+
+pub fn rotateProjectToken(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+    project_id: []const u8,
+    current_project_token: ?[]const u8,
+) !ProjectTokenMutation {
+    const escaped_project = try unified_v2.jsonEscape(allocator, project_id);
+    defer allocator.free(escaped_project);
+    const escaped_token = if (current_project_token) |value|
+        try unified_v2.jsonEscape(allocator, value)
+    else
+        null;
+    defer if (escaped_token) |value| allocator.free(value);
+
+    var payload = std.ArrayListUnmanaged(u8){};
+    defer payload.deinit(allocator);
+    try payload.append(allocator, '{');
+    try payload.writer(allocator).print("\"project_id\":\"{s}\"", .{escaped_project});
+    if (escaped_token) |value| {
+        try payload.writer(allocator).print(",\"project_token\":\"{s}\"", .{value});
+    }
+    try payload.append(allocator, '}');
+
+    const payload_json = try requestControlPayloadJson(
+        allocator,
+        client,
+        message_counter,
+        "control.project_token_rotate",
+        payload.items,
+    );
+    defer allocator.free(payload_json);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResponse;
+    return parseProjectTokenMutation(allocator, parsed.value.object);
+}
+
+pub fn revokeProjectToken(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+    project_id: []const u8,
+    current_project_token: ?[]const u8,
+) !ProjectTokenMutation {
+    const escaped_project = try unified_v2.jsonEscape(allocator, project_id);
+    defer allocator.free(escaped_project);
+    const escaped_token = if (current_project_token) |value|
+        try unified_v2.jsonEscape(allocator, value)
+    else
+        null;
+    defer if (escaped_token) |value| allocator.free(value);
+
+    var payload = std.ArrayListUnmanaged(u8){};
+    defer payload.deinit(allocator);
+    try payload.append(allocator, '{');
+    try payload.writer(allocator).print("\"project_id\":\"{s}\"", .{escaped_project});
+    if (escaped_token) |value| {
+        try payload.writer(allocator).print(",\"project_token\":\"{s}\"", .{value});
+    }
+    try payload.append(allocator, '}');
+
+    const payload_json = try requestControlPayloadJson(
+        allocator,
+        client,
+        message_counter,
+        "control.project_token_revoke",
+        payload.items,
+    );
+    defer allocator.free(payload_json);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResponse;
+    return parseProjectTokenMutation(allocator, parsed.value.object);
+}
+
 pub fn listNodes(
     allocator: std.mem.Allocator,
     client: anytype,
@@ -516,6 +608,7 @@ fn parseProjectSummary(
         .status = try dupOptionalString(allocator, obj, "status") orelse try allocator.dupe(u8, "active"),
         .kind = try dupOptionalString(allocator, obj, "kind"),
         .is_delete_protected = try getOptionalBool(obj, "is_delete_protected", false),
+        .token_locked = try getOptionalBool(obj, "token_locked", false),
         .mount_count = @intCast(try getOptionalU64(obj, "mount_count", 0)),
         .created_at_ms = try getOptionalI64(obj, "created_at_ms", 0),
         .updated_at_ms = try getOptionalI64(obj, "updated_at_ms", 0),
@@ -533,6 +626,7 @@ fn parseProjectDetail(
         .status = try dupOptionalString(allocator, obj, "status") orelse try allocator.dupe(u8, "active"),
         .kind = try dupOptionalString(allocator, obj, "kind"),
         .is_delete_protected = try getOptionalBool(obj, "is_delete_protected", false),
+        .token_locked = try getOptionalBool(obj, "token_locked", false),
         .created_at_ms = try getOptionalI64(obj, "created_at_ms", 0),
         .updated_at_ms = try getOptionalI64(obj, "updated_at_ms", 0),
         .project_token = try dupOptionalString(allocator, obj, "project_token"),
@@ -547,6 +641,19 @@ fn parseProjectDetail(
     }
 
     return detail;
+}
+
+fn parseProjectTokenMutation(
+    allocator: std.mem.Allocator,
+    obj: std.json.ObjectMap,
+) !ProjectTokenMutation {
+    return .{
+        .project_id = try dupRequiredStringAny(allocator, obj, &.{ "project_id", "id" }),
+        .project_token = try dupOptionalNullableString(allocator, obj, "project_token"),
+        .updated_at_ms = try getOptionalI64(obj, "updated_at_ms", 0),
+        .rotated = try getOptionalBool(obj, "rotated", false),
+        .revoked = try getOptionalBool(obj, "revoked", false),
+    };
 }
 
 fn parseNodeInfo(
@@ -781,6 +888,7 @@ test "parseProjectSummary accepts project_id key" {
         \\  "project_id":"proj-1",
         \\  "name":"Demo",
         \\  "status":"active",
+        \\  "token_locked":true,
         \\  "mount_count":2
         \\}
     ;
@@ -794,6 +902,7 @@ test "parseProjectSummary accepts project_id key" {
     try std.testing.expectEqualStrings("proj-1", summary.id);
     try std.testing.expectEqualStrings("Demo", summary.name);
     try std.testing.expectEqualStrings("active", summary.status);
+    try std.testing.expectEqual(true, summary.token_locked);
     try std.testing.expectEqual(@as(usize, 2), summary.mount_count);
 }
 
@@ -805,6 +914,7 @@ test "parseProjectDetail accepts project_id key" {
         \\  "name":"Topology",
         \\  "vision":"dist fs",
         \\  "status":"active",
+        \\  "token_locked":true,
         \\  "project_token":"proj-secret",
         \\  "mounts":[{"mount_path":"/src","node_id":"node-1","export_name":"work"}]
         \\}
@@ -819,5 +929,29 @@ test "parseProjectDetail accepts project_id key" {
     try std.testing.expectEqualStrings("proj-7", detail.id);
     try std.testing.expectEqualStrings("Topology", detail.name);
     try std.testing.expectEqualStrings("dist fs", detail.vision);
+    try std.testing.expectEqual(true, detail.token_locked);
     try std.testing.expectEqual(@as(usize, 1), detail.mounts.items.len);
+}
+
+test "parseProjectTokenMutation accepts nullable token" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "project_id":"proj-9",
+        \\  "project_token":null,
+        \\  "revoked":true,
+        \\  "updated_at_ms":1234
+        \\}
+    ;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .object);
+
+    var mutation = try parseProjectTokenMutation(allocator, parsed.value.object);
+    defer mutation.deinit(allocator);
+
+    try std.testing.expectEqualStrings("proj-9", mutation.project_id);
+    try std.testing.expect(mutation.project_token == null);
+    try std.testing.expectEqual(true, mutation.revoked);
+    try std.testing.expectEqual(@as(i64, 1234), mutation.updated_at_ms);
 }
