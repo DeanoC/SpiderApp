@@ -3769,6 +3769,35 @@ const App = struct {
         self.clearWorkspaceError();
     }
 
+    fn validateProjectMountAddInput(self: *App) ?[]const u8 {
+        const project_id = self.selectedProjectId() orelse return "Select a project before adding mounts.";
+        if (self.selectedProjectToken(project_id) == null) {
+            return "Project token required for mount changes. Paste it into Project Token.";
+        }
+        const mount_path = std.mem.trim(u8, self.settings_panel.project_mount_path.items, " \t");
+        if (mount_path.len == 0) return "Mount path is required.";
+        const node_id = std.mem.trim(u8, self.settings_panel.project_mount_node_id.items, " \t");
+        if (node_id.len == 0) return "Mount node ID is required.";
+        const export_name = std.mem.trim(u8, self.settings_panel.project_mount_export_name.items, " \t");
+        if (export_name.len == 0) return "Mount export name is required.";
+        return null;
+    }
+
+    fn validateProjectMountRemoveInput(self: *App) ?[]const u8 {
+        const project_id = self.selectedProjectId() orelse return "Select a project before removing mounts.";
+        if (self.selectedProjectToken(project_id) == null) {
+            return "Project token required for mount changes. Paste it into Project Token.";
+        }
+        const mount_path = std.mem.trim(u8, self.settings_panel.project_mount_path.items, " \t");
+        if (mount_path.len == 0) return "Mount path is required.";
+        const node_id = std.mem.trim(u8, self.settings_panel.project_mount_node_id.items, " \t");
+        const export_name = std.mem.trim(u8, self.settings_panel.project_mount_export_name.items, " \t");
+        if ((node_id.len == 0) != (export_name.len == 0)) {
+            return "For filtered remove, provide both node ID and export name, or leave both blank.";
+        }
+        return null;
+    }
+
     fn removeProjectMountFromPanel(self: *App) !void {
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
         const project_id = self.selectedProjectId() orelse return error.MissingField;
@@ -5036,15 +5065,8 @@ const App = struct {
         );
         if (mount_export_focused) self.settings_panel.focused_field = .project_mount_export_name;
 
-        const mount_path = std.mem.trim(u8, self.settings_panel.project_mount_path.items, " \t");
-        const mount_node = std.mem.trim(u8, self.settings_panel.project_mount_node_id.items, " \t");
-        const mount_export = std.mem.trim(u8, self.settings_panel.project_mount_export_name.items, " \t");
-        const selected_project_id = self.selectedProjectId();
-        const has_project_token = if (selected_project_id) |project_id|
-            self.selectedProjectToken(project_id) != null
-        else
-            false;
-        const mount_filter_mismatch = (mount_node.len == 0) != (mount_export.len == 0);
+        const add_mount_validation = self.validateProjectMountAddInput();
+        const remove_mount_validation = self.validateProjectMountRemoveInput();
 
         y += input_height + layout.section_gap;
         const add_mount_rect = Rect.fromXYWH(rect.min[0] + pad, y, button_width, button_height);
@@ -5055,21 +5077,20 @@ const App = struct {
             "Add Mount",
             .{
                 .variant = .primary,
-                .disabled = self.connection_state != .connected or
-                    selected_project_id == null or
-                    !has_project_token or
-                    mount_path.len == 0 or
-                    mount_node.len == 0 or
-                    mount_export.len == 0,
+                .disabled = self.connection_state != .connected,
             },
         )) {
-            self.setProjectMountFromPanel() catch |err| {
-                const msg = self.formatControlOpError("Mount set failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setWorkspaceError(text);
-                }
-            };
+            if (add_mount_validation) |message| {
+                self.setWorkspaceError(message);
+            } else {
+                self.setProjectMountFromPanel() catch |err| {
+                    const msg = self.formatControlOpError("Mount set failed", err);
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setWorkspaceError(text);
+                    }
+                };
+            }
         }
 
         if (self.drawButtonWidget(
@@ -5077,23 +5098,38 @@ const App = struct {
             "Remove Mount",
             .{
                 .variant = .secondary,
-                .disabled = self.connection_state != .connected or
-                    selected_project_id == null or
-                    !has_project_token or
-                    mount_path.len == 0 or
-                    mount_filter_mismatch,
+                .disabled = self.connection_state != .connected,
             },
         )) {
-            self.removeProjectMountFromPanel() catch |err| {
-                const msg = self.formatControlOpError("Mount remove failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setWorkspaceError(text);
-                }
-            };
+            if (remove_mount_validation) |message| {
+                self.setWorkspaceError(message);
+            } else {
+                self.removeProjectMountFromPanel() catch |err| {
+                    const msg = self.formatControlOpError("Mount remove failed", err);
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setWorkspaceError(text);
+                    }
+                };
+            }
+        }
+
+        const mount_hint = if (self.connection_state == .connected)
+            (add_mount_validation orelse remove_mount_validation)
+        else
+            null;
+        if (mount_hint) |hint| {
+            self.drawTextTrimmed(
+                rect.min[0] + pad,
+                y + button_height + layout.row_gap * 0.5,
+                input_width,
+                hint,
+                self.theme.colors.text_secondary,
+            );
         }
 
         y += button_height + layout.row_gap;
+        if (mount_hint != null) y += layout.line_height;
         self.drawTextTrimmed(
             rect.min[0] + pad,
             y + @max(0.0, (button_height - layout.line_height) * 0.5),
