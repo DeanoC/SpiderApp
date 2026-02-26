@@ -209,6 +209,9 @@ const SettingsFocusField = enum {
     project_create_name,
     project_create_vision,
     project_operator_token,
+    project_mount_path,
+    project_mount_node_id,
+    project_mount_export_name,
     default_session,
     default_agent,
     ui_theme,
@@ -236,6 +239,9 @@ fn isProjectPanelFocusField(field: SettingsFocusField) bool {
         .project_create_name,
         .project_create_vision,
         .project_operator_token,
+        .project_mount_path,
+        .project_mount_node_id,
+        .project_mount_export_name,
         => true,
         else => false,
     };
@@ -252,6 +258,9 @@ const SettingsPanel = struct {
     project_create_name: std.ArrayList(u8) = .empty,
     project_create_vision: std.ArrayList(u8) = .empty,
     project_operator_token: std.ArrayList(u8) = .empty,
+    project_mount_path: std.ArrayList(u8) = .empty,
+    project_mount_node_id: std.ArrayList(u8) = .empty,
+    project_mount_export_name: std.ArrayList(u8) = .empty,
     default_session: std.ArrayList(u8) = .empty,
     default_agent: std.ArrayList(u8) = .empty,
     ui_theme: std.ArrayList(u8) = .empty,
@@ -272,6 +281,9 @@ const SettingsPanel = struct {
         panel.project_create_name.appendSlice(allocator, "") catch {};
         panel.project_create_vision.appendSlice(allocator, "") catch {};
         panel.project_operator_token.appendSlice(allocator, "") catch {};
+        panel.project_mount_path.appendSlice(allocator, "/") catch {};
+        panel.project_mount_node_id.appendSlice(allocator, "") catch {};
+        panel.project_mount_export_name.appendSlice(allocator, "") catch {};
         panel.default_session.appendSlice(allocator, "main") catch {};
         panel.default_agent.appendSlice(allocator, "") catch {};
         return panel;
@@ -284,6 +296,9 @@ const SettingsPanel = struct {
         self.project_create_name.deinit(allocator);
         self.project_create_vision.deinit(allocator);
         self.project_operator_token.deinit(allocator);
+        self.project_mount_path.deinit(allocator);
+        self.project_mount_node_id.deinit(allocator);
+        self.project_mount_export_name.deinit(allocator);
         self.default_session.deinit(allocator);
         self.default_agent.deinit(allocator);
         self.ui_theme.deinit(allocator);
@@ -2808,6 +2823,9 @@ const App = struct {
             .project_create_name => &self.settings_panel.project_create_name,
             .project_create_vision => &self.settings_panel.project_create_vision,
             .project_operator_token => &self.settings_panel.project_operator_token,
+            .project_mount_path => &self.settings_panel.project_mount_path,
+            .project_mount_node_id => &self.settings_panel.project_mount_node_id,
+            .project_mount_export_name => &self.settings_panel.project_mount_export_name,
             .default_session => &self.settings_panel.default_session,
             .default_agent => &self.settings_panel.default_agent,
             .ui_theme => &self.settings_panel.ui_theme,
@@ -3721,6 +3739,62 @@ const App = struct {
         try self.syncSettingsToConfig();
         self.settings_panel.project_create_name.clearRetainingCapacity();
         self.activateSelectedProject() catch {};
+        self.refreshWorkspaceData() catch {};
+        self.clearWorkspaceError();
+    }
+
+    fn setProjectMountFromPanel(self: *App) !void {
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        const project_id = self.selectedProjectId() orelse return error.MissingField;
+        const project_token = self.selectedProjectToken(project_id) orelse return error.MissingField;
+        const mount_path = std.mem.trim(u8, self.settings_panel.project_mount_path.items, " \t");
+        const node_id = std.mem.trim(u8, self.settings_panel.project_mount_node_id.items, " \t");
+        const export_name = std.mem.trim(u8, self.settings_panel.project_mount_export_name.items, " \t");
+        if (mount_path.len == 0 or node_id.len == 0 or export_name.len == 0) return error.MissingField;
+        try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
+
+        var detail = try control_plane.setProjectMount(
+            self.allocator,
+            client,
+            &self.message_counter,
+            project_id,
+            project_token,
+            node_id,
+            export_name,
+            mount_path,
+        );
+        defer detail.deinit(self.allocator);
+
+        self.refreshWorkspaceData() catch {};
+        self.clearWorkspaceError();
+    }
+
+    fn removeProjectMountFromPanel(self: *App) !void {
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        const project_id = self.selectedProjectId() orelse return error.MissingField;
+        const project_token = self.selectedProjectToken(project_id) orelse return error.MissingField;
+        const mount_path = std.mem.trim(u8, self.settings_panel.project_mount_path.items, " \t");
+        if (mount_path.len == 0) return error.MissingField;
+
+        const trimmed_node_id = std.mem.trim(u8, self.settings_panel.project_mount_node_id.items, " \t");
+        const trimmed_export_name = std.mem.trim(u8, self.settings_panel.project_mount_export_name.items, " \t");
+        const node_id_filter: ?[]const u8 = if (trimmed_node_id.len > 0) trimmed_node_id else null;
+        const export_name_filter: ?[]const u8 = if (trimmed_export_name.len > 0) trimmed_export_name else null;
+        if ((node_id_filter == null) != (export_name_filter == null)) return error.MissingField;
+        try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
+
+        var detail = try control_plane.removeProjectMount(
+            self.allocator,
+            client,
+            &self.message_counter,
+            project_id,
+            project_token,
+            mount_path,
+            node_id_filter,
+            export_name_filter,
+        );
+        defer detail.deinit(self.allocator);
+
         self.refreshWorkspaceData() catch {};
         self.clearWorkspaceError();
     }
@@ -4912,6 +4986,113 @@ const App = struct {
             };
         }
 
+        y += button_height + layout.section_gap * 0.7;
+        self.drawFormSectionTitle(rect.min[0] + pad, &y, input_width, layout, "Project Mount");
+
+        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "Mount Path");
+        const mount_path_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            input_width,
+            input_height,
+        );
+        const mount_path_focused = self.drawTextInputWidget(
+            mount_path_rect,
+            self.settings_panel.project_mount_path.items,
+            self.settings_panel.focused_field == .project_mount_path,
+            .{ .placeholder = "/work" },
+        );
+        if (mount_path_focused) self.settings_panel.focused_field = .project_mount_path;
+
+        y += input_height + layout.row_gap * 0.8;
+        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "Mount Node ID");
+        const mount_node_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            input_width,
+            input_height,
+        );
+        const mount_node_focused = self.drawTextInputWidget(
+            mount_node_rect,
+            self.settings_panel.project_mount_node_id.items,
+            self.settings_panel.focused_field == .project_mount_node_id,
+            .{ .placeholder = "node-2" },
+        );
+        if (mount_node_focused) self.settings_panel.focused_field = .project_mount_node_id;
+
+        y += input_height + layout.row_gap * 0.8;
+        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "Mount Export Name");
+        const mount_export_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            input_width,
+            input_height,
+        );
+        const mount_export_focused = self.drawTextInputWidget(
+            mount_export_rect,
+            self.settings_panel.project_mount_export_name.items,
+            self.settings_panel.focused_field == .project_mount_export_name,
+            .{ .placeholder = "work" },
+        );
+        if (mount_export_focused) self.settings_panel.focused_field = .project_mount_export_name;
+
+        const mount_path = std.mem.trim(u8, self.settings_panel.project_mount_path.items, " \t");
+        const mount_node = std.mem.trim(u8, self.settings_panel.project_mount_node_id.items, " \t");
+        const mount_export = std.mem.trim(u8, self.settings_panel.project_mount_export_name.items, " \t");
+        const selected_project_id = self.selectedProjectId();
+        const has_project_token = if (selected_project_id) |project_id|
+            self.selectedProjectToken(project_id) != null
+        else
+            false;
+        const mount_filter_mismatch = (mount_node.len == 0) != (mount_export.len == 0);
+
+        y += input_height + layout.section_gap;
+        const add_mount_rect = Rect.fromXYWH(rect.min[0] + pad, y, button_width, button_height);
+        const remove_mount_rect = Rect.fromXYWH(add_mount_rect.max[0] + pad, y, button_width, button_height);
+
+        if (self.drawButtonWidget(
+            add_mount_rect,
+            "Add Mount",
+            .{
+                .variant = .primary,
+                .disabled = self.connection_state != .connected or
+                    selected_project_id == null or
+                    !has_project_token or
+                    mount_path.len == 0 or
+                    mount_node.len == 0 or
+                    mount_export.len == 0,
+            },
+        )) {
+            self.setProjectMountFromPanel() catch |err| {
+                const msg = self.formatControlOpError("Mount set failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setWorkspaceError(text);
+                }
+            };
+        }
+
+        if (self.drawButtonWidget(
+            remove_mount_rect,
+            "Remove Mount",
+            .{
+                .variant = .secondary,
+                .disabled = self.connection_state != .connected or
+                    selected_project_id == null or
+                    !has_project_token or
+                    mount_path.len == 0 or
+                    mount_filter_mismatch,
+            },
+        )) {
+            self.removeProjectMountFromPanel() catch |err| {
+                const msg = self.formatControlOpError("Mount remove failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setWorkspaceError(text);
+                }
+            };
+        }
+
         y += button_height + layout.row_gap;
         self.drawTextTrimmed(
             rect.min[0] + pad,
@@ -5196,7 +5377,10 @@ const App = struct {
             !project_token_rect.contains(.{ self.mouse_x, self.mouse_y }) and
             !create_name_rect.contains(.{ self.mouse_x, self.mouse_y }) and
             !create_vision_rect.contains(.{ self.mouse_x, self.mouse_y }) and
-            !operator_token_rect.contains(.{ self.mouse_x, self.mouse_y }))
+            !operator_token_rect.contains(.{ self.mouse_x, self.mouse_y }) and
+            !mount_path_rect.contains(.{ self.mouse_x, self.mouse_y }) and
+            !mount_node_rect.contains(.{ self.mouse_x, self.mouse_y }) and
+            !mount_export_rect.contains(.{ self.mouse_x, self.mouse_y }))
         {
             self.settings_panel.focused_field = .none;
         }

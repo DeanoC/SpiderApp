@@ -214,6 +214,102 @@ pub fn activateProject(
     return parseWorkspaceStatus(allocator, parsed.value.object);
 }
 
+pub fn setProjectMount(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+    project_id: []const u8,
+    project_token: []const u8,
+    node_id: []const u8,
+    export_name: []const u8,
+    mount_path: []const u8,
+) !workspace_types.ProjectDetail {
+    const escaped_project = try unified_v2.jsonEscape(allocator, project_id);
+    defer allocator.free(escaped_project);
+    const escaped_token = try unified_v2.jsonEscape(allocator, project_token);
+    defer allocator.free(escaped_token);
+    const escaped_node = try unified_v2.jsonEscape(allocator, node_id);
+    defer allocator.free(escaped_node);
+    const escaped_export = try unified_v2.jsonEscape(allocator, export_name);
+    defer allocator.free(escaped_export);
+    const escaped_mount = try unified_v2.jsonEscape(allocator, mount_path);
+    defer allocator.free(escaped_mount);
+
+    const payload_req = try std.fmt.allocPrint(
+        allocator,
+        "{{\"project_id\":\"{s}\",\"project_token\":\"{s}\",\"node_id\":\"{s}\",\"export_name\":\"{s}\",\"mount_path\":\"{s}\"}}",
+        .{ escaped_project, escaped_token, escaped_node, escaped_export, escaped_mount },
+    );
+    defer allocator.free(payload_req);
+
+    const payload_json = try requestControlPayloadJson(
+        allocator,
+        client,
+        message_counter,
+        "control.project_mount_set",
+        payload_req,
+    );
+    defer allocator.free(payload_json);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResponse;
+    return parseProjectDetail(allocator, parsed.value.object);
+}
+
+pub fn removeProjectMount(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+    project_id: []const u8,
+    project_token: []const u8,
+    mount_path: []const u8,
+    node_id_filter: ?[]const u8,
+    export_name_filter: ?[]const u8,
+) !workspace_types.ProjectDetail {
+    if ((node_id_filter == null) != (export_name_filter == null)) return error.InvalidArguments;
+
+    const escaped_project = try unified_v2.jsonEscape(allocator, project_id);
+    defer allocator.free(escaped_project);
+    const escaped_token = try unified_v2.jsonEscape(allocator, project_token);
+    defer allocator.free(escaped_token);
+    const escaped_mount = try unified_v2.jsonEscape(allocator, mount_path);
+    defer allocator.free(escaped_mount);
+
+    var payload = std.ArrayListUnmanaged(u8){};
+    defer payload.deinit(allocator);
+    try payload.append(allocator, '{');
+    try payload.writer(allocator).print(
+        "\"project_id\":\"{s}\",\"project_token\":\"{s}\",\"mount_path\":\"{s}\"",
+        .{ escaped_project, escaped_token, escaped_mount },
+    );
+    if (node_id_filter) |node_id| {
+        const escaped_node = try unified_v2.jsonEscape(allocator, node_id);
+        defer allocator.free(escaped_node);
+        const escaped_export = try unified_v2.jsonEscape(allocator, export_name_filter.?);
+        defer allocator.free(escaped_export);
+        try payload.writer(allocator).print(
+            ",\"node_id\":\"{s}\",\"export_name\":\"{s}\"",
+            .{ escaped_node, escaped_export },
+        );
+    }
+    try payload.append(allocator, '}');
+
+    const payload_json = try requestControlPayloadJson(
+        allocator,
+        client,
+        message_counter,
+        "control.project_mount_remove",
+        payload.items,
+    );
+    defer allocator.free(payload_json);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResponse;
+    return parseProjectDetail(allocator, parsed.value.object);
+}
+
 pub fn listNodes(
     allocator: std.mem.Allocator,
     client: anytype,
