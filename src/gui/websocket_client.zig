@@ -1,6 +1,5 @@
 const std = @import("std");
 const ws = @import("websocket");
-const builtin = @import("builtin");
 const protocol_messages = @import("protocol_messages.zig");
 
 const MessageQueue = struct {
@@ -200,9 +199,9 @@ pub const WebSocketClient = struct {
             .headers = headers,
         });
 
-        // Set socket to non-blocking so read() returns WouldBlock immediately
-        // when no data is available (required for proper thread behavior)
-        try setClientSocketNonBlocking(&client);
+        // Match CLI behavior: use a short socket read timeout so readLoop's
+        // client.read() returns WouldBlock quickly instead of blocking.
+        try client.readTimeout(1);
 
         self.client = client;
         client_owned_locally = false;
@@ -330,24 +329,6 @@ pub const WebSocketClient = struct {
         return error.WouldBlock;
     }
 };
-
-fn setClientSocketNonBlocking(client: *ws.Client) !void {
-    const handle = client.stream.stream.handle;
-    if (comptime builtin.os.tag == .windows) {
-        var mode: u32 = 1;
-        const result = std.os.windows.ws2_32.ioctlsocket(handle, std.os.windows.ws2_32.FIONBIO, &mode);
-        if (result != 0) {
-            return error.Unexpected;
-        }
-        return;
-    }
-
-    const socket = handle;
-    const flags = try std.posix.fcntl(socket, std.posix.F.GETFL, 0);
-    const nonblock_mask_u32: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
-    const nonblock_mask: usize = @intCast(nonblock_mask_u32);
-    _ = try std.posix.fcntl(socket, std.posix.F.SETFL, flags | nonblock_mask);
-}
 
 const ParsedUrl = struct {
     host: []u8,
