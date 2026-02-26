@@ -4901,7 +4901,7 @@ const App = struct {
         self.project_selector_open = false;
 
         y += layout.row_gap * 0.65;
-        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "Project Token (required unless primary agent)");
+        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "Project Token (required for project mutations/mounts)");
         const project_token_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
