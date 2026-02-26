@@ -760,6 +760,81 @@ pub fn closeSession(
     return parseSessionCloseResult(allocator, parsed.value.object);
 }
 
+pub fn sessionRestore(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+    agent_id: ?[]const u8,
+) !workspace_types.SessionRestoreResult {
+    var payload_req: ?[]u8 = null;
+    defer if (payload_req) |value| allocator.free(value);
+    if (agent_id) |value| {
+        const escaped_agent = try unified_v2.jsonEscape(allocator, value);
+        defer allocator.free(escaped_agent);
+        payload_req = try std.fmt.allocPrint(
+            allocator,
+            "{{\"agent_id\":\"{s}\"}}",
+            .{escaped_agent},
+        );
+    }
+
+    const payload_json = try requestControlPayloadJson(
+        allocator,
+        client,
+        message_counter,
+        "control.session_restore",
+        if (payload_req) |value| value else null,
+    );
+    defer allocator.free(payload_json);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResponse;
+    return parseSessionRestoreResult(allocator, parsed.value.object);
+}
+
+pub fn sessionHistory(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+    agent_id: ?[]const u8,
+    limit: usize,
+) !std.ArrayListUnmanaged(workspace_types.SessionSummary) {
+    const escaped_agent = if (agent_id) |value|
+        try unified_v2.jsonEscape(allocator, value)
+    else
+        null;
+    defer if (escaped_agent) |value| allocator.free(value);
+
+    var payload = std.ArrayListUnmanaged(u8){};
+    defer payload.deinit(allocator);
+    try payload.append(allocator, '{');
+    var appended = false;
+    if (escaped_agent) |value| {
+        try payload.writer(allocator).print("\"agent_id\":\"{s}\"", .{value});
+        appended = true;
+    }
+    if (limit > 0) {
+        if (appended) try payload.append(allocator, ',');
+        try payload.writer(allocator).print("\"limit\":{d}", .{limit});
+    }
+    try payload.append(allocator, '}');
+
+    const payload_json = try requestControlPayloadJson(
+        allocator,
+        client,
+        message_counter,
+        "control.session_history",
+        payload.items,
+    );
+    defer allocator.free(payload_json);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResponse;
+    return parseSessionHistory(allocator, parsed.value.object);
+}
+
 pub fn reconcileStatus(
     allocator: std.mem.Allocator,
     client: anytype,
@@ -988,6 +1063,9 @@ fn parseSessionSummary(
         .session_key = try dupRequiredString(allocator, obj, "session_key"),
         .agent_id = try dupRequiredString(allocator, obj, "agent_id"),
         .project_id = try dupOptionalNullableString(allocator, obj, "project_id"),
+        .last_active_ms = try getOptionalI64(obj, "last_active_ms", 0),
+        .message_count = try getOptionalU64(obj, "message_count", 0),
+        .summary = try dupOptionalNullableString(allocator, obj, "summary"),
     };
 }
 
@@ -1018,6 +1096,42 @@ fn parseSessionCloseResult(
         .closed = try getOptionalBool(obj, "closed", false),
         .active_session = try dupRequiredString(allocator, obj, "active_session"),
     };
+}
+
+fn parseSessionRestoreResult(
+    allocator: std.mem.Allocator,
+    obj: std.json.ObjectMap,
+) !workspace_types.SessionRestoreResult {
+    var result = workspace_types.SessionRestoreResult{
+        .found = try getOptionalBool(obj, "found", false),
+        .session = null,
+    };
+    errdefer result.deinit(allocator);
+    if (!result.found) return result;
+
+    const session_val = obj.get("session") orelse return error.InvalidResponse;
+    if (session_val != .object) return error.InvalidResponse;
+    result.session = try parseSessionSummary(allocator, session_val.object);
+    return result;
+}
+
+fn parseSessionHistory(
+    allocator: std.mem.Allocator,
+    obj: std.json.ObjectMap,
+) !std.ArrayListUnmanaged(workspace_types.SessionSummary) {
+    const sessions_val = obj.get("sessions") orelse return error.InvalidResponse;
+    if (sessions_val != .array) return error.InvalidResponse;
+
+    var sessions = std.ArrayListUnmanaged(workspace_types.SessionSummary){};
+    errdefer {
+        for (sessions.items) |*entry| entry.deinit(allocator);
+        sessions.deinit(allocator);
+    }
+    for (sessions_val.array.items) |item| {
+        if (item != .object) return error.InvalidResponse;
+        try sessions.append(allocator, try parseSessionSummary(allocator, item.object));
+    }
+    return sessions;
 }
 
 fn parseReconcileStatus(
@@ -1294,4 +1408,59 @@ test "parseSessionCloseResult reads close response" {
     try std.testing.expectEqualStrings("work", result.session_key);
     try std.testing.expect(result.closed);
     try std.testing.expectEqualStrings("main", result.active_session);
+}
+
+test "parseSessionRestoreResult reads found session payload" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "found":true,
+        \\  "session":{
+        \\    "session_key":"work-1",
+        \\    "agent_id":"mother",
+        \\    "project_id":"system",
+        \\    "last_active_ms":1234,
+        \\    "message_count":7,
+        \\    "summary":"API design"
+        \\  }
+        \\}
+    ;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .object);
+
+    var result = try parseSessionRestoreResult(allocator, parsed.value.object);
+    defer result.deinit(allocator);
+
+    try std.testing.expect(result.found);
+    try std.testing.expect(result.session != null);
+    try std.testing.expectEqualStrings("work-1", result.session.?.session_key);
+    try std.testing.expectEqual(@as(i64, 1234), result.session.?.last_active_ms);
+    try std.testing.expectEqual(@as(u64, 7), result.session.?.message_count);
+}
+
+test "parseSessionHistory reads entry list" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "sessions":[
+        \\    {"session_key":"a","agent_id":"mother","project_id":"system","last_active_ms":10,"message_count":1},
+        \\    {"session_key":"b","agent_id":"bob","project_id":"proj-2","last_active_ms":9,"message_count":0,"summary":"todo"}
+        \\  ]
+        \\}
+    ;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .object);
+
+    var sessions = try parseSessionHistory(allocator, parsed.value.object);
+    defer {
+        for (sessions.items) |*entry| entry.deinit(allocator);
+        sessions.deinit(allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), sessions.items.len);
+    try std.testing.expectEqualStrings("a", sessions.items[0].session_key);
+    try std.testing.expectEqual(@as(u64, 1), sessions.items[0].message_count);
+    try std.testing.expectEqualStrings("todo", sessions.items[1].summary.?);
 }

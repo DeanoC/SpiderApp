@@ -208,10 +208,12 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
         .session => {
             switch (cmd.verb) {
                 .list => try executeSessionList(allocator, options, cmd),
+                .history => try executeSessionHistory(allocator, options, cmd),
                 .status => try executeSessionStatus(allocator, options, cmd),
                 .attach => try executeSessionAttach(allocator, options, cmd),
                 .resume_job => try executeSessionResume(allocator, options, cmd),
                 .close => try executeSessionClose(allocator, options, cmd),
+                .restore => try executeSessionRestore(allocator, options, cmd),
                 else => {
                     logger.err("Unknown session verb", .{});
                     return error.InvalidArguments;
@@ -1060,6 +1062,75 @@ fn executeSessionList(allocator: std.mem.Allocator, options: args.Options, cmd: 
     }
 }
 
+const SessionHistoryArgs = struct {
+    agent_id: ?[]const u8 = null,
+    limit: usize = 10,
+};
+
+fn parseSessionHistoryArgs(cmd: args.Command) !SessionHistoryArgs {
+    var parsed = SessionHistoryArgs{};
+    var i: usize = 0;
+    while (i < cmd.args.len) : (i += 1) {
+        const arg = cmd.args[i];
+        if (std.mem.eql(u8, arg, "--limit")) {
+            i += 1;
+            if (i >= cmd.args.len) return error.InvalidArguments;
+            const value = try std.fmt.parseUnsigned(usize, cmd.args[i], 10);
+            parsed.limit = value;
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--")) return error.InvalidArguments;
+        if (parsed.agent_id != null) return error.InvalidArguments;
+        parsed.agent_id = arg;
+    }
+    return parsed;
+}
+
+fn executeSessionHistory(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    const parsed = parseSessionHistoryArgs(cmd) catch {
+        logger.err("session history usage: session history [agent_id] [--limit <n>]", .{});
+        return error.InvalidArguments;
+    };
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var sessions = try control_plane.sessionHistory(
+        allocator,
+        client,
+        &g_control_request_counter,
+        parsed.agent_id,
+        parsed.limit,
+    );
+    defer {
+        for (sessions.items) |*entry| entry.deinit(allocator);
+        sessions.deinit(allocator);
+    }
+    if (sessions.items.len == 0) {
+        try stdout.print("(no persisted sessions)\n", .{});
+        return;
+    }
+
+    try stdout.print("Persisted sessions:\n", .{});
+    for (sessions.items) |session| {
+        try stdout.print(
+            "  - {s}  agent={s}  project={s}  last_active_ms={d}  messages={d}",
+            .{
+                session.session_key,
+                session.agent_id,
+                session.project_id orelse "(none)",
+                session.last_active_ms,
+                session.message_count,
+            },
+        );
+        if (session.summary) |summary| {
+            try stdout.print("  summary={s}", .{summary});
+        }
+        try stdout.print("\n", .{});
+    }
+}
+
 fn executeSessionStatus(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     if (cmd.args.len > 1) {
         logger.err("session status accepts zero or one session_key", .{});
@@ -1178,6 +1249,47 @@ fn executeSessionClose(allocator: std.mem.Allocator, options: args.Options, cmd:
     try stdout.print("Closed: {s}\n", .{if (result.closed) "yes" else "no"});
     try stdout.print("Session: {s}\n", .{result.session_key});
     try stdout.print("Active session: {s}\n", .{result.active_session});
+}
+
+fn executeSessionRestore(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len > 1) {
+        logger.err("session restore accepts zero or one agent_id", .{});
+        return error.InvalidArguments;
+    }
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var restored = try control_plane.sessionRestore(
+        allocator,
+        client,
+        &g_control_request_counter,
+        if (cmd.args.len == 1) cmd.args[0] else null,
+    );
+    defer restored.deinit(allocator);
+
+    if (!restored.found or restored.session == null) {
+        try stdout.print("(no persisted session found)\n", .{});
+        return;
+    }
+    const session = restored.session.?;
+    try stdout.print(
+        "Restoring session {s} (agent={s}, project={s})\n",
+        .{ session.session_key, session.agent_id, session.project_id orelse "(none)" },
+    );
+
+    var status = try control_plane.sessionAttach(
+        allocator,
+        client,
+        &g_control_request_counter,
+        session.session_key,
+        session.agent_id,
+        session.project_id,
+        options.project_token,
+    );
+    defer status.deinit(allocator);
+    try printSessionAttachStatus(stdout, &status);
 }
 
 fn executeNodeList(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {

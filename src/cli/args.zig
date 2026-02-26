@@ -63,6 +63,7 @@ pub const Verb = enum {
     refresh,
     complete,
     logs,
+    restore,
     none,
 };
 
@@ -223,7 +224,8 @@ fn parseVerb(noun: Noun, arg: []const u8) ?Verb {
             if (std.mem.eql(u8, arg, "attach")) return .attach;
             if (std.mem.eql(u8, arg, "resume")) return .resume_job;
             if (std.mem.eql(u8, arg, "close")) return .close;
-            if (std.mem.eql(u8, arg, "history")) return .list;
+            if (std.mem.eql(u8, arg, "history")) return .history;
+            if (std.mem.eql(u8, arg, "restore")) return .restore;
         },
         .node => {
             if (std.mem.eql(u8, arg, "list")) return .list;

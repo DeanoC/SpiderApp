@@ -65,8 +65,10 @@ ziggystarspider chat send "summarize current mounts"
 
 # Session control
 ziggystarspider session list
+ziggystarspider session history --limit 5
 ziggystarspider session attach review mother --project system
 ziggystarspider session resume review
+ziggystarspider session restore
 ```
 
 Useful options:

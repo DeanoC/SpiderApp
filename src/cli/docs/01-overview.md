@@ -26,10 +26,12 @@ ziggystarspider --help
 - `agent list` - List discoverable agents
 - `agent info <agent_id>` - Show one agent's metadata
 - `session list` - List known sessions for this connection
+- `session history [agent_id] [--limit N]` - List persisted sessions
 - `session status [session_key]` - Show attach/runtime state for a session
 - `session attach <session_key> <agent_id>` - Create/rebind a session
 - `session resume <session_key>` - Switch active session
 - `session close <session_key>` - Close a non-main session
+- `session restore [agent_id]` - Attach the latest persisted session
 - `node list` - List registered nodes
 - `node info <node_id>` - Show node details
 - `node join-request <node_name> [fs_url]` - Submit pending node join request

@@ -216,11 +216,15 @@ pub const SessionSummary = struct {
     session_key: []u8,
     agent_id: []u8,
     project_id: ?[]u8 = null,
+    last_active_ms: i64 = 0,
+    message_count: u64 = 0,
+    summary: ?[]u8 = null,
 
     pub fn deinit(self: *SessionSummary, allocator: std.mem.Allocator) void {
         allocator.free(self.session_key);
         allocator.free(self.agent_id);
         if (self.project_id) |value| allocator.free(value);
+        if (self.summary) |value| allocator.free(value);
         self.* = undefined;
     }
 };
@@ -245,6 +249,16 @@ pub const SessionCloseResult = struct {
     pub fn deinit(self: *SessionCloseResult, allocator: std.mem.Allocator) void {
         allocator.free(self.session_key);
         allocator.free(self.active_session);
+        self.* = undefined;
+    }
+};
+
+pub const SessionRestoreResult = struct {
+    found: bool,
+    session: ?SessionSummary = null,
+
+    pub fn deinit(self: *SessionRestoreResult, allocator: std.mem.Allocator) void {
+        if (self.session) |*value| value.deinit(allocator);
         self.* = undefined;
     }
 };
