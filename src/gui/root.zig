@@ -7109,6 +7109,12 @@ const App = struct {
         if (total_entries > shown_entries) {
             try out.writer(self.allocator).print("\n... {d} more service changes", .{total_entries - shown_entries});
         }
+        try self.appendNodeServiceRuntimeDiagnostics(
+            &out,
+            payload_obj,
+            added_items,
+            updated_items,
+        );
         const owned = try out.toOwnedSlice(self.allocator);
         return @as(?[]u8, owned);
     }
@@ -7134,56 +7140,165 @@ const App = struct {
                 .string => value.string,
                 else => "?",
             } else "?";
-            const digest = if (obj.get("digest")) |value| switch (value) {
-                .integer => value.integer,
-                else => null,
-            } else null;
+            var hash_buf: [48]u8 = undefined;
+            const hash = nodeServiceDeltaHashText(obj, "hash", "digest", &hash_buf);
 
             if (include_previous) {
                 const previous_version = if (obj.get("previous_version")) |value| switch (value) {
                     .string => value.string,
                     else => "?",
                 } else "?";
-                const previous_digest = if (obj.get("previous_digest")) |value| switch (value) {
-                    .integer => value.integer,
-                    else => null,
-                } else null;
-                if (digest) |digest_value| {
-                    if (previous_digest) |prev_value| {
-                        try out.writer(self.allocator).print(
-                            "\n{s} {s}@{s} digest={d} prev={s}/{d}",
-                            .{ prefix, service_id, version, digest_value, previous_version, prev_value },
-                        );
-                    } else {
-                        try out.writer(self.allocator).print(
-                            "\n{s} {s}@{s} digest={d} prev={s}/n/a",
-                            .{ prefix, service_id, version, digest_value, previous_version },
-                        );
-                    }
-                } else if (previous_digest) |prev_value| {
-                    try out.writer(self.allocator).print(
-                        "\n{s} {s}@{s} digest=n/a prev={s}/{d}",
-                        .{ prefix, service_id, version, previous_version, prev_value },
-                    );
-                } else {
-                    try out.writer(self.allocator).print(
-                        "\n{s} {s}@{s} digest=n/a prev={s}/n/a",
-                        .{ prefix, service_id, version, previous_version },
-                    );
-                }
-            } else if (digest) |digest_value| {
+                var previous_hash_buf: [48]u8 = undefined;
+                const previous_hash = nodeServiceDeltaHashText(obj, "previous_hash", "previous_digest", &previous_hash_buf);
                 try out.writer(self.allocator).print(
-                    "\n{s} {s}@{s} digest={d}",
-                    .{ prefix, service_id, version, digest_value },
+                    "\n{s} {s}@{s} hash={s} prev={s}/{s}",
+                    .{ prefix, service_id, version, hash, previous_version, previous_hash },
                 );
             } else {
                 try out.writer(self.allocator).print(
-                    "\n{s} {s}@{s} digest=n/a",
-                    .{ prefix, service_id, version },
+                    "\n{s} {s}@{s} hash={s}",
+                    .{ prefix, service_id, version, hash },
                 );
             }
             shown_entries.* += 1;
         }
+    }
+
+    fn nodeServiceDeltaHashText(
+        obj: std.json.ObjectMap,
+        primary_key: []const u8,
+        fallback_key: []const u8,
+        fallback_buffer: *[48]u8,
+    ) []const u8 {
+        if (obj.get(primary_key)) |value| {
+            return switch (value) {
+                .string => value.string,
+                .integer => std.fmt.bufPrint(fallback_buffer, "{d}", .{value.integer}) catch "n/a",
+                else => "n/a",
+            };
+        }
+        if (obj.get(fallback_key)) |value| {
+            return switch (value) {
+                .string => value.string,
+                .integer => std.fmt.bufPrint(fallback_buffer, "{d}", .{value.integer}) catch "n/a",
+                else => "n/a",
+            };
+        }
+        return "n/a";
+    }
+
+    fn appendNodeServiceRuntimeDiagnostics(
+        self: *App,
+        out: *std.ArrayList(u8),
+        payload_obj: std.json.ObjectMap,
+        added_items: []const std.json.Value,
+        updated_items: []const std.json.Value,
+    ) !void {
+        const services_value = payload_obj.get("services") orelse return;
+        if (services_value != .array) return;
+
+        const max_runtime_lines: usize = 12;
+        var runtime_lines: usize = 0;
+        var appended_header = false;
+        for (services_value.array.items) |service| {
+            if (runtime_lines >= max_runtime_lines) break;
+            if (service != .object) continue;
+            const service_id = if (service.object.get("service_id")) |value| switch (value) {
+                .string => value.string,
+                else => continue,
+            } else continue;
+            if (!serviceIdPresentInDeltaItems(service_id, added_items, updated_items)) continue;
+            if (!serviceHasRuntimeStatus(service.object)) continue;
+            if (!appended_header) {
+                try out.appendSlice(self.allocator, "\nruntime_status:");
+                appended_header = true;
+            }
+            try out.writer(self.allocator).print("\n* {s}: ", .{service_id});
+            try self.appendRuntimeStatusSummary(out, service.object);
+            runtime_lines += 1;
+        }
+        if (runtime_lines == max_runtime_lines) {
+            try out.appendSlice(self.allocator, "\n* ... more runtime status entries omitted");
+        }
+    }
+
+    fn serviceIdPresentInDeltaItems(service_id: []const u8, items_a: []const std.json.Value, items_b: []const std.json.Value) bool {
+        if (serviceIdPresentInDeltaArray(service_id, items_a)) return true;
+        return serviceIdPresentInDeltaArray(service_id, items_b);
+    }
+
+    fn serviceIdPresentInDeltaArray(service_id: []const u8, items: []const std.json.Value) bool {
+        for (items) |entry| {
+            if (entry != .object) continue;
+            const entry_service_id = if (entry.object.get("service_id")) |value| switch (value) {
+                .string => value.string,
+                else => continue,
+            } else continue;
+            if (std.mem.eql(u8, service_id, entry_service_id)) return true;
+        }
+        return false;
+    }
+
+    fn serviceHasRuntimeStatus(service_obj: std.json.ObjectMap) bool {
+        const runtime_value = service_obj.get("runtime") orelse return false;
+        if (runtime_value != .object) return false;
+        const supervision_value = runtime_value.object.get("supervision_status") orelse return false;
+        return supervision_value == .object;
+    }
+
+    fn appendRuntimeStatusSummary(
+        self: *App,
+        out: *std.ArrayList(u8),
+        service_obj: std.json.ObjectMap,
+    ) !void {
+        const runtime_value = service_obj.get("runtime") orelse return;
+        if (runtime_value != .object) return;
+        const supervision_value = runtime_value.object.get("supervision_status") orelse return;
+        if (supervision_value != .object) return;
+        const status = supervision_value.object;
+
+        const state = if (status.get("state")) |value| switch (value) {
+            .string => value.string,
+            else => "unknown",
+        } else "unknown";
+        const enabled = if (status.get("enabled")) |value| switch (value) {
+            .bool => value.bool,
+            else => false,
+        } else false;
+        const running = if (status.get("running")) |value| switch (value) {
+            .bool => value.bool,
+            else => false,
+        } else false;
+        const failures = if (status.get("consecutive_failures")) |value| switch (value) {
+            .integer => value.integer,
+            else => 0,
+        } else 0;
+        const transition_ms = if (status.get("last_transition_ms")) |value| switch (value) {
+            .integer => value.integer,
+            else => 0,
+        } else 0;
+        const healthy_ms = if (status.get("last_healthy_ms")) |value| switch (value) {
+            .integer => value.integer,
+            else => 0,
+        } else 0;
+        const last_error = if (status.get("last_error")) |value| switch (value) {
+            .string => value.string,
+            .null => null,
+            else => null,
+        } else null;
+
+        try out.writer(self.allocator).print(
+            "state={s} enabled={s} running={s} failures={d} transition_ms={d} healthy_ms={d} last_error={s}",
+            .{
+                state,
+                if (enabled) "true" else "false",
+                if (running) "true" else "false",
+                failures,
+                transition_ms,
+                healthy_ms,
+                if (last_error) |value| value else "none",
+            },
+        );
     }
 
     fn jumpFilesystemToNode(self: *App, manager: *panel_manager.PanelManager, node_id: []const u8) !void {
