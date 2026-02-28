@@ -382,6 +382,9 @@ const DebugEventEntry = struct {
     correlation_id: ?[]u8 = null,
     payload_json: []u8,
     payload_lines: std.ArrayList(DebugPayloadLine) = .empty,
+    payload_wrap_rows: std.ArrayList(u32) = .empty,
+    payload_wrap_rows_wrap_width: f32 = -1.0,
+    payload_wrap_rows_valid: bool = false,
     cached_visible_rows: usize = 0,
     cached_visible_rows_wrap_width: f32 = -1.0,
     cached_visible_rows_fold_revision: u64 = 0,
@@ -391,6 +394,7 @@ const DebugEventEntry = struct {
         allocator.free(self.category);
         if (self.correlation_id) |value| allocator.free(value);
         allocator.free(self.payload_json);
+        self.payload_wrap_rows.deinit(allocator);
         self.payload_lines.deinit(allocator);
     }
 };
@@ -4178,6 +4182,10 @@ const App = struct {
     fn invalidateGlyphWidthCache(self: *App) void {
         for (&self.ascii_glyph_width_cache) |*value| {
             value.* = -1.0;
+        }
+        for (self.debug_events.items) |*entry| {
+            entry.payload_wrap_rows_valid = false;
+            entry.cached_visible_rows_valid = false;
         }
         self.debug_fold_revision +%= 1;
         if (self.debug_fold_revision == 0) self.debug_fold_revision = 1;
@@ -8241,11 +8249,51 @@ const App = struct {
         if (entry.payload_lines.items.len > 0) return;
         if (entry.payload_json.len == 0) return;
         entry.payload_lines = self.buildDebugPayloadLines(entry.payload_json) catch .empty;
+        entry.payload_wrap_rows.clearRetainingCapacity();
+        entry.payload_wrap_rows_valid = false;
+        entry.cached_visible_rows_valid = false;
+    }
+
+    fn ensureDebugPayloadWrapRows(self: *App, output_min_x: f32, content_max_x: f32, entry: *DebugEventEntry) void {
+        if (entry.payload_lines.items.len == 0) return;
+        const wrap_width = @max(1.0, content_max_x - output_min_x);
+        if (entry.payload_wrap_rows_valid and
+            @abs(entry.payload_wrap_rows_wrap_width - wrap_width) < 0.5 and
+            entry.payload_wrap_rows.items.len == entry.payload_lines.items.len)
+        {
+            return;
+        }
+
+        entry.payload_wrap_rows.clearRetainingCapacity();
+        entry.payload_wrap_rows_valid = false;
+        entry.payload_wrap_rows.ensureTotalCapacity(self.allocator, entry.payload_lines.items.len) catch return;
+
+        const fold_marker_w = self.measureText("[-]") + self.measureText(" ");
+        for (entry.payload_lines.items, 0..) |meta, line_index| {
+            const line = entry.payload_json[meta.start..meta.end];
+            const indent_width = @as(f32, @floatFromInt(meta.indent_spaces)) * self.measureText(" ");
+            const line_x_base = output_min_x + 8.0 + indent_width;
+            const content_start = @min(meta.indent_spaces, line.len);
+            const content = line[content_start..];
+            const can_fold = meta.opens_block and meta.matching_close_index != null and
+                @as(usize, @intCast(meta.matching_close_index.?)) > line_index + 1;
+            const text_x = if (can_fold) line_x_base + fold_marker_w else line_x_base;
+            const rows = self.measureJsonLineWrapRows(text_x, content_max_x, content);
+            const clamped_rows: u32 = if (rows > std.math.maxInt(u32))
+                std.math.maxInt(u32)
+            else
+                @intCast(rows);
+            entry.payload_wrap_rows.appendAssumeCapacity(clamped_rows);
+        }
+
+        entry.payload_wrap_rows_wrap_width = wrap_width;
+        entry.payload_wrap_rows_valid = true;
         entry.cached_visible_rows_valid = false;
     }
 
     fn countVisibleDebugPayloadRows(self: *App, output_min_x: f32, content_max_x: f32, entry: *DebugEventEntry) usize {
         if (entry.payload_lines.items.len == 0) return 0;
+        self.ensureDebugPayloadWrapRows(output_min_x, content_max_x, entry);
         const wrap_width = @max(1.0, content_max_x - output_min_x);
         if (entry.cached_visible_rows_valid and
             @abs(entry.cached_visible_rows_wrap_width - wrap_width) < 0.5 and
@@ -8254,21 +8302,23 @@ const App = struct {
             return entry.cached_visible_rows;
         }
 
-        const fold_marker_w = self.measureText("[-]") + self.measureText(" ");
         var rows: usize = 0;
         var line_index: usize = 0;
         while (line_index < entry.payload_lines.items.len) {
             const meta = entry.payload_lines.items[line_index];
-            const line = entry.payload_json[meta.start..meta.end];
-            const indent_width = @as(f32, @floatFromInt(meta.indent_spaces)) * self.measureText(" ");
-            const line_x_base = output_min_x + 8.0 + indent_width;
-            const content_start = @min(meta.indent_spaces, line.len);
-            const content = line[content_start..];
-
-            const can_fold = meta.opens_block and meta.matching_close_index != null and
-                @as(usize, @intCast(meta.matching_close_index.?)) > line_index + 1;
-            const text_x = if (can_fold) line_x_base + fold_marker_w else line_x_base;
-            rows += self.measureJsonLineWrapRows(text_x, content_max_x, content);
+            if (line_index < entry.payload_wrap_rows.items.len) {
+                rows += @as(usize, @intCast(entry.payload_wrap_rows.items[line_index]));
+            } else {
+                const line = entry.payload_json[meta.start..meta.end];
+                const indent_width = @as(f32, @floatFromInt(meta.indent_spaces)) * self.measureText(" ");
+                const line_x_base = output_min_x + 8.0 + indent_width;
+                const content_start = @min(meta.indent_spaces, line.len);
+                const content = line[content_start..];
+                const can_fold = meta.opens_block and meta.matching_close_index != null and
+                    @as(usize, @intCast(meta.matching_close_index.?)) > line_index + 1;
+                const text_x = if (can_fold) line_x_base + (self.measureText("[-]") + self.measureText(" ")) else line_x_base;
+                rows += self.measureJsonLineWrapRows(text_x, content_max_x, content);
+            }
 
             if (meta.opens_block and meta.matching_close_index != null and
                 @as(usize, @intCast(meta.matching_close_index.?)) > line_index + 1 and
