@@ -87,21 +87,6 @@ pub fn buildAgentControl(
     action: []const u8,
     content: ?[]const u8,
 ) ![]const u8 {
-    if (std.mem.eql(u8, action, "debug.subscribe")) {
-        return std.fmt.allocPrint(
-            allocator,
-            "{{\"channel\":\"control\",\"type\":\"control.debug_subscribe\",\"id\":\"{s}\",\"timestamp\":{d}}}",
-            .{ id, std.time.milliTimestamp() },
-        );
-    }
-    if (std.mem.eql(u8, action, "debug.unsubscribe")) {
-        return std.fmt.allocPrint(
-            allocator,
-            "{{\"channel\":\"control\",\"type\":\"control.debug_unsubscribe\",\"id\":\"{s}\",\"timestamp\":{d}}}",
-            .{ id, std.time.milliTimestamp() },
-        );
-    }
-
     var buffer = std.ArrayListUnmanaged(u8).empty;
     defer buffer.deinit(allocator);
 
@@ -191,15 +176,6 @@ test "protocol_messages: buildAgentControl emits action envelope" {
 
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"type\":\"agent.control\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"action\":\"state\"") != null);
-}
-
-test "protocol_messages: buildAgentControl maps debug subscribe to control channel" {
-    const allocator = std.testing.allocator;
-    const payload = try buildAgentControl(allocator, "req-1", "debug.subscribe", null);
-    defer allocator.free(payload);
-
-    try std.testing.expect(std.mem.indexOf(u8, payload, "\"channel\":\"control\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, payload, "\"type\":\"control.debug_subscribe\"") != null);
 }
 
 test "protocol_messages: buildAgentControl escapes content safely" {

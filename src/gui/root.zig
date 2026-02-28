@@ -60,6 +60,8 @@ const CONTROL_SESSION_STATUS_TIMEOUT_MS: i64 = 2_000;
 const WS_MAX_MESSAGES_PER_FRAME: u32 = 32;
 const WS_MAX_POLL_BUDGET_NS: i128 = 2 * std.time.ns_per_ms;
 const FILESYSTEM_DIR_CACHE_TTL_MS: i64 = 5_000;
+const DEBUG_STREAM_POLL_INTERVAL_MS: i64 = 350;
+const DEBUG_STREAM_PATH = "/debug/stream.log";
 const TERMINAL_OUTPUT_MAX_BYTES: usize = 512 * 1024;
 const TERMINAL_READ_POLL_INTERVAL_MS: i64 = 120;
 const TERMINAL_READ_TIMEOUT_MS: u32 = 1;
@@ -160,6 +162,7 @@ const FilesystemActiveRequest = struct {
     id: u64,
     kind: fs_worker_mod.RequestKind,
     open_after_resolve: bool = false,
+    is_background: bool = false,
 };
 
 const JobStatusInfo = struct {
@@ -258,6 +261,7 @@ const SettingsFocusField = enum {
     ui_theme_pack,
     node_watch_filter,
     node_watch_replay_limit,
+    debug_search_filter,
     filesystem_contract_payload,
     terminal_command_input,
 };
@@ -525,12 +529,13 @@ const App = struct {
     pending_send_resume_notified: bool = false,
     pending_send_last_resume_attempt_ms: i64 = 0,
     awaiting_reply: bool = false,
-    debug_stream_enabled: bool = false,
-    debug_stream_pending: bool = false,
-    pending_debug_request_id: ?[]u8 = null,
+    debug_stream_enabled: bool = true,
+    debug_stream_next_poll_at_ms: i64 = 0,
+    debug_stream_snapshot: ?[]u8 = null,
     node_service_watch_enabled: bool = false,
     node_service_watch_filter: std.ArrayList(u8) = .empty,
     node_service_watch_replay_limit: std.ArrayList(u8) = .empty,
+    debug_search_filter: std.ArrayList(u8) = .empty,
     node_service_latest_reload_diag: ?[]u8 = null,
     node_service_diff_preview: ?[]u8 = null,
     node_service_diff_base_index: ?usize = null,
@@ -738,6 +743,7 @@ const App = struct {
         };
         app.node_service_watch_filter.appendSlice(allocator, "") catch {};
         app.node_service_watch_replay_limit.appendSlice(allocator, "25") catch {};
+        app.debug_search_filter.appendSlice(allocator, "") catch {};
         app.contract_invoke_payload.appendSlice(allocator, "{}") catch {};
         app.applyThemeFromSettings();
         app.metrics_context = ui_draw_context.DrawContext.init(
@@ -817,6 +823,7 @@ const App = struct {
         self.stopFilesystemWorker();
         self.filesystem_active_request = null;
         self.clearFsrpcRemoteError();
+        self.clearDebugStreamSnapshot();
         self.clearDebugEvents();
         self.debug_events.deinit(self.allocator);
         self.debug_folded_blocks.deinit();
@@ -836,6 +843,7 @@ const App = struct {
         self.terminal_backend.deinit(self.allocator);
         self.node_service_watch_filter.deinit(self.allocator);
         self.node_service_watch_replay_limit.deinit(self.allocator);
+        self.debug_search_filter.deinit(self.allocator);
         self.clearNodeServiceReloadDiagnostics();
         self.clearNodeServiceDiffPreview();
 
@@ -946,6 +954,7 @@ const App = struct {
 
             try self.pollWebSocket();
             self.pollFilesystemWorker();
+            self.pollDebugStream();
             self.pollTerminalSession();
             if (self.pending_send_job_id != null and self.ws_client != null) {
                 _ = self.tryResumePendingSendJob() catch {};
@@ -2763,8 +2772,8 @@ const App = struct {
         if (self.ws_client) |*client| {
             if (!client.isAlive()) {
                 const has_pending_send = self.pending_send_message_id != null;
-                self.debug_stream_pending = false;
-                self.clearPendingDebugRequest();
+                self.debug_stream_next_poll_at_ms = 0;
+                self.clearDebugStreamSnapshot();
                 self.stopFilesystemWorker();
                 self.clearTerminalState();
 
@@ -2827,12 +2836,39 @@ const App = struct {
         }
     }
 
+    fn pollDebugStream(self: *App) void {
+        if (!self.debug_stream_enabled) return;
+        if (self.connection_state != .connected) return;
+        if (self.filesystem_worker == null) return;
+        if (self.filesystem_active_request != null) return;
+
+        const now = std.time.milliTimestamp();
+        if (now < self.debug_stream_next_poll_at_ms) return;
+        self.debug_stream_next_poll_at_ms = now + DEBUG_STREAM_POLL_INTERVAL_MS;
+
+        self.submitFilesystemRequestWithMode(.read_file, DEBUG_STREAM_PATH, false, true) catch |err| {
+            if (err != error.Busy and err != error.NotConnected) {
+                std.log.debug("debug stream poll skipped: {s}", .{@errorName(err)});
+            }
+        };
+    }
+
     fn handleFilesystemWorkerResult(self: *App, result: *const fs_worker_mod.Result) void {
         const active = self.filesystem_active_request orelse return;
         if (active.id != result.id) return;
 
         self.filesystem_active_request = null;
-        self.filesystem_busy = false;
+        if (!active.is_background) self.filesystem_busy = false;
+
+        const is_debug_stream_result = std.mem.eql(u8, result.path, DEBUG_STREAM_PATH);
+        if (is_debug_stream_result) {
+            if (result.error_text) |_| return;
+            const content = result.content orelse return;
+            self.mergeDebugStreamSnapshot(content) catch |err| {
+                std.log.warn("debug stream merge failed: {s}", .{@errorName(err)});
+            };
+            return;
+        }
 
         if (result.error_text) |err_text| {
             self.setFsrpcRemoteError(err_text);
@@ -2915,6 +2951,7 @@ const App = struct {
             .ui_theme_pack => &self.settings_panel.ui_theme_pack,
             .node_watch_filter => &self.node_service_watch_filter,
             .node_watch_replay_limit => &self.node_service_watch_replay_limit,
+            .debug_search_filter => &self.debug_search_filter,
             .filesystem_contract_payload => &self.contract_invoke_payload,
             .terminal_command_input => &self.terminal_input,
             .none => null,
@@ -3355,6 +3392,16 @@ const App = struct {
         path: []const u8,
         open_after_resolve: bool,
     ) !void {
+        return self.submitFilesystemRequestWithMode(kind, path, open_after_resolve, false);
+    }
+
+    fn submitFilesystemRequestWithMode(
+        self: *App,
+        kind: fs_worker_mod.RequestKind,
+        path: []const u8,
+        open_after_resolve: bool,
+        is_background: bool,
+    ) !void {
         if (self.filesystem_active_request != null) return error.Busy;
         const worker = if (self.filesystem_worker) |*value| value else return error.NotConnected;
         const request_id = self.filesystem_next_request_id;
@@ -3366,8 +3413,9 @@ const App = struct {
             .id = request_id,
             .kind = kind,
             .open_after_resolve = open_after_resolve,
+            .is_background = is_background,
         };
-        self.filesystem_busy = true;
+        if (!is_background) self.filesystem_busy = true;
     }
 
     fn applyFilesystemListing(self: *App, path: []const u8, listing: []const u8) !void {
@@ -7467,12 +7515,10 @@ const App = struct {
         );
         y += layout.title_gap;
 
-        const status_text = if (self.debug_stream_pending)
-            "Status: updating subscription..."
-        else if (self.debug_stream_enabled)
-            "Status: subscribed"
+        const status_text = if (self.debug_stream_enabled)
+            "Status: following /debug/stream.log"
         else
-            "Status: unsubscribed";
+            "Status: paused";
         self.drawLabel(
             rect.min[0] + pad,
             y,
@@ -7532,16 +7578,15 @@ const App = struct {
             @max(220.0, width * 0.34),
             row_height,
         );
-        const toggle_label = if (self.debug_stream_enabled) "Stop Debug Stream" else "Start Debug Stream";
+        const toggle_label = if (self.debug_stream_enabled) "Pause Debug Stream" else "Resume Debug Stream";
         const toggle_clicked = self.drawButtonWidget(
             toggle_rect,
             toggle_label,
-            .{ .variant = .primary, .disabled = self.debug_stream_pending },
+            .{ .variant = .primary },
         );
         if (toggle_clicked) {
-            self.requestDebugSubscription(!self.debug_stream_enabled) catch |err| {
-                std.log.err("Failed to send debug subscription request: {s}", .{@errorName(err)});
-            };
+            self.debug_stream_enabled = !self.debug_stream_enabled;
+            self.debug_stream_next_poll_at_ms = 0;
         }
 
         y += row_height + layout.row_gap * 0.65;
@@ -7623,6 +7668,69 @@ const App = struct {
         }
 
         y += row_height + layout.row_gap * 0.65;
+        self.drawLabel(
+            rect.min[0] + pad,
+            y,
+            "Search Debug Events",
+            self.theme.colors.text_primary,
+        );
+        y += line_height;
+
+        const debug_search_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            @max(260.0, width * 0.46),
+            row_height,
+        );
+        const debug_search_focused = self.drawTextInputWidget(
+            debug_search_rect,
+            self.debug_search_filter.items,
+            self.settings_panel.focused_field == .debug_search_filter,
+            .{ .placeholder = "tool_result, timeout, node_service_upsert..." },
+        );
+        if (debug_search_focused) self.settings_panel.focused_field = .debug_search_filter;
+
+        const clear_search_rect = Rect.fromXYWH(
+            debug_search_rect.max[0] + layout.inner_inset,
+            y,
+            @max(88.0, width * 0.12),
+            row_height,
+        );
+        const search_trimmed = std.mem.trim(u8, self.debug_search_filter.items, " \t\r\n");
+        if (self.drawButtonWidget(
+            clear_search_rect,
+            "Clear",
+            .{ .variant = .secondary, .disabled = search_trimmed.len == 0 },
+        )) {
+            self.debug_search_filter.clearRetainingCapacity();
+            self.debug_selected_index = null;
+            self.debug_scroll_y = 0;
+        }
+        if (self.mouse_released and
+            self.settings_panel.focused_field == .debug_search_filter and
+            !debug_search_rect.contains(.{ self.mouse_x, self.mouse_y }) and
+            !clear_search_rect.contains(.{ self.mouse_x, self.mouse_y }))
+        {
+            self.settings_panel.focused_field = .none;
+        }
+        const filtered_events = self.countDebugEventsMatchingFilter(search_trimmed);
+        const filter_status = std.fmt.allocPrint(
+            self.allocator,
+            "Showing {d}/{d} events",
+            .{ filtered_events, self.debug_events.items.len },
+        ) catch null;
+        defer if (filter_status) |value| self.allocator.free(value);
+        y += row_height + layout.row_gap * 0.45;
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            y,
+            content_width,
+            filter_status orelse "Showing events",
+            self.theme.colors.text_secondary,
+        );
+        y += line_height;
+
+        y += layout.row_gap * 0.25;
         if (self.selectedNodeServiceEventNodeIdOwned()) |selected_node_id| {
             defer self.allocator.free(selected_node_id);
             const jump_label = std.fmt.allocPrint(
@@ -7887,7 +7995,12 @@ const App = struct {
 
         var have_copy_rect = false;
         var copy_btn_rect: Rect = Rect.fromXYWH(0, 0, 0, 0);
-        if (self.debug_selected_index) |_| {
+        const selected_visible = blk: {
+            const selected_idx = self.debug_selected_index orelse break :blk false;
+            if (selected_idx >= self.debug_events.items.len) break :blk false;
+            break :blk self.debugEventMatchesFilter(&self.debug_events.items[selected_idx], search_trimmed);
+        };
+        if (selected_visible) {
             const copy_btn_w: f32 = @max(84.0 * self.ui_scale, layout.line_height * 4.1);
             const copy_btn_h: f32 = @max(layout.button_height * 0.74, 24.0 * self.ui_scale);
             copy_btn_rect = Rect.fromXYWH(
@@ -7901,6 +8014,7 @@ const App = struct {
 
         var total_content_height: f32 = inner * 2.0;
         for (self.debug_events.items) |*entry| {
+            if (!self.debugEventMatchesFilter(entry, search_trimmed)) continue;
             const payload_visible_rows = self.countVisibleDebugPayloadRows(output_rect.min[0], output_rect.max[0] - scrollbar_reserved, entry);
             const visible_lines = 1 + payload_visible_rows;
             total_content_height += line_height * @as(f32, @floatFromInt(visible_lines)) + event_gap;
@@ -7914,6 +8028,7 @@ const App = struct {
 
         var cur_y = output_rect.min[1] + inner - self.debug_scroll_y;
         for (self.debug_events.items, 0..) |*entry, idx| {
+            if (!self.debugEventMatchesFilter(entry, search_trimmed)) continue;
             const is_selected = self.debug_selected_index != null and self.debug_selected_index.? == idx;
             if (is_selected) self.ensureDebugPayloadLines(entry);
             const payload_visible_rows = self.countVisibleDebugPayloadRows(output_rect.min[0], output_rect.max[0] - scrollbar_reserved, entry);
@@ -9565,10 +9680,10 @@ const App = struct {
             existing.deinit();
             self.ws_client = null;
         }
-        self.debug_stream_enabled = false;
-        self.debug_stream_pending = false;
+        self.debug_stream_enabled = true;
+        self.debug_stream_next_poll_at_ms = 0;
         self.node_service_watch_enabled = false;
-        self.clearPendingDebugRequest();
+        self.clearDebugStreamSnapshot();
 
         const effective_url = self.settings_panel.server_url.items;
 
@@ -9878,10 +9993,10 @@ const App = struct {
         self.clearPendingSend();
         self.clearSessions();
         self.debug_stream_enabled = false;
-        self.debug_stream_pending = false;
+        self.debug_stream_next_poll_at_ms = 0;
         self.node_service_watch_enabled = false;
         self.session_attach_state = .unknown;
-        self.clearPendingDebugRequest();
+        self.clearDebugStreamSnapshot();
         self.clearWorkspaceData();
         self.clearFilesystemData();
         self.clearFilesystemDirCache();
@@ -9894,29 +10009,6 @@ const App = struct {
             try self.settings_panel.default_session.appendSlice(self.allocator, "main");
         }
         try self.syncSettingsToConfig();
-    }
-
-    fn requestDebugSubscription(self: *App, enable: bool) !void {
-        if (self.debug_stream_pending) return;
-        if (self.debug_stream_enabled == enable) return;
-
-        if (self.ws_client) |*client| {
-            const request_id = try self.nextMessageId("debug");
-            defer self.allocator.free(request_id);
-            const action = if (enable) "debug.subscribe" else "debug.unsubscribe";
-            const payload = try protocol_messages.buildAgentControl(self.allocator, request_id, action, null);
-            defer self.allocator.free(payload);
-            try self.setPendingDebugRequest(request_id);
-            self.debug_stream_pending = true;
-            client.send(payload) catch |err| {
-                self.debug_stream_pending = false;
-                self.clearPendingDebugRequest();
-                return err;
-            };
-            return;
-        }
-
-        try self.appendMessage("system", "Debug stream requires an active websocket connection", null);
     }
 
     fn parseNodeServiceWatchReplayLimit(self: *App) usize {
@@ -10714,25 +10806,6 @@ const App = struct {
         self.awaiting_reply = false;
     }
 
-    fn setPendingDebugRequest(self: *App, request_id: []const u8) !void {
-        self.clearPendingDebugRequest();
-        self.pending_debug_request_id = try self.allocator.dupe(u8, request_id);
-    }
-
-    fn clearPendingDebugRequest(self: *App) void {
-        if (self.pending_debug_request_id) |request_id| {
-            self.allocator.free(request_id);
-            self.pending_debug_request_id = null;
-        }
-    }
-
-    fn isPendingDebugRequest(self: *App, request_id: []const u8) bool {
-        if (self.pending_debug_request_id) |pending| {
-            return std.mem.eql(u8, pending, request_id);
-        }
-        return false;
-    }
-
     fn currentSessionOrDefault(self: *App) ![]const u8 {
         self.sanitizeCurrentSessionSelection();
 
@@ -11215,14 +11288,6 @@ const App = struct {
     }
 
     fn handleDebugEventMessage(self: *App, root: std.json.ObjectMap) !void {
-        try self.handleDebugEventMessageWithStateSync(root, true);
-    }
-
-    fn handleDebugEventMessageWithStateSync(
-        self: *App,
-        root: std.json.ObjectMap,
-        apply_subscription_state: bool,
-    ) !void {
         const timestamp = if (root.get("timestamp")) |value| switch (value) {
             .integer => value.integer,
             else => std.time.milliTimestamp(),
@@ -11239,27 +11304,6 @@ const App = struct {
             }
         } else try self.allocator.dupe(u8, "{}");
         defer self.allocator.free(payload_json);
-
-        if (apply_subscription_state and std.mem.eql(u8, category, "control.subscription")) {
-            const payload_obj = if (root.get("payload")) |payload| switch (payload) {
-                .object => payload.object,
-                else => null,
-            } else null;
-            const request_id = extractRequestId(root, payload_obj);
-            if (payload_obj) |obj| {
-                if (obj.get("enabled")) |enabled_value| {
-                    if (enabled_value == .bool) {
-                        self.debug_stream_enabled = enabled_value.bool;
-                    }
-                }
-            }
-            if (request_id) |rid| {
-                if (self.isPendingDebugRequest(rid)) {
-                    self.debug_stream_pending = false;
-                    self.clearPendingDebugRequest();
-                }
-            }
-        }
 
         const payload_obj = if (root.get("payload")) |payload| switch (payload) {
             .object => payload.object,
@@ -11457,10 +11501,6 @@ const App = struct {
                     else => null,
                 } else null;
                 if (extractRequestId(root, payload)) |request_id| {
-                    if (self.isPendingDebugRequest(request_id)) {
-                        self.debug_stream_pending = false;
-                        self.clearPendingDebugRequest();
-                    }
                     if (self.pending_send_request_id) |pending| {
                         if (std.mem.eql(u8, pending, request_id)) {
                             if (self.pending_send_message_id) |message_id| {
@@ -11787,6 +11827,50 @@ const App = struct {
         self.clearNodeServiceDiffPreview();
     }
 
+    fn clearDebugStreamSnapshot(self: *App) void {
+        if (self.debug_stream_snapshot) |value| {
+            self.allocator.free(value);
+            self.debug_stream_snapshot = null;
+        }
+    }
+
+    fn mergeDebugStreamSnapshot(self: *App, content: []const u8) !void {
+        if (self.debug_stream_snapshot) |previous| {
+            if (content.len >= previous.len and std.mem.startsWith(u8, content, previous)) {
+                try self.ingestDebugStreamLines(content[previous.len..]);
+            } else {
+                self.clearDebugEvents();
+                try self.ingestDebugStreamLines(content);
+            }
+        } else {
+            self.clearDebugEvents();
+            try self.ingestDebugStreamLines(content);
+        }
+
+        const snapshot_copy = try self.allocator.dupe(u8, content);
+        if (self.debug_stream_snapshot) |previous| self.allocator.free(previous);
+        self.debug_stream_snapshot = snapshot_copy;
+    }
+
+    fn ingestDebugStreamLines(self: *App, chunk: []const u8) !void {
+        var iter = std.mem.splitScalar(u8, chunk, '\n');
+        while (iter.next()) |raw_line| {
+            const line = std.mem.trim(u8, raw_line, " \t\r\n");
+            if (line.len == 0) continue;
+            try self.ingestDebugStreamLine(line);
+        }
+    }
+
+    fn ingestDebugStreamLine(self: *App, line: []const u8) !void {
+        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, line, .{}) catch return;
+        defer parsed.deinit();
+        if (parsed.value != .object) return;
+        const root = parsed.value.object;
+        const type_value = root.get("type") orelse return;
+        if (type_value != .string or !std.mem.eql(u8, type_value.string, "debug.event")) return;
+        try self.handleDebugEventMessage(root);
+    }
+
     fn clearNodeServiceReloadDiagnostics(self: *App) void {
         if (self.node_service_latest_reload_diag) |value| {
             self.allocator.free(value);
@@ -11837,6 +11921,25 @@ const App = struct {
             .correlation_id = correlation_copy,
             .payload_json = payload_copy,
         });
+    }
+
+    fn debugEventMatchesFilter(self: *App, entry: *const DebugEventEntry, filter_text: []const u8) bool {
+        _ = self;
+        if (filter_text.len == 0) return true;
+        if (std.ascii.indexOfIgnoreCase(entry.category, filter_text) != null) return true;
+        if (entry.correlation_id) |value| {
+            if (std.ascii.indexOfIgnoreCase(value, filter_text) != null) return true;
+        }
+        return std.ascii.indexOfIgnoreCase(entry.payload_json, filter_text) != null;
+    }
+
+    fn countDebugEventsMatchingFilter(self: *App, filter_text: []const u8) usize {
+        if (filter_text.len == 0) return self.debug_events.items.len;
+        var total: usize = 0;
+        for (self.debug_events.items) |*entry| {
+            if (self.debugEventMatchesFilter(entry, filter_text)) total += 1;
+        }
+        return total;
     }
 
     fn ensureDebugPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
