@@ -684,6 +684,7 @@ const App = struct {
     form_scroll_drag_target: FormScrollTarget = .none,
     form_scroll_drag_start_y: f32 = 0.0,
     form_scroll_drag_start_scroll_y: f32 = 0.0,
+    drag_mouse_capture_active: bool = false,
     ui_commands: zui.ui.render.command_list.CommandList,
 
     projects: std.ArrayListUnmanaged(workspace_types.ProjectSummary) = .{},
@@ -1563,6 +1564,8 @@ const App = struct {
         // in the source window.
         if (!self.mouse_down and ui_window.id == self.main_window_id) {
             self.form_scroll_drag_target = .none;
+            self.debug_scrollbar_dragging = false;
+            self.setDragMouseCapture(false);
         }
 
         var dock_area = self.dockViewportForWindow(ui_window) orelse blk: {
@@ -3411,6 +3414,12 @@ const App = struct {
 
     fn isPanelFocused(_: *App, manager: *panel_manager.PanelManager, panel_id: workspace.PanelId) bool {
         return manager.workspace.focused_panel_id != null and manager.workspace.focused_panel_id.? == panel_id;
+    }
+
+    fn setDragMouseCapture(self: *App, enabled: bool) void {
+        if (self.drag_mouse_capture_active == enabled) return;
+        _ = c.SDL_CaptureMouse(enabled);
+        self.drag_mouse_capture_active = enabled;
     }
 
     fn focusedSettingsBuffer(self: *App) ?*std.ArrayList(u8) {
@@ -9210,6 +9219,7 @@ const App = struct {
                 self.debug_scrollbar_dragging = true;
                 self.debug_scrollbar_drag_start_y = self.mouse_y;
                 self.debug_scrollbar_drag_start_scroll_y = self.debug_scroll_y;
+                self.setDragMouseCapture(true);
             } else if (self.mouse_clicked and sb_track_rect.contains(.{ self.mouse_x, self.mouse_y })) {
                 const page_scroll = @max(line_height * 3.0, output_rect.height() * 0.9);
                 if (self.mouse_y < thumb_rect.min[1]) {
@@ -9228,10 +9238,12 @@ const App = struct {
                     self.debug_scroll_y = self.debug_scrollbar_drag_start_scroll_y + delta_y * scroll_per_pixel;
                 } else {
                     self.debug_scrollbar_dragging = false;
+                    if (self.form_scroll_drag_target == .none) self.setDragMouseCapture(false);
                 }
             }
         } else {
             self.debug_scrollbar_dragging = false;
+            if (self.form_scroll_drag_target == .none) self.setDragMouseCapture(false);
         }
 
         if (self.debug_selected_index) |sel_idx| {
@@ -10564,7 +10576,10 @@ const App = struct {
         if (scroll_y.* < 0.0) scroll_y.* = 0.0;
         if (scroll_y.* > max_scroll) scroll_y.* = max_scroll;
         if (max_scroll <= 0.0) {
-            if (self.form_scroll_drag_target == target) self.form_scroll_drag_target = .none;
+            if (self.form_scroll_drag_target == target) {
+                self.form_scroll_drag_target = .none;
+                if (!self.debug_scrollbar_dragging) self.setDragMouseCapture(false);
+            }
             return;
         }
 
@@ -10594,6 +10609,7 @@ const App = struct {
                 );
             } else {
                 self.form_scroll_drag_target = .none;
+                if (!self.debug_scrollbar_dragging) self.setDragMouseCapture(false);
             }
         } else if (self.mouse_clicked and track_rect.contains(.{ self.mouse_x, self.mouse_y })) {
             const raw = (self.mouse_y - track_rect.min[1] - thumb_height * 0.5) / thumb_range;
@@ -10602,6 +10618,7 @@ const App = struct {
             self.form_scroll_drag_target = target;
             self.form_scroll_drag_start_y = self.mouse_y;
             self.form_scroll_drag_start_scroll_y = scroll_y.*;
+            self.setDragMouseCapture(true);
         }
 
         self.drawFilledRect(track_rect, zcolors.withAlpha(self.theme.colors.border, 0.25));
@@ -11472,6 +11489,9 @@ const App = struct {
     }
 
     fn disconnect(self: *App) void {
+        self.setDragMouseCapture(false);
+        self.debug_scrollbar_dragging = false;
+        self.form_scroll_drag_target = .none;
         self.stopFilesystemWorker();
         if (self.ws_client) |*client| {
             client.deinit();
