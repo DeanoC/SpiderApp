@@ -3332,7 +3332,10 @@ const App = struct {
             self.mergeDebugStreamSnapshot(content) catch |err| {
                 std.log.warn("debug stream merge failed: {s}", .{@errorName(err)});
             };
-            self.debug_stream_snapshot_retry_at_ms = 0;
+            // Keep polling while debug stream is enabled so new events arrive
+            // without requiring manual refresh.
+            self.debug_stream_snapshot_pending = true;
+            self.debug_stream_snapshot_retry_at_ms = std.time.milliTimestamp() + DEBUG_STREAM_SNAPSHOT_RETRY_MS;
             return;
         }
 
