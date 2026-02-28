@@ -59,9 +59,16 @@ const CONTROL_SESSION_ATTACH_TIMEOUT_MS: i64 = 8_000;
 const CONTROL_SESSION_STATUS_TIMEOUT_MS: i64 = 2_000;
 const WS_MAX_MESSAGES_PER_FRAME: u32 = 32;
 const WS_MAX_POLL_BUDGET_NS: i128 = 2 * std.time.ns_per_ms;
+const FS_WORKER_MAX_RESULTS_PER_FRAME: u32 = 64;
+const FS_WORKER_MAX_POLL_BUDGET_NS: i128 = 2 * std.time.ns_per_ms;
 const FILESYSTEM_DIR_CACHE_TTL_MS: i64 = 5_000;
-const DEBUG_STREAM_POLL_INTERVAL_MS: i64 = 350;
+const DEBUG_STREAM_SNAPSHOT_RETRY_MS: i64 = 2_000;
 const DEBUG_STREAM_PATH = "/debug/stream.log";
+const DEBUG_EVENT_DEDUPE_WINDOW: usize = 4096;
+const DEBUG_SYNTAX_COLOR_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
+const DEBUG_SYNTAX_COLOR_MAX_LINE_BYTES: usize = 768;
+const PERF_SAMPLE_INTERVAL_MS: i64 = 1_000;
+const PERF_HISTORY_CAPACITY: usize = 600;
 const TERMINAL_OUTPUT_MAX_BYTES: usize = 512 * 1024;
 const TERMINAL_READ_POLL_INTERVAL_MS: i64 = 120;
 const TERMINAL_READ_TIMEOUT_MS: u32 = 1;
@@ -262,6 +269,7 @@ const SettingsFocusField = enum {
     node_watch_filter,
     node_watch_replay_limit,
     debug_search_filter,
+    perf_benchmark_label,
     filesystem_contract_payload,
     terminal_command_input,
 };
@@ -315,6 +323,7 @@ const SettingsPanel = struct {
     ui_theme_pack: std.ArrayList(u8) = .empty,
     watch_theme_pack: bool = false,
     terminal_backend_kind: terminal_render_backend.Backend.Kind = .plain_text,
+    ws_verbose_logs: bool = false,
     auto_connect_on_launch: bool = true,
     focused_field: SettingsFocusField = .server_url,
     // Vertical scroll offsets per form panel
@@ -383,6 +392,9 @@ const DebugEventEntry = struct {
     payload_json: []u8,
     payload_lines: std.ArrayList(DebugPayloadLine) = .empty,
     payload_wrap_rows: std.ArrayList(u32) = .empty,
+    payload_visible_line_indices: std.ArrayList(u32) = .empty,
+    payload_visible_line_row_starts: std.ArrayList(u32) = .empty,
+    payload_visible_lines_valid: bool = false,
     payload_wrap_rows_wrap_width: f32 = -1.0,
     payload_wrap_rows_valid: bool = false,
     cached_visible_rows: usize = 0,
@@ -394,6 +406,8 @@ const DebugEventEntry = struct {
         allocator.free(self.category);
         if (self.correlation_id) |value| allocator.free(value);
         allocator.free(self.payload_json);
+        self.payload_visible_line_row_starts.deinit(allocator);
+        self.payload_visible_line_indices.deinit(allocator);
         self.payload_wrap_rows.deinit(allocator);
         self.payload_lines.deinit(allocator);
     }
@@ -482,6 +496,43 @@ const DockInteractionResult = struct {
     detach_panel_id: ?workspace.PanelId = null,
 };
 
+const PerfSample = struct {
+    timestamp_ms: i64,
+    fps: f32,
+    frame_ms: f32,
+    ws_ms: f32,
+    fs_ms: f32,
+    debug_ms: f32,
+    terminal_ms: f32,
+    draw_ms: f32,
+};
+
+fn perfSampleFrameMsAt(ctx: *const anyopaque, idx: usize) f32 {
+    const samples = (@as(*const []const PerfSample, @ptrCast(@alignCast(ctx)))).*;
+    return samples[idx].frame_ms;
+}
+
+fn perfSampleDrawMsAt(ctx: *const anyopaque, idx: usize) f32 {
+    const samples = (@as(*const []const PerfSample, @ptrCast(@alignCast(ctx)))).*;
+    return samples[idx].draw_ms;
+}
+
+fn perfSampleWsMsAt(ctx: *const anyopaque, idx: usize) f32 {
+    const samples = (@as(*const []const PerfSample, @ptrCast(@alignCast(ctx)))).*;
+    return samples[idx].ws_ms;
+}
+
+fn perfSampleFsMsAt(ctx: *const anyopaque, idx: usize) f32 {
+    const samples = (@as(*const []const PerfSample, @ptrCast(@alignCast(ctx)))).*;
+    return samples[idx].fs_ms;
+}
+
+const SelectedNodeServiceEventInfo = struct {
+    index: ?usize = null,
+    node_id: ?[]const u8 = null,
+    diagnostics: ?[]const u8 = null,
+};
+
 const WindowMouseHit = struct {
     win: *UiWindow,
     local_pos: [2]f32,
@@ -538,7 +589,8 @@ const App = struct {
     pending_send_last_resume_attempt_ms: i64 = 0,
     awaiting_reply: bool = false,
     debug_stream_enabled: bool = true,
-    debug_stream_next_poll_at_ms: i64 = 0,
+    debug_stream_snapshot_pending: bool = false,
+    debug_stream_snapshot_retry_at_ms: i64 = 0,
     debug_stream_snapshot: ?[]u8 = null,
     node_service_watch_enabled: bool = false,
     node_service_watch_filter: std.ArrayList(u8) = .empty,
@@ -554,6 +606,24 @@ const App = struct {
     debug_fold_revision: u64 = 1,
     debug_scroll_y: f32 = 0.0,
     debug_selected_index: ?usize = null,
+    perf_benchmark_label_input: std.ArrayList(u8) = .empty,
+    perf_benchmark_active: bool = false,
+    perf_benchmark_start_sample_index: usize = 0,
+    perf_benchmark_start_timestamp_ms: i64 = 0,
+    perf_benchmark_active_label: ?[]u8 = null,
+    perf_benchmark_last_start_sample_index: ?usize = null,
+    perf_benchmark_last_end_sample_index: usize = 0,
+    perf_benchmark_last_start_timestamp_ms: i64 = 0,
+    perf_benchmark_last_end_timestamp_ms: i64 = 0,
+    perf_benchmark_last_label: ?[]u8 = null,
+    debug_selected_node_service_cache_event_id: u64 = 0,
+    debug_selected_node_service_cache_index: ?usize = null,
+    debug_selected_node_service_cache_node_id: ?[]u8 = null,
+    debug_selected_node_service_cache_diagnostics: ?[]u8 = null,
+    debug_event_fingerprint_set: std.AutoHashMapUnmanaged(u64, void) = .{},
+    debug_event_fingerprint_ring: [DEBUG_EVENT_DEDUPE_WINDOW]u64 = [_]u64{0} ** DEBUG_EVENT_DEDUPE_WINDOW,
+    debug_event_fingerprint_count: usize = 0,
+    debug_event_fingerprint_next: usize = 0,
     debug_output_rect: Rect = Rect.fromXYWH(0, 0, 0, 0),
     debug_scrollbar_dragging: bool = false,
     debug_scrollbar_drag_start_y: f32 = 0.0,
@@ -626,6 +696,22 @@ const App = struct {
     next_fsrpc_tag: u32 = 1,
     next_fsrpc_fid: u32 = 2,
     debug_frame_counter: u64 = 0,
+    perf_sample_started_ms: i64 = 0,
+    perf_sample_frames: u32 = 0,
+    perf_sample_total_frame_ns: i128 = 0,
+    perf_sample_total_ws_ns: i128 = 0,
+    perf_sample_total_fs_ns: i128 = 0,
+    perf_sample_total_debug_ns: i128 = 0,
+    perf_sample_total_terminal_ns: i128 = 0,
+    perf_sample_total_draw_ns: i128 = 0,
+    perf_last_fps: f32 = 0,
+    perf_last_frame_ms: f32 = 0,
+    perf_last_ws_ms: f32 = 0,
+    perf_last_fs_ms: f32 = 0,
+    perf_last_debug_ms: f32 = 0,
+    perf_last_terminal_ms: f32 = 0,
+    perf_last_draw_ms: f32 = 0,
+    perf_history: std.ArrayListUnmanaged(PerfSample) = .{},
     frame_clock: zapp.frame_clock.FrameClock,
     workspace_recovery_blocked_until: u64 = 0,
     workspace_recovery_blocked_for_manager: usize = 0,
@@ -726,6 +812,7 @@ const App = struct {
             settings_panel.ui_theme_pack.appendSlice(allocator, value) catch {};
         }
         settings_panel.watch_theme_pack = config.ui_watch_theme_pack;
+        settings_panel.ws_verbose_logs = config.gui_verbose_ws_logs;
         settings_panel.auto_connect_on_launch = config.auto_connect_on_launch;
         settings_panel.terminal_backend_kind = terminal_render_backend.Backend.parseKind(
             config.selectedTerminalBackend() orelse TERMINAL_BACKEND_KIND,
@@ -754,6 +841,7 @@ const App = struct {
         app.node_service_watch_filter.appendSlice(allocator, "") catch {};
         app.node_service_watch_replay_limit.appendSlice(allocator, "25") catch {};
         app.debug_search_filter.appendSlice(allocator, "") catch {};
+        app.perf_benchmark_label_input.appendSlice(allocator, "") catch {};
         app.contract_invoke_payload.appendSlice(allocator, "{}") catch {};
         app.applyThemeFromSettings();
         app.metrics_context = ui_draw_context.DrawContext.init(
@@ -837,6 +925,7 @@ const App = struct {
         self.clearDebugEvents();
         self.debug_events.deinit(self.allocator);
         self.debug_folded_blocks.deinit();
+        self.debug_event_fingerprint_set.deinit(self.allocator);
         self.invalidateWorkspaceSnapshot();
         if (self.pending_send_request_id) |request_id| self.allocator.free(request_id);
         if (self.pending_send_message_id) |message_id| self.allocator.free(message_id);
@@ -854,8 +943,12 @@ const App = struct {
         self.node_service_watch_filter.deinit(self.allocator);
         self.node_service_watch_replay_limit.deinit(self.allocator);
         self.debug_search_filter.deinit(self.allocator);
+        self.perf_benchmark_label_input.deinit(self.allocator);
+        if (self.perf_benchmark_active_label) |value| self.allocator.free(value);
+        if (self.perf_benchmark_last_label) |value| self.allocator.free(value);
         self.clearNodeServiceReloadDiagnostics();
         self.clearNodeServiceDiffPreview();
+        self.perf_history.deinit(self.allocator);
 
         zui.ChatView(ChatMessage).deinit(&self.chat_panel_state.view, self.allocator);
 
@@ -889,6 +982,8 @@ const App = struct {
 
     pub fn run(self: *App) !void {
         while (self.running) {
+            const frame_started_ns = std.time.nanoTimestamp();
+            var frame_draw_ns: i128 = 0;
             self.bindMainWindowManager();
             self.debug_frame_counter += 1;
             _ = self.frame_clock.beginFrame();
@@ -951,7 +1046,9 @@ const App = struct {
                 try self.processInputEvents(&window.queue, &requested_spawn_window, window, manager);
 
                 ui_input_router.setExternalQueue(&window.queue);
+                const draw_started_ns = std.time.nanoTimestamp();
                 self.drawFrame(window);
+                frame_draw_ns += std.time.nanoTimestamp() - draw_started_ns;
                 ui_input_state.endFrame(&window.queue);
                 ui_input_router.setExternalQueue(null);
             }
@@ -967,13 +1064,26 @@ const App = struct {
                 self.closeUiWindowById(window_id);
             }
 
+            const ws_started_ns = std.time.nanoTimestamp();
             try self.pollWebSocket();
+            const ws_elapsed_ns = std.time.nanoTimestamp() - ws_started_ns;
+
+            const fs_started_ns = std.time.nanoTimestamp();
             self.pollFilesystemWorker();
+            const fs_elapsed_ns = std.time.nanoTimestamp() - fs_started_ns;
+
+            const debug_started_ns = std.time.nanoTimestamp();
             self.pollDebugStream();
+            const debug_elapsed_ns = std.time.nanoTimestamp() - debug_started_ns;
+
+            const terminal_started_ns = std.time.nanoTimestamp();
             self.pollTerminalSession();
+            const terminal_elapsed_ns = std.time.nanoTimestamp() - terminal_started_ns;
             if (self.pending_send_job_id != null and self.ws_client != null) {
                 _ = self.tryResumePendingSendJob() catch {};
             }
+            const frame_elapsed_ns = std.time.nanoTimestamp() - frame_started_ns;
+            self.recordPerfSample(frame_elapsed_ns, ws_elapsed_ns, fs_elapsed_ns, debug_elapsed_ns, terminal_elapsed_ns, frame_draw_ns);
             self.frame_clock.endFrame();
         }
     }
@@ -2690,6 +2800,69 @@ const App = struct {
         return self.debug_frame_counter <= 5;
     }
 
+    fn nsToMs(ns: i128) f32 {
+        return @as(f32, @floatFromInt(ns)) / @as(f32, @floatFromInt(std.time.ns_per_ms));
+    }
+
+    fn recordPerfSample(
+        self: *App,
+        frame_ns: i128,
+        ws_ns: i128,
+        fs_ns: i128,
+        debug_ns: i128,
+        terminal_ns: i128,
+        draw_ns: i128,
+    ) void {
+        const now_ms = std.time.milliTimestamp();
+        if (self.perf_sample_started_ms == 0) {
+            self.perf_sample_started_ms = now_ms;
+        }
+
+        self.perf_sample_frames += 1;
+        self.perf_sample_total_frame_ns += frame_ns;
+        self.perf_sample_total_ws_ns += ws_ns;
+        self.perf_sample_total_fs_ns += fs_ns;
+        self.perf_sample_total_debug_ns += debug_ns;
+        self.perf_sample_total_terminal_ns += terminal_ns;
+        self.perf_sample_total_draw_ns += draw_ns;
+
+        const elapsed_ms = now_ms - self.perf_sample_started_ms;
+        if (elapsed_ms < PERF_SAMPLE_INTERVAL_MS) return;
+
+        const frames = @as(f32, @floatFromInt(@max(self.perf_sample_frames, 1)));
+        const elapsed_ms_f = @as(f32, @floatFromInt(@max(elapsed_ms, 1)));
+
+        self.perf_last_fps = (frames * 1000.0) / elapsed_ms_f;
+        self.perf_last_frame_ms = nsToMs(self.perf_sample_total_frame_ns) / frames;
+        self.perf_last_ws_ms = nsToMs(self.perf_sample_total_ws_ns) / frames;
+        self.perf_last_fs_ms = nsToMs(self.perf_sample_total_fs_ns) / frames;
+        self.perf_last_debug_ms = nsToMs(self.perf_sample_total_debug_ns) / frames;
+        self.perf_last_terminal_ms = nsToMs(self.perf_sample_total_terminal_ns) / frames;
+        self.perf_last_draw_ms = nsToMs(self.perf_sample_total_draw_ns) / frames;
+        self.perf_history.append(self.allocator, .{
+            .timestamp_ms = now_ms,
+            .fps = self.perf_last_fps,
+            .frame_ms = self.perf_last_frame_ms,
+            .ws_ms = self.perf_last_ws_ms,
+            .fs_ms = self.perf_last_fs_ms,
+            .debug_ms = self.perf_last_debug_ms,
+            .terminal_ms = self.perf_last_terminal_ms,
+            .draw_ms = self.perf_last_draw_ms,
+        }) catch {};
+        while (self.perf_history.items.len > PERF_HISTORY_CAPACITY) {
+            _ = self.perf_history.orderedRemove(0);
+        }
+
+        self.perf_sample_started_ms = now_ms;
+        self.perf_sample_frames = 0;
+        self.perf_sample_total_frame_ns = 0;
+        self.perf_sample_total_ws_ns = 0;
+        self.perf_sample_total_fs_ns = 0;
+        self.perf_sample_total_debug_ns = 0;
+        self.perf_sample_total_terminal_ns = 0;
+        self.perf_sample_total_draw_ns = 0;
+    }
+
     fn safeWorkspaceCount(_: *App, value: usize, max: usize) usize {
         if (value > max) return max;
         return value;
@@ -2787,7 +2960,8 @@ const App = struct {
         if (self.ws_client) |*client| {
             if (!client.isAlive()) {
                 const has_pending_send = self.pending_send_message_id != null;
-                self.debug_stream_next_poll_at_ms = 0;
+                self.debug_stream_snapshot_pending = true;
+                self.debug_stream_snapshot_retry_at_ms = 0;
                 self.clearDebugStreamSnapshot();
                 self.stopFilesystemWorker();
                 self.clearTerminalState();
@@ -2835,7 +3009,7 @@ const App = struct {
                     break;
                 }
             }
-            if (count > 0) {
+            if (count > 0 and self.shouldLogDebug(120)) {
                 std.log.debug("[ZSS] Polled {d} messages this frame", .{count});
             }
         }
@@ -2843,8 +3017,12 @@ const App = struct {
 
     fn pollFilesystemWorker(self: *App) void {
         const worker = if (self.filesystem_worker) |*value| value else return;
+        const started_ns = std.time.nanoTimestamp();
         var processed: u32 = 0;
-        while (processed < 12) : (processed += 1) {
+        while (processed < FS_WORKER_MAX_RESULTS_PER_FRAME) : (processed += 1) {
+            if (processed > 0 and std.time.nanoTimestamp() - started_ns >= FS_WORKER_MAX_POLL_BUDGET_NS) {
+                break;
+            }
             var result = worker.tryPopResult() orelse break;
             defer result.deinit(self.allocator);
             self.handleFilesystemWorkerResult(&result);
@@ -2856,16 +3034,29 @@ const App = struct {
         if (self.connection_state != .connected) return;
         if (self.filesystem_worker == null) return;
         if (self.filesystem_active_request != null) return;
+        if (!self.debug_stream_snapshot_pending) return;
 
         const now = std.time.milliTimestamp();
-        if (now < self.debug_stream_next_poll_at_ms) return;
-        self.debug_stream_next_poll_at_ms = now + DEBUG_STREAM_POLL_INTERVAL_MS;
+        if (now < self.debug_stream_snapshot_retry_at_ms) return;
 
         self.submitFilesystemRequestWithMode(.read_file, DEBUG_STREAM_PATH, false, true) catch |err| {
             if (err != error.Busy and err != error.NotConnected) {
                 std.log.debug("debug stream poll skipped: {s}", .{@errorName(err)});
             }
+            self.debug_stream_snapshot_pending = true;
+            self.debug_stream_snapshot_retry_at_ms = now + DEBUG_STREAM_SNAPSHOT_RETRY_MS;
+            return;
         };
+        self.debug_stream_snapshot_pending = false;
+    }
+
+    fn requestDebugStreamSnapshot(self: *App, immediate: bool) void {
+        self.debug_stream_snapshot_pending = true;
+        if (immediate) {
+            self.debug_stream_snapshot_retry_at_ms = 0;
+        } else if (self.debug_stream_snapshot_retry_at_ms == 0) {
+            self.debug_stream_snapshot_retry_at_ms = std.time.milliTimestamp() + DEBUG_STREAM_SNAPSHOT_RETRY_MS;
+        }
     }
 
     fn handleFilesystemWorkerResult(self: *App, result: *const fs_worker_mod.Result) void {
@@ -2877,11 +3068,20 @@ const App = struct {
 
         const is_debug_stream_result = std.mem.eql(u8, result.path, DEBUG_STREAM_PATH);
         if (is_debug_stream_result) {
-            if (result.error_text) |_| return;
-            const content = result.content orelse return;
+            if (result.error_text) |_| {
+                self.debug_stream_snapshot_pending = true;
+                self.debug_stream_snapshot_retry_at_ms = std.time.milliTimestamp() + DEBUG_STREAM_SNAPSHOT_RETRY_MS;
+                return;
+            }
+            const content = result.content orelse {
+                self.debug_stream_snapshot_pending = true;
+                self.debug_stream_snapshot_retry_at_ms = std.time.milliTimestamp() + DEBUG_STREAM_SNAPSHOT_RETRY_MS;
+                return;
+            };
             self.mergeDebugStreamSnapshot(content) catch |err| {
                 std.log.warn("debug stream merge failed: {s}", .{@errorName(err)});
             };
+            self.debug_stream_snapshot_retry_at_ms = 0;
             return;
         }
 
@@ -2967,6 +3167,7 @@ const App = struct {
             .node_watch_filter => &self.node_service_watch_filter,
             .node_watch_replay_limit => &self.node_service_watch_replay_limit,
             .debug_search_filter => &self.debug_search_filter,
+            .perf_benchmark_label => &self.perf_benchmark_label_input,
             .filesystem_contract_payload => &self.contract_invoke_payload,
             .terminal_command_input => &self.terminal_input,
             .none => null,
@@ -3188,6 +3389,7 @@ const App = struct {
         try self.config.setThemePack(if (self.settings_panel.ui_theme_pack.items.len > 0) self.settings_panel.ui_theme_pack.items else null);
         self.config.setWatchThemePack(self.settings_panel.watch_theme_pack);
         try self.config.setTerminalBackend(terminal_render_backend.Backend.kindName(self.settings_panel.terminal_backend_kind));
+        self.config.gui_verbose_ws_logs = self.settings_panel.ws_verbose_logs;
         try self.config.save();
 
         self.applySelectedTerminalBackend();
@@ -5136,6 +5338,28 @@ const App = struct {
             .{ .variant = .secondary },
         )) {
             self.settings_panel.auto_connect_on_launch = !self.settings_panel.auto_connect_on_launch;
+        }
+
+        y += button_height + layout.row_gap;
+        const ws_verbose_label = if (self.settings_panel.ws_verbose_logs)
+            "Verbose WS Logs: On"
+        else
+            "Verbose WS Logs: Off";
+        const ws_verbose_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            @max(220.0, rect_width * 0.56),
+            button_height,
+        );
+        if (self.drawButtonWidget(
+            ws_verbose_rect,
+            ws_verbose_label,
+            .{ .variant = .secondary },
+        )) {
+            self.settings_panel.ws_verbose_logs = !self.settings_panel.ws_verbose_logs;
+            if (self.ws_client) |*client| {
+                client.setVerboseLogs(self.settings_panel.ws_verbose_logs);
+            }
         }
 
         y += button_height + layout.row_gap;
@@ -7544,7 +7768,7 @@ const App = struct {
         y += layout.title_gap;
 
         const status_text = if (self.debug_stream_enabled)
-            "Status: following /debug/stream.log"
+            "Status: live WebSocket debug events"
         else
             "Status: paused";
         self.drawLabel(
@@ -7554,6 +7778,334 @@ const App = struct {
             self.theme.colors.text_secondary,
         );
         y += line_height;
+
+        const snapshot_status = if (self.debug_stream_snapshot_pending)
+            "Snapshot: refresh pending"
+        else if (self.debug_stream_snapshot != null)
+            "Snapshot: cached"
+        else
+            "Snapshot: none";
+        self.drawLabel(
+            rect.min[0] + pad,
+            y,
+            snapshot_status,
+            self.theme.colors.text_secondary,
+        );
+        y += line_height;
+
+        var perf_buf: [224]u8 = undefined;
+        const perf_line = std.fmt.bufPrint(
+            &perf_buf,
+            "Perf: {d:.1} fps | frame {d:.2} ms | draw {d:.2} | ws {d:.2} | fs {d:.2} | dbg {d:.2} | tty {d:.2}",
+            .{
+                self.perf_last_fps,
+                self.perf_last_frame_ms,
+                self.perf_last_draw_ms,
+                self.perf_last_ws_ms,
+                self.perf_last_fs_ms,
+                self.perf_last_debug_ms,
+                self.perf_last_terminal_ms,
+            },
+        ) catch "Perf: collecting...";
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            y,
+            content_width,
+            perf_line,
+            self.theme.colors.text_secondary,
+        );
+        y += line_height;
+
+        var perf_meta_buf: [128]u8 = undefined;
+        const perf_span_ms: i64 = if (self.perf_history.items.len >= 2)
+            self.perf_history.items[self.perf_history.items.len - 1].timestamp_ms - self.perf_history.items[0].timestamp_ms
+        else
+            0;
+        const perf_meta = std.fmt.bufPrint(
+            &perf_meta_buf,
+            "Perf history: {d} samples ({d:.1}s)",
+            .{
+                self.perf_history.items.len,
+                @as(f32, @floatFromInt(@max(perf_span_ms, 0))) / 1000.0,
+            },
+        ) catch "Perf history: unavailable";
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            y,
+            content_width,
+            perf_meta,
+            self.theme.colors.text_secondary,
+        );
+        y += line_height;
+
+        const perf_copy_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            @max(104.0, width * 0.14),
+            row_height,
+        );
+        if (self.drawButtonWidget(
+            perf_copy_rect,
+            "Copy Perf",
+            .{ .variant = .secondary, .disabled = self.perf_history.items.len == 0 },
+        )) {
+            const report = self.buildPerfReportText() catch null;
+            defer if (report) |value| self.allocator.free(value);
+            if (report) |value| {
+                self.copyTextToClipboard(value) catch {};
+                self.appendMessage("system", "Copied GUI perf report to clipboard.", null) catch {};
+            }
+        }
+
+        const perf_export_rect = Rect.fromXYWH(
+            perf_copy_rect.max[0] + layout.inner_inset,
+            y,
+            @max(112.0, width * 0.16),
+            row_height,
+        );
+        if (self.drawButtonWidget(
+            perf_export_rect,
+            "Export Perf",
+            .{ .variant = .secondary, .disabled = self.perf_history.items.len == 0 },
+        )) {
+            const report = self.buildPerfReportText() catch null;
+            defer if (report) |value| self.allocator.free(value);
+            if (report) |value| {
+                const export_path = self.exportPerfReport(value) catch null;
+                defer if (export_path) |path| self.allocator.free(path);
+                if (export_path) |path| {
+                    const msg = std.fmt.allocPrint(self.allocator, "Exported GUI perf report to {s}", .{path}) catch null;
+                    defer if (msg) |text| self.allocator.free(text);
+                    if (msg) |text| self.appendMessage("system", text, null) catch {};
+                }
+            }
+        }
+
+        const perf_clear_rect = Rect.fromXYWH(
+            perf_export_rect.max[0] + layout.inner_inset,
+            y,
+            @max(98.0, width * 0.13),
+            row_height,
+        );
+        if (self.drawButtonWidget(
+            perf_clear_rect,
+            "Clear Perf",
+            .{ .variant = .secondary, .disabled = self.perf_history.items.len == 0 },
+        )) {
+            self.perf_history.clearRetainingCapacity();
+            self.clearPerfBenchmarkCapture();
+            if (self.perf_benchmark_active) {
+                self.perf_benchmark_start_sample_index = 0;
+                self.perf_benchmark_start_timestamp_ms = std.time.milliTimestamp();
+            }
+            self.appendMessage("system", "Cleared GUI perf history.", null) catch {};
+        }
+        y += row_height + layout.row_gap * 0.35;
+
+        const benchmark_status = if (self.perf_benchmark_active)
+            "Benchmark capture: active"
+        else if (self.hasPerfBenchmarkCapture())
+            "Benchmark capture: ready"
+        else
+            "Benchmark capture: idle";
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            y,
+            content_width,
+            benchmark_status,
+            self.theme.colors.text_secondary,
+        );
+        y += line_height;
+
+        const benchmark_label_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            @max(180.0, width * 0.24),
+            row_height,
+        );
+        const benchmark_label_focused = self.drawTextInputWidget(
+            benchmark_label_rect,
+            self.perf_benchmark_label_input.items,
+            self.settings_panel.focused_field == .perf_benchmark_label,
+            .{ .placeholder = "benchmark label" },
+        );
+        if (benchmark_label_focused) self.settings_panel.focused_field = .perf_benchmark_label;
+
+        const benchmark_toggle_rect = Rect.fromXYWH(
+            benchmark_label_rect.max[0] + layout.inner_inset,
+            y,
+            @max(126.0, width * 0.16),
+            row_height,
+        );
+        const benchmark_toggle_label = if (self.perf_benchmark_active) "Stop Bench" else "Start Bench";
+        if (self.drawButtonWidget(
+            benchmark_toggle_rect,
+            benchmark_toggle_label,
+            .{ .variant = if (self.perf_benchmark_active) .primary else .secondary },
+        )) {
+            if (self.perf_benchmark_active) {
+                self.stopPerfBenchmark() catch {};
+                const label = self.perf_benchmark_last_label orelse "benchmark";
+                const duration_ms = @max(0, self.perf_benchmark_last_end_timestamp_ms - self.perf_benchmark_last_start_timestamp_ms);
+                const msg = std.fmt.allocPrint(
+                    self.allocator,
+                    "Stopped benchmark '{s}' ({d:.2}s).",
+                    .{ label, @as(f32, @floatFromInt(duration_ms)) / 1000.0 },
+                ) catch null;
+                defer if (msg) |text| self.allocator.free(text);
+                if (msg) |text| self.appendMessage("system", text, null) catch {};
+            } else {
+                self.startPerfBenchmark() catch {};
+                const label = self.perf_benchmark_active_label orelse "benchmark";
+                const msg = std.fmt.allocPrint(self.allocator, "Started benchmark '{s}'.", .{label}) catch null;
+                defer if (msg) |text| self.allocator.free(text);
+                if (msg) |text| self.appendMessage("system", text, null) catch {};
+            }
+        }
+
+        const benchmark_copy_rect = Rect.fromXYWH(
+            benchmark_toggle_rect.max[0] + layout.inner_inset,
+            y,
+            @max(120.0, width * 0.14),
+            row_height,
+        );
+        if (self.drawButtonWidget(
+            benchmark_copy_rect,
+            "Copy Bench",
+            .{ .variant = .secondary, .disabled = !self.hasPerfBenchmarkCapture() },
+        )) {
+            const report = self.buildBenchmarkPerfReportText() catch null;
+            defer if (report) |value| self.allocator.free(value);
+            if (report) |value| {
+                self.copyTextToClipboard(value) catch {};
+                self.appendMessage("system", "Copied benchmark perf report to clipboard.", null) catch {};
+            }
+        }
+
+        const benchmark_export_rect = Rect.fromXYWH(
+            benchmark_copy_rect.max[0] + layout.inner_inset,
+            y,
+            @max(126.0, width * 0.15),
+            row_height,
+        );
+        if (self.drawButtonWidget(
+            benchmark_export_rect,
+            "Export Bench",
+            .{ .variant = .secondary, .disabled = !self.hasPerfBenchmarkCapture() },
+        )) {
+            const report = self.buildBenchmarkPerfReportText() catch null;
+            defer if (report) |value| self.allocator.free(value);
+            if (report) |value| {
+                const export_path = self.exportPerfReport(value) catch null;
+                defer if (export_path) |path| self.allocator.free(path);
+                if (export_path) |path| {
+                    const msg = std.fmt.allocPrint(self.allocator, "Exported benchmark perf report to {s}", .{path}) catch null;
+                    defer if (msg) |text| self.allocator.free(text);
+                    if (msg) |text| self.appendMessage("system", text, null) catch {};
+                }
+            }
+        }
+
+        const benchmark_clear_rect = Rect.fromXYWH(
+            benchmark_export_rect.max[0] + layout.inner_inset,
+            y,
+            @max(112.0, width * 0.14),
+            row_height,
+        );
+        if (self.drawButtonWidget(
+            benchmark_clear_rect,
+            "Clear Bench",
+            .{ .variant = .secondary, .disabled = !self.hasPerfBenchmarkCapture() and !self.perf_benchmark_active },
+        )) {
+            if (self.perf_benchmark_active) self.stopPerfBenchmark() catch {};
+            self.clearPerfBenchmarkCapture();
+            self.appendMessage("system", "Cleared benchmark capture.", null) catch {};
+        }
+
+        if (self.mouse_released and
+            self.settings_panel.focused_field == .perf_benchmark_label and
+            !benchmark_label_rect.contains(.{ self.mouse_x, self.mouse_y }))
+        {
+            self.settings_panel.focused_field = .none;
+        }
+
+        y += row_height + layout.row_gap * 0.45;
+
+        const spark_samples: []const PerfSample = blk: {
+            const window: usize = 240;
+            if (self.perf_history.items.len > window) {
+                break :blk self.perf_history.items[self.perf_history.items.len - window ..];
+            }
+            break :blk self.perf_history.items;
+        };
+        var spark_ctx = spark_samples;
+        const spark_gap = @max(6.0 * self.ui_scale, layout.inner_inset * 0.8);
+        const spark_card_w = @max(90.0 * self.ui_scale, (content_width - spark_gap * 3.0) / 4.0);
+        const spark_h = @max(52.0 * self.ui_scale, row_height * 1.9);
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            y,
+            content_width,
+            "Perf sparkline charts (recent window)",
+            self.theme.colors.text_secondary,
+        );
+        y += line_height;
+
+        const spark_frame_rect = Rect.fromXYWH(rect.min[0] + pad, y, spark_card_w, spark_h);
+        const spark_draw_rect = Rect.fromXYWH(spark_frame_rect.max[0] + spark_gap, y, spark_card_w, spark_h);
+        const spark_ws_rect = Rect.fromXYWH(spark_draw_rect.max[0] + spark_gap, y, spark_card_w, spark_h);
+        const spark_fs_rect = Rect.fromXYWH(spark_ws_rect.max[0] + spark_gap, y, spark_card_w, spark_h);
+
+        self.drawTextTrimmed(spark_frame_rect.min[0], spark_frame_rect.min[1] - line_height, spark_card_w, "Frame ms", self.theme.colors.text_secondary);
+        self.drawTextTrimmed(spark_draw_rect.min[0], spark_draw_rect.min[1] - line_height, spark_card_w, "Draw ms", self.theme.colors.text_secondary);
+        self.drawTextTrimmed(spark_ws_rect.min[0], spark_ws_rect.min[1] - line_height, spark_card_w, "WS ms", self.theme.colors.text_secondary);
+        self.drawTextTrimmed(spark_fs_rect.min[0], spark_fs_rect.min[1] - line_height, spark_card_w, "FS ms", self.theme.colors.text_secondary);
+
+        widgets.sparkline.draw(
+            &self.ui_commands,
+            spark_frame_rect,
+            .{ .ctx = &spark_ctx, .count = spark_samples.len, .at = &perfSampleFrameMsAt },
+            .{
+                .stroke_color = zcolors.rgba(92, 173, 255, 255),
+                .fill_color = zcolors.withAlpha(zcolors.rgba(92, 173, 255, 255), 0.28),
+                .background_color = zcolors.withAlpha(self.theme.colors.surface, 0.96),
+                .border_color = self.theme.colors.border,
+            },
+        );
+        widgets.sparkline.draw(
+            &self.ui_commands,
+            spark_draw_rect,
+            .{ .ctx = &spark_ctx, .count = spark_samples.len, .at = &perfSampleDrawMsAt },
+            .{
+                .stroke_color = zcolors.rgba(255, 170, 72, 255),
+                .fill_color = zcolors.withAlpha(zcolors.rgba(255, 170, 72, 255), 0.28),
+                .background_color = zcolors.withAlpha(self.theme.colors.surface, 0.96),
+                .border_color = self.theme.colors.border,
+            },
+        );
+        widgets.sparkline.draw(
+            &self.ui_commands,
+            spark_ws_rect,
+            .{ .ctx = &spark_ctx, .count = spark_samples.len, .at = &perfSampleWsMsAt },
+            .{
+                .stroke_color = zcolors.rgba(175, 122, 255, 255),
+                .fill_color = zcolors.withAlpha(zcolors.rgba(175, 122, 255, 255), 0.28),
+                .background_color = zcolors.withAlpha(self.theme.colors.surface, 0.96),
+                .border_color = self.theme.colors.border,
+            },
+        );
+        widgets.sparkline.draw(
+            &self.ui_commands,
+            spark_fs_rect,
+            .{ .ctx = &spark_ctx, .count = spark_samples.len, .at = &perfSampleFsMsAt },
+            .{
+                .stroke_color = zcolors.rgba(98, 205, 128, 255),
+                .fill_color = zcolors.withAlpha(zcolors.rgba(98, 205, 128, 255), 0.28),
+                .background_color = zcolors.withAlpha(self.theme.colors.surface, 0.96),
+                .border_color = self.theme.colors.border,
+            },
+        );
+        y += spark_h + layout.row_gap * 0.55;
 
         const node_watch_status = if (self.node_service_watch_enabled)
             "Node service events: watching"
@@ -7568,24 +8120,24 @@ const App = struct {
         y += line_height;
 
         const role_name = if (self.config.active_role == .admin) "admin" else "user";
+        var scope_preview_buf: [320]u8 = undefined;
         const scope_preview = if (self.selectedProjectId()) |project_id| blk: {
             const token_present = if (self.selectedProjectToken(project_id)) |token| token.len > 0 else false;
-            break :blk std.fmt.allocPrint(
-                self.allocator,
+            break :blk std.fmt.bufPrint(
+                &scope_preview_buf,
                 "Node watch scope: role={s} project={s} token={s}",
                 .{ role_name, project_id, if (token_present) "set" else "none" },
-            ) catch null;
-        } else std.fmt.allocPrint(
-            self.allocator,
+            ) catch "Node watch scope: role/project unavailable";
+        } else std.fmt.bufPrint(
+            &scope_preview_buf,
             "Node watch scope: role={s} project=(session default)",
             .{role_name},
-        ) catch null;
-        defer if (scope_preview) |value| self.allocator.free(value);
+        ) catch "Node watch scope: role/project unavailable";
         self.drawTextTrimmed(
             rect.min[0] + pad,
             y,
             content_width,
-            scope_preview orelse "Node watch scope: unknown",
+            scope_preview,
             self.theme.colors.text_secondary,
         );
         y += line_height;
@@ -7614,7 +8166,23 @@ const App = struct {
         );
         if (toggle_clicked) {
             self.debug_stream_enabled = !self.debug_stream_enabled;
-            self.debug_stream_next_poll_at_ms = 0;
+            if (self.debug_stream_enabled) {
+                self.requestDebugStreamSnapshot(true);
+            }
+        }
+
+        const refresh_rect = Rect.fromXYWH(
+            toggle_rect.max[0] + layout.inner_inset,
+            y,
+            @max(160.0, width * 0.24),
+            row_height,
+        );
+        if (self.drawButtonWidget(
+            refresh_rect,
+            "Refresh Snapshot",
+            .{ .variant = .secondary, .disabled = self.ws_client == null or !self.debug_stream_enabled },
+        )) {
+            self.requestDebugStreamSnapshot(true);
         }
 
         y += row_height + layout.row_gap * 0.65;
@@ -7732,6 +8300,7 @@ const App = struct {
         )) {
             self.debug_search_filter.clearRetainingCapacity();
             self.debug_selected_index = null;
+            self.clearSelectedNodeServiceEventCache();
             self.debug_scroll_y = 0;
         }
         if (self.mouse_released and
@@ -7742,31 +8311,31 @@ const App = struct {
             self.settings_panel.focused_field = .none;
         }
         const filtered_events = self.countDebugEventsMatchingFilter(search_trimmed);
-        const filter_status = std.fmt.allocPrint(
-            self.allocator,
+        var filter_status_buf: [64]u8 = undefined;
+        const filter_status = std.fmt.bufPrint(
+            &filter_status_buf,
             "Showing {d}/{d} events",
             .{ filtered_events, self.debug_events.items.len },
-        ) catch null;
-        defer if (filter_status) |value| self.allocator.free(value);
+        ) catch "Showing events";
         y += row_height + layout.row_gap * 0.45;
         self.drawTextTrimmed(
             rect.min[0] + pad,
             y,
             content_width,
-            filter_status orelse "Showing events",
+            filter_status,
             self.theme.colors.text_secondary,
         );
         y += line_height;
 
+        const selected_node_event = self.selectedNodeServiceEventInfo();
         y += layout.row_gap * 0.25;
-        if (self.selectedNodeServiceEventNodeIdOwned()) |selected_node_id| {
-            defer self.allocator.free(selected_node_id);
-            const jump_label = std.fmt.allocPrint(
-                self.allocator,
+        if (selected_node_event.node_id) |selected_node_id| {
+            var jump_label_buf: [256]u8 = undefined;
+            const jump_label = std.fmt.bufPrint(
+                &jump_label_buf,
                 "Jump To Node FS ({s})",
                 .{selected_node_id},
-            ) catch null;
-            defer if (jump_label) |value| self.allocator.free(value);
+            ) catch "Jump To Node FS";
             const jump_rect = Rect.fromXYWH(
                 rect.min[0] + pad,
                 y,
@@ -7775,7 +8344,7 @@ const App = struct {
             );
             if (self.drawButtonWidget(
                 jump_rect,
-                jump_label orelse "Jump To Node FS",
+                jump_label,
                 .{ .variant = .secondary },
             )) {
                 self.jumpFilesystemToNode(manager, selected_node_id) catch |err| {
@@ -7785,7 +8354,7 @@ const App = struct {
             y += row_height + layout.row_gap * 0.45;
         }
 
-        if (self.selectedNodeServiceEventIndex()) |selected_idx| {
+        if (selected_node_event.index) |selected_idx| {
             const set_base_rect = Rect.fromXYWH(
                 rect.min[0] + pad,
                 y,
@@ -7912,30 +8481,29 @@ const App = struct {
             }
             y += row_height + layout.row_gap * 0.45;
 
+            var base_label_buf: [96]u8 = undefined;
             const base_label = if (self.node_service_diff_base_index) |idx|
                 if (idx < self.debug_events.items.len)
-                    std.fmt.allocPrint(
-                        self.allocator,
+                    std.fmt.bufPrint(
+                        &base_label_buf,
                         "Diff base event: #{d}",
                         .{self.debug_events.items[idx].id},
-                    ) catch null
+                    ) catch "Diff base event: (unavailable)"
                 else
-                    self.allocator.dupe(u8, "Diff base event: (stale selection)") catch null
+                    "Diff base event: (stale selection)"
             else
-                self.allocator.dupe(u8, "Diff base event: (not set)") catch null;
-            defer if (base_label) |value| self.allocator.free(value);
+                "Diff base event: (not set)";
             self.drawTextTrimmed(
                 rect.min[0] + pad,
                 y,
                 content_width,
-                base_label orelse "Diff base event: (unknown)",
+                base_label,
                 self.theme.colors.text_secondary,
             );
             y += line_height;
         }
 
-        const selected_diag = self.selectedNodeServiceDeltaDiagnosticsText();
-        defer if (selected_diag) |value| self.allocator.free(value);
+        const selected_diag = selected_node_event.diagnostics;
         if (self.node_service_latest_reload_diag != null or selected_diag != null or self.node_service_diff_preview != null) {
             self.drawLabel(
                 rect.min[0] + pad,
@@ -7997,6 +8565,21 @@ const App = struct {
                     self.theme.colors.text_primary,
                 );
                 y += layout.row_gap * 0.4;
+            }
+        }
+
+        if (selected_node_event.index) |selected_idx| {
+            if (selected_idx < self.debug_events.items.len and
+                self.debug_events.items[selected_idx].payload_json.len > DEBUG_SYNTAX_COLOR_MAX_PAYLOAD_BYTES)
+            {
+                self.drawTextTrimmed(
+                    rect.min[0] + pad,
+                    y,
+                    content_width,
+                    "Large payload mode: syntax coloring disabled for this event to keep UI responsive.",
+                    self.theme.colors.text_secondary,
+                );
+                y += line_height;
             }
         }
 
@@ -8078,37 +8661,48 @@ const App = struct {
             const content_max_x = output_rect.max[0] - scrollbar_reserved;
             self.drawDebugEventHeaderLine(output_rect.min[0] + inner + 2.0, cur_y, content_max_x, entry.*);
             self.ensureDebugPayloadWrapRows(output_rect.min[0], content_max_x, entry);
+            self.ensureDebugVisiblePayloadLines(output_rect.min[0], content_max_x, entry);
+            const enable_syntax_color = entry.payload_json.len <= DEBUG_SYNTAX_COLOR_MAX_PAYLOAD_BYTES;
+            const space_w = self.measureText(" ");
+            const fold_marker_w_open = self.measureText("[-]");
+            const fold_marker_w_closed = self.measureText("[+]");
 
             var clicked_fold_marker = false;
-            var line_y = cur_y + line_height;
-            var payload_line_idx: usize = 0;
-            while (payload_line_idx < entry.payload_lines.items.len) {
-                const meta = entry.payload_lines.items[payload_line_idx];
-                var next_line_idx = payload_line_idx + 1;
-                const can_fold = meta.opens_block and meta.matching_close_index != null and
-                    @as(usize, @intCast(meta.matching_close_index.?)) > payload_line_idx + 1;
-                if (can_fold and self.isDebugBlockCollapsed(entry.id, payload_line_idx)) {
-                    next_line_idx = @as(usize, @intCast(meta.matching_close_index.?)) + 1;
-                }
+            const body_top_y = cur_y + line_height;
+            const min_row: usize = if (output_rect.min[1] <= body_top_y)
+                0
+            else
+                @as(usize, @intFromFloat((output_rect.min[1] - body_top_y) / line_height));
+            const max_row_exclusive: usize = if (output_rect.max[1] <= body_top_y)
+                0
+            else
+                @as(usize, @intFromFloat(((output_rect.max[1] - body_top_y) / line_height) + 1.0));
 
-                const rows_used = self.debugPayloadLineRows(output_rect.min[0], content_max_x, entry, payload_line_idx);
+            var visible_idx = findFirstVisiblePayloadLine(entry, min_row);
+            while (visible_idx < entry.payload_visible_line_indices.items.len) : (visible_idx += 1) {
+                const payload_line_idx = @as(usize, @intCast(entry.payload_visible_line_indices.items[visible_idx]));
+                const row_start = @as(usize, @intCast(entry.payload_visible_line_row_starts.items[visible_idx]));
+                if (row_start >= max_row_exclusive) break;
+
+                const rows_used = payloadLineRowsFromCache(entry, payload_line_idx);
                 const line_h = line_height * @as(f32, @floatFromInt(rows_used));
-                if (line_y + line_h < output_rect.min[1]) {
-                    line_y += line_h;
-                    payload_line_idx = next_line_idx;
-                    continue;
-                }
+                const line_y = body_top_y + @as(f32, @floatFromInt(row_start)) * line_height;
                 if (line_y > output_rect.max[1]) break;
 
+                const meta = entry.payload_lines.items[payload_line_idx];
+                const can_fold = meta.opens_block and meta.matching_close_index != null and
+                    @as(usize, @intCast(meta.matching_close_index.?)) > payload_line_idx + 1;
+                const collapsed = can_fold and self.isDebugBlockCollapsed(entry.id, payload_line_idx);
+
                 const line = entry.payload_json[meta.start..meta.end];
-                const indent_width = @as(f32, @floatFromInt(meta.indent_spaces)) * self.measureText(" ");
+                const indent_width = @as(f32, @floatFromInt(meta.indent_spaces)) * space_w;
                 const line_x_base = output_rect.min[0] + inner + 2.0 + indent_width;
                 const content_start = @min(meta.indent_spaces, line.len);
                 const content = line[content_start..];
                 var text_x = line_x_base;
                 if (can_fold) {
-                    const marker = if (self.isDebugBlockCollapsed(entry.id, payload_line_idx)) "[+]" else "[-]";
-                    const marker_w = self.measureText(marker);
+                    const marker = if (collapsed) "[+]" else "[-]";
+                    const marker_w = if (collapsed) fold_marker_w_closed else fold_marker_w_open;
                     const marker_rect = Rect.fromXYWH(line_x_base, line_y, marker_w, line_height);
                     const marker_hovered = marker_rect.contains(.{ self.mouse_x, self.mouse_y });
                     if (self.mouse_clicked and marker_hovered) {
@@ -8121,23 +8715,29 @@ const App = struct {
                     else
                         self.theme.colors.primary;
                     self.drawText(line_x_base, line_y, marker, marker_color);
-                    text_x = line_x_base + marker_w + self.measureText(" ");
+                    text_x = line_x_base + marker_w + space_w;
                 }
 
-                _ = self.drawJsonLineColored(text_x, line_y, content_max_x, content);
-
-                if (can_fold and self.isDebugBlockCollapsed(entry.id, payload_line_idx)) {
-                    next_line_idx = @as(usize, @intCast(meta.matching_close_index.?)) + 1;
+                if (enable_syntax_color and content.len <= DEBUG_SYNTAX_COLOR_MAX_LINE_BYTES) {
+                    _ = self.drawJsonLineColored(text_x, line_y, content_max_x, content);
+                } else {
+                    _ = self.drawTextWrapped(
+                        text_x,
+                        line_y,
+                        @max(1.0, content_max_x - text_x),
+                        content,
+                        self.theme.colors.text_primary,
+                    );
                 }
-
-                line_y += line_h;
-                payload_line_idx = next_line_idx;
             }
 
             const clicked_entry = self.mouse_clicked and entry_rect.contains(.{ self.mouse_x, self.mouse_y });
             const clicked_copy = have_copy_rect and copy_btn_rect.contains(.{ self.mouse_x, self.mouse_y });
             if (clicked_entry and !clicked_copy and !clicked_fold_marker) {
-                self.debug_selected_index = idx;
+                if (self.debug_selected_index == null or self.debug_selected_index.? != idx) {
+                    self.debug_selected_index = idx;
+                    self.clearSelectedNodeServiceEventCache();
+                }
             }
 
             cur_y += entry_h;
@@ -8262,6 +8862,9 @@ const App = struct {
         if (entry.payload_json.len == 0) return;
         entry.payload_lines = self.buildDebugPayloadLines(entry.payload_json) catch .empty;
         entry.payload_wrap_rows.clearRetainingCapacity();
+        entry.payload_visible_line_indices.clearRetainingCapacity();
+        entry.payload_visible_line_row_starts.clearRetainingCapacity();
+        entry.payload_visible_lines_valid = false;
         entry.payload_wrap_rows_valid = false;
         entry.cached_visible_rows_valid = false;
     }
@@ -8280,10 +8883,11 @@ const App = struct {
         entry.payload_wrap_rows_valid = false;
         entry.payload_wrap_rows.ensureTotalCapacity(self.allocator, entry.payload_lines.items.len) catch return;
 
-        const fold_marker_w = self.measureText("[-]") + self.measureText(" ");
+        const space_w = self.measureText(" ");
+        const fold_marker_w = self.measureText("[-]") + space_w;
         for (entry.payload_lines.items, 0..) |meta, line_index| {
             const line = entry.payload_json[meta.start..meta.end];
-            const indent_width = @as(f32, @floatFromInt(meta.indent_spaces)) * self.measureText(" ");
+            const indent_width = @as(f32, @floatFromInt(meta.indent_spaces)) * space_w;
             const line_x_base = output_min_x + 8.0 + indent_width;
             const content_start = @min(meta.indent_spaces, line.len);
             const content = line[content_start..];
@@ -8300,37 +8904,53 @@ const App = struct {
 
         entry.payload_wrap_rows_wrap_width = wrap_width;
         entry.payload_wrap_rows_valid = true;
+        entry.payload_visible_lines_valid = false;
         entry.cached_visible_rows_valid = false;
     }
 
-    fn countVisibleDebugPayloadRows(self: *App, output_min_x: f32, content_max_x: f32, entry: *DebugEventEntry) usize {
-        if (entry.payload_lines.items.len == 0) return 0;
+    fn payloadLineRowsFromCache(entry: *const DebugEventEntry, line_index: usize) usize {
+        if (line_index >= entry.payload_wrap_rows.items.len) return 1;
+        const rows = @as(usize, @intCast(entry.payload_wrap_rows.items[line_index]));
+        return if (rows == 0) 1 else rows;
+    }
+
+    fn ensureDebugVisiblePayloadLines(self: *App, output_min_x: f32, content_max_x: f32, entry: *DebugEventEntry) void {
+        if (entry.payload_lines.items.len == 0) {
+            entry.payload_visible_line_indices.clearRetainingCapacity();
+            entry.payload_visible_line_row_starts.clearRetainingCapacity();
+            entry.cached_visible_rows = 0;
+            entry.cached_visible_rows_valid = true;
+            entry.payload_visible_lines_valid = true;
+            return;
+        }
+
         self.ensureDebugPayloadWrapRows(output_min_x, content_max_x, entry);
         const wrap_width = @max(1.0, content_max_x - output_min_x);
-        if (entry.cached_visible_rows_valid and
+        if (entry.payload_visible_lines_valid and
             @abs(entry.cached_visible_rows_wrap_width - wrap_width) < 0.5 and
             entry.cached_visible_rows_fold_revision == self.debug_fold_revision)
         {
-            return entry.cached_visible_rows;
+            return;
         }
 
-        var rows: usize = 0;
+        entry.payload_visible_line_indices.clearRetainingCapacity();
+        entry.payload_visible_line_row_starts.clearRetainingCapacity();
+        entry.payload_visible_line_indices.ensureTotalCapacity(self.allocator, entry.payload_lines.items.len) catch return;
+        entry.payload_visible_line_row_starts.ensureTotalCapacity(self.allocator, entry.payload_lines.items.len) catch return;
+
+        var rows_u64: u64 = 0;
         var line_index: usize = 0;
         while (line_index < entry.payload_lines.items.len) {
             const meta = entry.payload_lines.items[line_index];
-            if (line_index < entry.payload_wrap_rows.items.len) {
-                rows += @as(usize, @intCast(entry.payload_wrap_rows.items[line_index]));
-            } else {
-                const line = entry.payload_json[meta.start..meta.end];
-                const indent_width = @as(f32, @floatFromInt(meta.indent_spaces)) * self.measureText(" ");
-                const line_x_base = output_min_x + 8.0 + indent_width;
-                const content_start = @min(meta.indent_spaces, line.len);
-                const content = line[content_start..];
-                const can_fold = meta.opens_block and meta.matching_close_index != null and
-                    @as(usize, @intCast(meta.matching_close_index.?)) > line_index + 1;
-                const text_x = if (can_fold) line_x_base + (self.measureText("[-]") + self.measureText(" ")) else line_x_base;
-                rows += self.measureJsonLineWrapRows(text_x, content_max_x, content);
-            }
+            const start_clamped: u32 = if (rows_u64 > std.math.maxInt(u32))
+                std.math.maxInt(u32)
+            else
+                @intCast(rows_u64);
+            entry.payload_visible_line_indices.appendAssumeCapacity(@intCast(line_index));
+            entry.payload_visible_line_row_starts.appendAssumeCapacity(start_clamped);
+
+            const rows_used = payloadLineRowsFromCache(entry, line_index);
+            rows_u64 += rows_used;
 
             if (meta.opens_block and meta.matching_close_index != null and
                 @as(usize, @intCast(meta.matching_close_index.?)) > line_index + 1 and
@@ -8341,35 +8961,42 @@ const App = struct {
                 line_index += 1;
             }
         }
-        entry.cached_visible_rows = rows;
+
+        entry.cached_visible_rows = if (rows_u64 > std.math.maxInt(usize))
+            std.math.maxInt(usize)
+        else
+            @intCast(rows_u64);
         entry.cached_visible_rows_wrap_width = wrap_width;
         entry.cached_visible_rows_fold_revision = self.debug_fold_revision;
         entry.cached_visible_rows_valid = true;
-        return rows;
+        entry.payload_visible_lines_valid = true;
     }
 
-    fn debugPayloadLineRows(
-        self: *App,
-        output_min_x: f32,
-        content_max_x: f32,
-        entry: *DebugEventEntry,
-        line_index: usize,
+    fn countVisibleDebugPayloadRows(self: *App, output_min_x: f32, content_max_x: f32, entry: *DebugEventEntry) usize {
+        if (entry.payload_lines.items.len == 0) return 0;
+        self.ensureDebugVisiblePayloadLines(output_min_x, content_max_x, entry);
+        return entry.cached_visible_rows;
+    }
+
+    fn findFirstVisiblePayloadLine(
+        entry: *const DebugEventEntry,
+        min_row: usize,
     ) usize {
-        if (line_index < entry.payload_wrap_rows.items.len) {
-            const rows = @as(usize, @intCast(entry.payload_wrap_rows.items[line_index]));
-            return if (rows == 0) 1 else rows;
+        var lo: usize = 0;
+        var hi: usize = entry.payload_visible_line_indices.items.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            const line_index = @as(usize, @intCast(entry.payload_visible_line_indices.items[mid]));
+            const start_row = @as(usize, @intCast(entry.payload_visible_line_row_starts.items[mid]));
+            const rows_used = payloadLineRowsFromCache(entry, line_index);
+            const end_row = start_row + rows_used;
+            if (end_row <= min_row) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
         }
-        if (line_index >= entry.payload_lines.items.len) return 1;
-        const meta = entry.payload_lines.items[line_index];
-        const line = entry.payload_json[meta.start..meta.end];
-        const indent_width = @as(f32, @floatFromInt(meta.indent_spaces)) * self.measureText(" ");
-        const line_x_base = output_min_x + 8.0 + indent_width;
-        const content_start = @min(meta.indent_spaces, line.len);
-        const content = line[content_start..];
-        const can_fold = meta.opens_block and meta.matching_close_index != null and
-            @as(usize, @intCast(meta.matching_close_index.?)) > line_index + 1;
-        const text_x = if (can_fold) line_x_base + (self.measureText("[-]") + self.measureText(" ")) else line_x_base;
-        return self.measureJsonLineWrapRows(text_x, content_max_x, content);
+        return lo;
     }
 
     fn measureJsonLineWrapRows(self: *App, line_x: f32, max_x: f32, line: []const u8) usize {
@@ -8418,32 +9045,30 @@ const App = struct {
         self.drawTextTrimmed(cursor_x, y, category_max, entry.category, self.debugCategoryColor(entry.category));
 
         if (entry.correlation_id) |value| {
-            const badge_text = std.fmt.allocPrint(self.allocator, "CID:{s}", .{value}) catch null;
-            if (badge_text) |text| {
-                defer self.allocator.free(text);
-                const badge_x = cursor_x + category_w + 8.0 * self.ui_scale;
-                const remaining = max_x - badge_x;
-                if (remaining > 40.0 * self.ui_scale) {
-                    const badge_w = @min(remaining, self.measureText(text) + 10.0 * self.ui_scale);
-                    const badge_h = line_height;
-                    const badge_rect = Rect.fromXYWH(
-                        badge_x,
-                        y + 1.0 * self.ui_scale,
-                        badge_w,
-                        badge_h,
-                    );
-                    self.drawFilledRect(
-                        badge_rect,
-                        zcolors.withAlpha(self.theme.colors.primary, 0.22),
-                    );
-                    self.drawTextTrimmed(
-                        badge_rect.min[0] + 4.0 * self.ui_scale,
-                        y,
-                        badge_w - 6.0 * self.ui_scale,
-                        text,
-                        self.theme.colors.text_primary,
-                    );
-                }
+            var badge_buf: [160]u8 = undefined;
+            const text = std.fmt.bufPrint(&badge_buf, "CID:{s}", .{value}) catch "CID:(long)";
+            const badge_x = cursor_x + category_w + 8.0 * self.ui_scale;
+            const remaining = max_x - badge_x;
+            if (remaining > 40.0 * self.ui_scale) {
+                const badge_w = @min(remaining, self.measureText(text) + 10.0 * self.ui_scale);
+                const badge_h = line_height;
+                const badge_rect = Rect.fromXYWH(
+                    badge_x,
+                    y + 1.0 * self.ui_scale,
+                    badge_w,
+                    badge_h,
+                );
+                self.drawFilledRect(
+                    badge_rect,
+                    zcolors.withAlpha(self.theme.colors.primary, 0.22),
+                );
+                self.drawTextTrimmed(
+                    badge_rect.min[0] + 4.0 * self.ui_scale,
+                    y,
+                    badge_w - 6.0 * self.ui_scale,
+                    text,
+                    self.theme.colors.text_primary,
+                );
             }
         }
     }
@@ -8664,38 +9289,69 @@ const App = struct {
         return rows;
     }
 
-    fn selectedNodeServiceEventNodeIdOwned(self: *App) ?[]u8 {
-        const selected_idx = self.debug_selected_index orelse return null;
-        if (selected_idx >= self.debug_events.items.len) return null;
-        const entry = self.debug_events.items[selected_idx];
-        if (!std.mem.eql(u8, entry.category, "control.node_service_event")) return null;
-
-        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, entry.payload_json, .{}) catch return null;
-        defer parsed.deinit();
-        if (parsed.value != .object) return null;
-
-        const node_id = if (parsed.value.object.get("node_id")) |value| switch (value) {
-            .string => value.string,
-            else => return null,
-        } else return null;
-        if (node_id.len == 0) return null;
-        return self.allocator.dupe(u8, node_id) catch null;
+    fn clearSelectedNodeServiceEventCache(self: *App) void {
+        if (self.debug_selected_node_service_cache_node_id) |value| {
+            self.allocator.free(value);
+            self.debug_selected_node_service_cache_node_id = null;
+        }
+        if (self.debug_selected_node_service_cache_diagnostics) |value| {
+            self.allocator.free(value);
+            self.debug_selected_node_service_cache_diagnostics = null;
+        }
+        self.debug_selected_node_service_cache_index = null;
+        self.debug_selected_node_service_cache_event_id = 0;
     }
 
-    fn selectedNodeServiceEventIndex(self: *App) ?usize {
-        const selected_idx = self.debug_selected_index orelse return null;
-        if (selected_idx >= self.debug_events.items.len) return null;
-        const entry = self.debug_events.items[selected_idx];
-        if (!std.mem.eql(u8, entry.category, "control.node_service_event")) return null;
-        return selected_idx;
-    }
+    fn selectedNodeServiceEventInfo(self: *App) SelectedNodeServiceEventInfo {
+        const selected_idx = self.debug_selected_index orelse {
+            self.clearSelectedNodeServiceEventCache();
+            return .{};
+        };
+        if (selected_idx >= self.debug_events.items.len) {
+            self.debug_selected_index = null;
+            self.clearSelectedNodeServiceEventCache();
+            return .{};
+        }
 
-    fn selectedNodeServiceDeltaDiagnosticsText(self: *App) ?[]u8 {
-        const selected_idx = self.debug_selected_index orelse return null;
-        if (selected_idx >= self.debug_events.items.len) return null;
         const entry = self.debug_events.items[selected_idx];
-        if (!std.mem.eql(u8, entry.category, "control.node_service_event")) return null;
-        return self.buildNodeServiceDeltaDiagnosticsTextFromJson(entry.payload_json) catch null;
+        if (!std.mem.eql(u8, entry.category, "control.node_service_event")) {
+            self.clearSelectedNodeServiceEventCache();
+            return .{};
+        }
+
+        if (self.debug_selected_node_service_cache_index == selected_idx and
+            self.debug_selected_node_service_cache_event_id == entry.id)
+        {
+            return .{
+                .index = selected_idx,
+                .node_id = self.debug_selected_node_service_cache_node_id,
+                .diagnostics = self.debug_selected_node_service_cache_diagnostics,
+            };
+        }
+
+        self.clearSelectedNodeServiceEventCache();
+        self.debug_selected_node_service_cache_index = selected_idx;
+        self.debug_selected_node_service_cache_event_id = entry.id;
+
+        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, entry.payload_json, .{}) catch null;
+        if (parsed) |*parsed_value| {
+            defer parsed_value.deinit();
+            if (parsed_value.value == .object) {
+                if (parsed_value.value.object.get("node_id")) |value| {
+                    if (value == .string and value.string.len > 0) {
+                        self.debug_selected_node_service_cache_node_id = self.allocator.dupe(u8, value.string) catch null;
+                    }
+                }
+            }
+        }
+        self.debug_selected_node_service_cache_diagnostics =
+            self.buildNodeServiceDeltaDiagnosticsTextFromJson(entry.payload_json) catch null;
+
+        return .{
+            .index = selected_idx,
+            .node_id = self.debug_selected_node_service_cache_node_id,
+            .diagnostics = self.debug_selected_node_service_cache_diagnostics,
+        };
     }
 
     fn collectUniqueLinesOrdered(
@@ -8810,6 +9466,194 @@ const App = struct {
         try std.fs.cwd().writeFile(.{
             .sub_path = filename,
             .data = diff_text,
+        });
+
+        const cwd = std.fs.cwd().realpathAlloc(self.allocator, ".") catch return self.allocator.dupe(u8, filename);
+        defer self.allocator.free(cwd);
+        return std.fmt.allocPrint(
+            self.allocator,
+            "{s}{s}{s}",
+            .{ cwd, std.fs.path.sep_str, filename },
+        );
+    }
+
+    fn hasPerfBenchmarkCapture(self: *const App) bool {
+        if (self.perf_benchmark_active) return true;
+        return self.perf_benchmark_last_start_timestamp_ms > 0 and
+            self.perf_benchmark_last_end_timestamp_ms >= self.perf_benchmark_last_start_timestamp_ms;
+    }
+
+    fn clearPerfBenchmarkCapture(self: *App) void {
+        self.perf_benchmark_last_start_sample_index = null;
+        self.perf_benchmark_last_end_sample_index = 0;
+        self.perf_benchmark_last_start_timestamp_ms = 0;
+        self.perf_benchmark_last_end_timestamp_ms = 0;
+        if (self.perf_benchmark_last_label) |value| {
+            self.allocator.free(value);
+            self.perf_benchmark_last_label = null;
+        }
+    }
+
+    fn startPerfBenchmark(self: *App) !void {
+        if (self.perf_benchmark_active) return;
+        const now_ms = std.time.milliTimestamp();
+        const trimmed = std.mem.trim(u8, self.perf_benchmark_label_input.items, " \t\r\n");
+        const label = if (trimmed.len > 0)
+            try self.allocator.dupe(u8, trimmed)
+        else
+            try std.fmt.allocPrint(self.allocator, "bench-{d}", .{now_ms});
+
+        if (self.perf_benchmark_active_label) |value| self.allocator.free(value);
+        self.perf_benchmark_active_label = label;
+        self.perf_benchmark_active = true;
+        self.perf_benchmark_start_sample_index = self.perf_history.items.len;
+        self.perf_benchmark_start_timestamp_ms = now_ms;
+    }
+
+    fn stopPerfBenchmark(self: *App) !void {
+        if (!self.perf_benchmark_active) return;
+        const now_ms = std.time.milliTimestamp();
+
+        self.clearPerfBenchmarkCapture();
+        self.perf_benchmark_last_start_sample_index = self.perf_benchmark_start_sample_index;
+        self.perf_benchmark_last_end_sample_index = self.perf_history.items.len;
+        self.perf_benchmark_last_start_timestamp_ms = self.perf_benchmark_start_timestamp_ms;
+        self.perf_benchmark_last_end_timestamp_ms = now_ms;
+        if (self.perf_benchmark_active_label) |value| {
+            self.perf_benchmark_last_label = value;
+            self.perf_benchmark_active_label = null;
+        }
+        self.perf_benchmark_active = false;
+        self.perf_benchmark_start_sample_index = 0;
+        self.perf_benchmark_start_timestamp_ms = 0;
+    }
+
+    fn buildPerfReportTextForSlice(
+        self: *App,
+        report_name: []const u8,
+        label: ?[]const u8,
+        range_start_ms: ?i64,
+        range_end_ms: ?i64,
+        samples: []const PerfSample,
+    ) ![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(self.allocator);
+
+        const latest = if (samples.len > 0)
+            samples[samples.len - 1]
+        else
+            PerfSample{
+                .timestamp_ms = std.time.milliTimestamp(),
+                .fps = self.perf_last_fps,
+                .frame_ms = self.perf_last_frame_ms,
+                .ws_ms = self.perf_last_ws_ms,
+                .fs_ms = self.perf_last_fs_ms,
+                .debug_ms = self.perf_last_debug_ms,
+                .terminal_ms = self.perf_last_terminal_ms,
+                .draw_ms = self.perf_last_draw_ms,
+            };
+
+        try out.writer(self.allocator).print(
+            "{s}\ncaptured_at_ms={d}\nsamples={d}\nlatest_fps={d:.2}\nlatest_frame_ms={d:.3}\nlatest_draw_ms={d:.3}\nlatest_ws_ms={d:.3}\nlatest_fs_ms={d:.3}\nlatest_debug_ms={d:.3}\nlatest_terminal_ms={d:.3}\n",
+            .{
+                report_name,
+                std.time.milliTimestamp(),
+                samples.len,
+                latest.fps,
+                latest.frame_ms,
+                latest.draw_ms,
+                latest.ws_ms,
+                latest.fs_ms,
+                latest.debug_ms,
+                latest.terminal_ms,
+            },
+        );
+        if (label) |value| {
+            try out.writer(self.allocator).print("benchmark_label={s}\n", .{value});
+        }
+        if (range_start_ms != null and range_end_ms != null) {
+            const start_ms = range_start_ms.?;
+            const end_ms = range_end_ms.?;
+            const duration_ms: i64 = @max(0, end_ms - start_ms);
+            try out.writer(self.allocator).print(
+                "range_start_ms={d}\nrange_end_ms={d}\nrange_duration_ms={d}\n",
+                .{ start_ms, end_ms, duration_ms },
+            );
+        }
+
+        try out.appendSlice(self.allocator, "\n# sample_table\ntimestamp_ms,fps,frame_ms,draw_ms,ws_ms,fs_ms,debug_ms,terminal_ms\n");
+        for (samples) |sample| {
+            try out.writer(self.allocator).print(
+                "{d},{d:.3},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4}\n",
+                .{
+                    sample.timestamp_ms,
+                    sample.fps,
+                    sample.frame_ms,
+                    sample.draw_ms,
+                    sample.ws_ms,
+                    sample.fs_ms,
+                    sample.debug_ms,
+                    sample.terminal_ms,
+                },
+            );
+        }
+
+        return out.toOwnedSlice(self.allocator);
+    }
+
+    fn buildPerfReportText(self: *App) ![]u8 {
+        return self.buildPerfReportTextForSlice(
+            "zss_gui_perf_report",
+            null,
+            null,
+            null,
+            self.perf_history.items,
+        );
+    }
+
+    fn buildBenchmarkPerfReportText(self: *App) !?[]u8 {
+        var label: ?[]const u8 = null;
+        var start_ms: i64 = 0;
+        var end_ms: i64 = 0;
+        if (self.perf_benchmark_active) {
+            label = self.perf_benchmark_active_label;
+            start_ms = self.perf_benchmark_start_timestamp_ms;
+            end_ms = std.time.milliTimestamp();
+        } else if (self.perf_benchmark_last_start_timestamp_ms > 0 and
+            self.perf_benchmark_last_end_timestamp_ms >= self.perf_benchmark_last_start_timestamp_ms)
+        {
+            label = self.perf_benchmark_last_label;
+            start_ms = self.perf_benchmark_last_start_timestamp_ms;
+            end_ms = self.perf_benchmark_last_end_timestamp_ms;
+        } else {
+            return null;
+        }
+
+        var start_idx: usize = 0;
+        while (start_idx < self.perf_history.items.len and self.perf_history.items[start_idx].timestamp_ms < start_ms) : (start_idx += 1) {}
+        var end_idx: usize = start_idx;
+        while (end_idx < self.perf_history.items.len and self.perf_history.items[end_idx].timestamp_ms <= end_ms) : (end_idx += 1) {}
+
+        return self.buildPerfReportTextForSlice(
+            "zss_gui_perf_benchmark_report",
+            label,
+            start_ms,
+            end_ms,
+            self.perf_history.items[start_idx..end_idx],
+        );
+    }
+
+    fn exportPerfReport(self: *App, report_text: []const u8) ![]u8 {
+        const filename = try std.fmt.allocPrint(
+            self.allocator,
+            "zss-gui-perf-{d}.txt",
+            .{std.time.milliTimestamp()},
+        );
+        defer self.allocator.free(filename);
+
+        try std.fs.cwd().writeFile(.{
+            .sub_path = filename,
+            .data = report_text,
         });
 
         const cwd = std.fs.cwd().realpathAlloc(self.allocator, ".") catch return self.allocator.dupe(u8, filename);
@@ -9822,7 +10666,8 @@ const App = struct {
             self.ws_client = null;
         }
         self.debug_stream_enabled = true;
-        self.debug_stream_next_poll_at_ms = 0;
+        self.debug_stream_snapshot_pending = false;
+        self.debug_stream_snapshot_retry_at_ms = 0;
         self.node_service_watch_enabled = false;
         self.clearDebugStreamSnapshot();
 
@@ -9843,12 +10688,13 @@ const App = struct {
             selected_role_token
         else
             self.config.activeRoleToken();
-        const ws_client = ws_client_mod.WebSocketClient.init(self.allocator, effective_url, connect_token) catch |err| {
+        var ws_client = ws_client_mod.WebSocketClient.init(self.allocator, effective_url, connect_token) catch |err| {
             const msg = try std.fmt.allocPrint(self.allocator, "Client init failed: {s}", .{@errorName(err)});
             defer self.allocator.free(msg);
             self.setConnectionState(.error_state, msg);
             return;
         };
+        ws_client.setVerboseLogs(self.settings_panel.ws_verbose_logs);
         self.ws_client = ws_client;
 
         self.ws_client.?.connect() catch |err| {
@@ -10020,6 +10866,7 @@ const App = struct {
         };
 
         self.setConnectionState(.connected, "Connected");
+        self.requestDebugStreamSnapshot(true);
         self.settings_panel.focused_field = .none;
         if (self.ws_client) |*client| {
             const session_key_for_status = if (self.settings_panel.default_session.items.len > 0)
@@ -10134,7 +10981,8 @@ const App = struct {
         self.clearPendingSend();
         self.clearSessions();
         self.debug_stream_enabled = false;
-        self.debug_stream_next_poll_at_ms = 0;
+        self.debug_stream_snapshot_pending = false;
+        self.debug_stream_snapshot_retry_at_ms = 0;
         self.node_service_watch_enabled = false;
         self.session_attach_state = .unknown;
         self.clearDebugStreamSnapshot();
@@ -11962,9 +12810,14 @@ const App = struct {
         }
         self.debug_events.clearRetainingCapacity();
         self.debug_folded_blocks.clearRetainingCapacity();
+        self.debug_event_fingerprint_set.clearRetainingCapacity();
+        self.debug_event_fingerprint_count = 0;
+        self.debug_event_fingerprint_next = 0;
         self.debug_fold_revision +%= 1;
         if (self.debug_fold_revision == 0) self.debug_fold_revision = 1;
         self.debug_next_event_id = 1;
+        self.debug_selected_index = null;
+        self.clearSelectedNodeServiceEventCache();
         self.node_service_diff_base_index = null;
         self.clearNodeServiceReloadDiagnostics();
         self.clearNodeServiceDiffPreview();
@@ -12028,7 +12881,49 @@ const App = struct {
         }
     }
 
+    fn debugEventFingerprint(
+        timestamp_ms: i64,
+        category: []const u8,
+        correlation_id: ?[]const u8,
+        payload_json: []const u8,
+    ) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        hasher.update(std.mem.asBytes(&timestamp_ms));
+        hasher.update(category);
+        if (correlation_id) |value| {
+            hasher.update(&[_]u8{0});
+            hasher.update(value);
+        } else {
+            hasher.update(&[_]u8{1});
+        }
+        hasher.update(payload_json);
+        return hasher.final();
+    }
+
+    fn rememberDebugEventFingerprint(self: *App, fingerprint: u64) bool {
+        if (self.debug_event_fingerprint_set.contains(fingerprint)) {
+            return false;
+        }
+
+        if (self.debug_event_fingerprint_count == DEBUG_EVENT_DEDUPE_WINDOW) {
+            const evicted = self.debug_event_fingerprint_ring[self.debug_event_fingerprint_next];
+            _ = self.debug_event_fingerprint_set.remove(evicted);
+        } else {
+            self.debug_event_fingerprint_count += 1;
+        }
+
+        self.debug_event_fingerprint_ring[self.debug_event_fingerprint_next] = fingerprint;
+        self.debug_event_fingerprint_next = (self.debug_event_fingerprint_next + 1) % DEBUG_EVENT_DEDUPE_WINDOW;
+        self.debug_event_fingerprint_set.put(self.allocator, fingerprint, {}) catch {
+            return true;
+        };
+        return true;
+    }
+
     fn appendDebugEvent(self: *App, timestamp_ms: i64, category: []const u8, correlation_id: ?[]const u8, payload_json: []const u8) !void {
+        const fingerprint = debugEventFingerprint(timestamp_ms, category, correlation_id, payload_json);
+        if (!self.rememberDebugEventFingerprint(fingerprint)) return;
+
         while (self.debug_events.items.len >= MAX_DEBUG_EVENTS) {
             var removed = self.debug_events.orderedRemove(0);
             self.pruneDebugFoldStateForEvent(removed.id);
@@ -12039,6 +12934,15 @@ const App = struct {
                     self.clearNodeServiceDiffPreview();
                 } else {
                     self.node_service_diff_base_index = idx - 1;
+                }
+            }
+            if (self.debug_selected_index) |idx| {
+                if (idx == 0) {
+                    self.debug_selected_index = null;
+                    self.clearSelectedNodeServiceEventCache();
+                } else {
+                    self.debug_selected_index = idx - 1;
+                    self.clearSelectedNodeServiceEventCache();
                 }
             }
         }
@@ -12089,6 +12993,7 @@ const App = struct {
         if (self.debug_panel_id) |panel_id| {
             if (self.findPanelById(manager, panel_id) != null) {
                 manager.focusPanel(panel_id);
+                self.requestDebugStreamSnapshot(true);
                 return panel_id;
             }
             self.debug_panel_id = null;
@@ -12098,6 +13003,7 @@ const App = struct {
             if (panel.kind == .ToolOutput and std.mem.eql(u8, panel.title, "Debug Stream")) {
                 self.debug_panel_id = panel.id;
                 manager.focusPanel(panel.id);
+                self.requestDebugStreamSnapshot(true);
                 return panel.id;
             }
         }
@@ -12120,6 +13026,7 @@ const App = struct {
             manager.workspace.markDirty();
         }
         manager.focusPanel(panel_id);
+        self.requestDebugStreamSnapshot(true);
         return panel_id;
     }
 

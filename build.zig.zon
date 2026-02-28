@@ -17,8 +17,8 @@
             .hash = "ziggy_spider_protocol-0.1.0-Tn7uq8cvCQDowm7A_0nXIXG1ltU5ov_kYbpSqVtcA0cK",
         },
         .ziggy_ui = .{
-            .url = "https://github.com/DeanoC/ziggy-ui/archive/refs/heads/main.tar.gz",
-            .hash = "ziggy_ui-0.1.0-dS4PqOGL8QGukO-FWgx06lBlcqzcL2thOBopFJo1lPwG",
+            .url = "https://github.com/DeanoC/ziggy-ui/archive/62e233e120f18a3b6eb95e88b627c72e0c3d5e76.tar.gz",
+            .hash = "ziggy_ui-0.1.0-dS4PqE2X8QE3Kej7_nxh3fSIDXXecZewFqrH3JWqalNi",
         },
         .sdl3 = .{
             .url = "https://github.com/castholm/SDL/archive/refs/heads/main.zip",

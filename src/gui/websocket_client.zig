@@ -146,6 +146,7 @@ pub const WebSocketClient = struct {
     should_stop: std.atomic.Value(bool),
     connection_alive: std.atomic.Value(bool),
     inbound_queues: InboundMessageQueues,
+    verbose_logs: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, url: []const u8, token: []const u8) !WebSocketClient {
         return initWithMode(allocator, url, token, .threaded_queue);
@@ -172,6 +173,15 @@ pub const WebSocketClient = struct {
         const self = try allocator.create(WebSocketClient);
         self.* = try init(allocator, url, token);
         return self;
+    }
+
+    pub fn setVerboseLogs(self: *WebSocketClient, enabled: bool) void {
+        self.verbose_logs = enabled;
+    }
+
+    fn logVerbose(self: *const WebSocketClient, comptime format: []const u8, args: anytype) void {
+        if (!self.verbose_logs) return;
+        std.log.debug(format, args);
     }
 
     pub fn destroy(self: *WebSocketClient) void {
@@ -237,7 +247,7 @@ pub const WebSocketClient = struct {
     }
 
     fn readLoop(self: *WebSocketClient) void {
-        std.log.debug("[WS] readLoop thread started", .{});
+        self.logVerbose("[WS] readLoop thread started", .{});
 
         while (!self.should_stop.load(.acquire)) {
             if (self.client) |*client| {
@@ -275,19 +285,19 @@ pub const WebSocketClient = struct {
                         client.writePong(@constCast(msg.data)) catch {};
                     },
                     .close => {
-                        std.log.debug("[WS] Got close frame", .{});
+                        self.logVerbose("[WS] Got close frame", .{});
                         break;
                     },
                     .pong => {},
                 }
             } else {
-                std.log.debug("[WS] self.client is null, breaking", .{});
+                self.logVerbose("[WS] self.client is null, breaking", .{});
                 break;
             }
         }
 
         self.connection_alive.store(false, .release);
-        std.log.debug("[WS] readLoop thread stopped (should_stop={})", .{self.should_stop.load(.acquire)});
+        self.logVerbose("[WS] readLoop thread stopped (should_stop={})", .{self.should_stop.load(.acquire)});
     }
 
     pub fn disconnect(self: *WebSocketClient) void {
@@ -313,14 +323,14 @@ pub const WebSocketClient = struct {
     pub fn send(self: *WebSocketClient, payload: []const u8) !void {
         if (self.client == null) return error.NotConnected;
         if (!self.connection_alive.load(.acquire)) return error.ConnectionClosed;
-        std.log.debug("[WS] Sending {d} bytes", .{payload.len});
+        self.logVerbose("[WS] Sending {d} bytes", .{payload.len});
         if (self.client) |*client| {
             client.write(@constCast(payload)) catch |err| {
                 std.log.err("[WS] Send failed: {s}", .{@errorName(err)});
                 self.connection_alive.store(false, .release);
                 return err;
             };
-            std.log.debug("[WS] Send successful", .{});
+            self.logVerbose("[WS] Send successful", .{});
             return;
         }
         return error.NotConnected;

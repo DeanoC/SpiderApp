@@ -38,6 +38,7 @@ pub const Config = struct {
     ui_theme_pack_recent: ?[]const []const u8 = null,
     ui_profile: ?[]const u8 = null,
     terminal_backend: ?[]const u8 = null,
+    gui_verbose_ws_logs: bool = false,
 
     pub const default_server_url = "ws://127.0.0.1:18790";
 
@@ -466,6 +467,7 @@ pub const Config = struct {
             .ui_theme_pack_recent = try duplicateOptionalList(allocator, json.ui_theme_pack_recent),
             .ui_profile = try duplicateOptionalString(allocator, json.ui_profile),
             .terminal_backend = try duplicateOptionalString(allocator, json.terminal_backend),
+            .gui_verbose_ws_logs = json.gui_verbose_ws_logs orelse false,
         };
     }
 
@@ -502,6 +504,7 @@ pub const Config = struct {
             .ui_theme_pack_recent = self.ui_theme_pack_recent,
             .ui_profile = self.ui_profile,
             .terminal_backend = self.terminal_backend,
+            .gui_verbose_ws_logs = self.gui_verbose_ws_logs,
         };
 
         const bytes = try std.json.Stringify.valueAlloc(self.allocator, payload, .{
@@ -536,6 +539,7 @@ const ConfigJson = struct {
     ui_theme_pack_recent: ?[]const []const u8 = null,
     ui_profile: ?[]const u8 = null,
     terminal_backend: ?[]const u8 = null,
+    gui_verbose_ws_logs: ?bool = null,
 };
 
 fn parseTokenRole(value: ?[]const u8) Config.TokenRole {
