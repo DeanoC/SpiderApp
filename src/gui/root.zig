@@ -9020,6 +9020,9 @@ const App = struct {
             have_copy_rect = true;
         }
 
+        const content_min_x = output_rect.min[0] + inner + 2.0;
+        const content_max_x = output_rect.max[0] - scrollbar_reserved;
+
         var total_content_height: f32 = inner * 2.0;
         for (filtered_indices) |raw_idx| {
             const idx = @as(usize, @intCast(raw_idx));
@@ -9027,7 +9030,7 @@ const App = struct {
             const entry = &self.debug_events.items[idx];
             const is_selected = self.debug_selected_index != null and self.debug_selected_index.? == idx;
             const payload_visible_rows = if (is_selected)
-                self.countVisibleDebugPayloadRows(output_rect.min[0], output_rect.max[0] - scrollbar_reserved, entry)
+                self.countVisibleDebugPayloadRows(content_min_x, content_max_x, entry)
             else
                 0;
             const visible_lines = 1 + payload_visible_rows;
@@ -9048,7 +9051,7 @@ const App = struct {
             const is_selected = self.debug_selected_index != null and self.debug_selected_index.? == idx;
             if (is_selected) self.ensureDebugPayloadLines(entry);
             const payload_visible_rows = if (is_selected)
-                self.countVisibleDebugPayloadRows(output_rect.min[0], output_rect.max[0] - scrollbar_reserved, entry)
+                self.countVisibleDebugPayloadRows(content_min_x, content_max_x, entry)
             else
                 0;
             const visible_lines = 1 + payload_visible_rows;
@@ -9066,12 +9069,11 @@ const App = struct {
                 self.drawFilledRect(entry_rect, select_color);
             }
 
-            const content_max_x = output_rect.max[0] - scrollbar_reserved;
-            self.drawDebugEventHeaderLine(output_rect.min[0] + inner + 2.0, cur_y, content_max_x, entry.*);
+            self.drawDebugEventHeaderLine(content_min_x, cur_y, content_max_x, entry.*);
             var clicked_fold_marker = false;
             if (is_selected and payload_visible_rows > 0) {
-                self.ensureDebugPayloadWrapRows(output_rect.min[0], content_max_x, entry);
-                self.ensureDebugVisiblePayloadLines(output_rect.min[0], content_max_x, entry);
+                self.ensureDebugPayloadWrapRows(content_min_x, content_max_x, entry);
+                self.ensureDebugVisiblePayloadLines(content_min_x, content_max_x, entry);
                 const enable_syntax_color = entry.payload_json.len <= DEBUG_SYNTAX_COLOR_MAX_PAYLOAD_BYTES;
                 const space_w = self.measureText(" ");
                 const fold_marker_w_open = self.measureText("[-]");
@@ -9104,7 +9106,7 @@ const App = struct {
 
                     const line = entry.payload_json[meta.start..meta.end];
                     const indent_width = @as(f32, @floatFromInt(meta.indent_spaces)) * space_w;
-                    const line_x_base = output_rect.min[0] + inner + 2.0 + indent_width;
+                    const line_x_base = content_min_x + indent_width;
                     const content_start = @min(meta.indent_spaces, line.len);
                     const content = line[content_start..];
                     var text_x = line_x_base;
@@ -9297,7 +9299,7 @@ const App = struct {
         for (entry.payload_lines.items, 0..) |meta, line_index| {
             const line = entry.payload_json[meta.start..meta.end];
             const indent_width = @as(f32, @floatFromInt(meta.indent_spaces)) * space_w;
-            const line_x_base = output_min_x + 8.0 + indent_width;
+            const line_x_base = output_min_x + indent_width;
             const content_start = @min(meta.indent_spaces, line.len);
             const content = line[content_start..];
             const can_fold = meta.opens_block and meta.matching_close_index != null and
