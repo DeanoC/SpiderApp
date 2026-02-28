@@ -8077,23 +8077,35 @@ const App = struct {
 
             const content_max_x = output_rect.max[0] - scrollbar_reserved;
             self.drawDebugEventHeaderLine(output_rect.min[0] + inner + 2.0, cur_y, content_max_x, entry.*);
+            self.ensureDebugPayloadWrapRows(output_rect.min[0], content_max_x, entry);
 
             var clicked_fold_marker = false;
             var line_y = cur_y + line_height;
             var payload_line_idx: usize = 0;
             while (payload_line_idx < entry.payload_lines.items.len) {
                 const meta = entry.payload_lines.items[payload_line_idx];
+                var next_line_idx = payload_line_idx + 1;
+                const can_fold = meta.opens_block and meta.matching_close_index != null and
+                    @as(usize, @intCast(meta.matching_close_index.?)) > payload_line_idx + 1;
+                if (can_fold and self.isDebugBlockCollapsed(entry.id, payload_line_idx)) {
+                    next_line_idx = @as(usize, @intCast(meta.matching_close_index.?)) + 1;
+                }
+
+                const rows_used = self.debugPayloadLineRows(output_rect.min[0], content_max_x, entry, payload_line_idx);
+                const line_h = line_height * @as(f32, @floatFromInt(rows_used));
+                if (line_y + line_h < output_rect.min[1]) {
+                    line_y += line_h;
+                    payload_line_idx = next_line_idx;
+                    continue;
+                }
+                if (line_y > output_rect.max[1]) break;
+
                 const line = entry.payload_json[meta.start..meta.end];
                 const indent_width = @as(f32, @floatFromInt(meta.indent_spaces)) * self.measureText(" ");
                 const line_x_base = output_rect.min[0] + inner + 2.0 + indent_width;
                 const content_start = @min(meta.indent_spaces, line.len);
                 const content = line[content_start..];
-
-                var next_line_idx = payload_line_idx + 1;
                 var text_x = line_x_base;
-
-                const can_fold = meta.opens_block and meta.matching_close_index != null and
-                    @as(usize, @intCast(meta.matching_close_index.?)) > payload_line_idx + 1;
                 if (can_fold) {
                     const marker = if (self.isDebugBlockCollapsed(entry.id, payload_line_idx)) "[+]" else "[-]";
                     const marker_w = self.measureText(marker);
@@ -8112,13 +8124,13 @@ const App = struct {
                     text_x = line_x_base + marker_w + self.measureText(" ");
                 }
 
-                const rows_used = self.drawJsonLineColored(text_x, line_y, content_max_x, content);
+                _ = self.drawJsonLineColored(text_x, line_y, content_max_x, content);
 
                 if (can_fold and self.isDebugBlockCollapsed(entry.id, payload_line_idx)) {
                     next_line_idx = @as(usize, @intCast(meta.matching_close_index.?)) + 1;
                 }
 
-                line_y += line_height * @as(f32, @floatFromInt(rows_used));
+                line_y += line_h;
                 payload_line_idx = next_line_idx;
             }
 
@@ -8334,6 +8346,30 @@ const App = struct {
         entry.cached_visible_rows_fold_revision = self.debug_fold_revision;
         entry.cached_visible_rows_valid = true;
         return rows;
+    }
+
+    fn debugPayloadLineRows(
+        self: *App,
+        output_min_x: f32,
+        content_max_x: f32,
+        entry: *DebugEventEntry,
+        line_index: usize,
+    ) usize {
+        if (line_index < entry.payload_wrap_rows.items.len) {
+            const rows = @as(usize, @intCast(entry.payload_wrap_rows.items[line_index]));
+            return if (rows == 0) 1 else rows;
+        }
+        if (line_index >= entry.payload_lines.items.len) return 1;
+        const meta = entry.payload_lines.items[line_index];
+        const line = entry.payload_json[meta.start..meta.end];
+        const indent_width = @as(f32, @floatFromInt(meta.indent_spaces)) * self.measureText(" ");
+        const line_x_base = output_min_x + 8.0 + indent_width;
+        const content_start = @min(meta.indent_spaces, line.len);
+        const content = line[content_start..];
+        const can_fold = meta.opens_block and meta.matching_close_index != null and
+            @as(usize, @intCast(meta.matching_close_index.?)) > line_index + 1;
+        const text_x = if (can_fold) line_x_base + (self.measureText("[-]") + self.measureText(" ")) else line_x_base;
+        return self.measureJsonLineWrapRows(text_x, content_max_x, content);
     }
 
     fn measureJsonLineWrapRows(self: *App, line_x: f32, max_x: f32, line: []const u8) usize {
