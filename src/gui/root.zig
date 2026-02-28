@@ -131,11 +131,17 @@ const ContractServiceEntry = struct {
     service_id: []u8,
     service_path: []u8,
     invoke_path: []u8,
+    help_path: []u8,
+    schema_path: []u8,
+    template_path: []u8,
 
     fn deinit(self: *ContractServiceEntry, allocator: std.mem.Allocator) void {
         allocator.free(self.service_id);
         allocator.free(self.service_path);
         allocator.free(self.invoke_path);
+        allocator.free(self.help_path);
+        allocator.free(self.schema_path);
+        allocator.free(self.template_path);
         self.* = undefined;
     }
 };
@@ -6182,10 +6188,20 @@ const App = struct {
             } else continue;
             if (invoke_path.len == 0) continue;
 
+            const help_path = try self.joinFilesystemPath(service_path, "README.md");
+            errdefer self.allocator.free(help_path);
+            const schema_path = try self.joinFilesystemPath(service_path, "SCHEMA.json");
+            errdefer self.allocator.free(schema_path);
+            const template_path = try self.joinFilesystemPath(service_path, "TEMPLATE.json");
+            errdefer self.allocator.free(template_path);
+
             try self.contract_services.append(self.allocator, .{
                 .service_id = try self.allocator.dupe(u8, service_id),
                 .service_path = try self.allocator.dupe(u8, service_path),
                 .invoke_path = try self.allocator.dupe(u8, invoke_path),
+                .help_path = help_path,
+                .schema_path = schema_path,
+                .template_path = template_path,
             });
         }
 
@@ -6206,6 +6222,56 @@ const App = struct {
         const status = try self.readFsPathTextGui(client, status_path);
         defer self.allocator.free(status);
         try self.applyFilesystemPreview(status_path, status);
+        self.clearFilesystemError();
+    }
+
+    fn readContractServiceFileWithFallback(
+        self: *App,
+        client: *ws_client_mod.WebSocketClient,
+        primary_path: []const u8,
+        fallback_path: ?[]const u8,
+    ) ![]u8 {
+        return self.readFsPathTextGui(client, primary_path) catch |primary_err| {
+            if (fallback_path) |path| return self.readFsPathTextGui(client, path);
+            return primary_err;
+        };
+    }
+
+    fn readSelectedContractServiceHelp(self: *App) !void {
+        const entry = self.selectedContractService() orelse return error.MissingField;
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        try self.fsrpcBootstrapGui(client);
+        const content = try self.readContractServiceFileWithFallback(client, entry.help_path, null);
+        defer self.allocator.free(content);
+        try self.applyFilesystemPreview(entry.help_path, content);
+        self.clearFilesystemError();
+    }
+
+    fn readSelectedContractServiceSchema(self: *App) !void {
+        const entry = self.selectedContractService() orelse return error.MissingField;
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        try self.fsrpcBootstrapGui(client);
+        const fallback = try self.joinFilesystemPath(entry.service_path, "schema.json");
+        defer self.allocator.free(fallback);
+        const content = try self.readContractServiceFileWithFallback(client, entry.schema_path, fallback);
+        defer self.allocator.free(content);
+        try self.applyFilesystemPreview(entry.schema_path, content);
+        self.clearFilesystemError();
+    }
+
+    fn useSelectedContractServiceTemplate(self: *App) !void {
+        const entry = self.selectedContractService() orelse return error.MissingField;
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        try self.fsrpcBootstrapGui(client);
+        const fallback = try self.joinFilesystemPath(entry.service_path, "template.json");
+        defer self.allocator.free(fallback);
+        const template_text = try self.readContractServiceFileWithFallback(client, entry.template_path, fallback);
+        defer self.allocator.free(template_text);
+        const trimmed = std.mem.trim(u8, template_text, " \t\r\n");
+        const payload = if (trimmed.len > 0) trimmed else "{}";
+        self.contract_invoke_payload.clearRetainingCapacity();
+        try self.contract_invoke_payload.appendSlice(self.allocator, payload);
+        try self.applyFilesystemPreview(entry.template_path, payload);
         self.clearFilesystemError();
     }
 
@@ -7197,6 +7263,7 @@ const App = struct {
         const invoke_rect = Rect.fromXYWH(rect.min[0] + pad, y, contract_button_w, row_h);
         const status_rect = Rect.fromXYWH(invoke_rect.max[0] + pad, y, contract_button_w, row_h);
         const result_rect = Rect.fromXYWH(status_rect.max[0] + pad, y, contract_button_w, row_h);
+        const help_rect = Rect.fromXYWH(result_rect.max[0] + pad, y, contract_button_w, row_h);
         if (self.drawButtonWidget(
             invoke_rect,
             "Invoke",
@@ -7230,6 +7297,49 @@ const App = struct {
         )) {
             self.readSelectedContractServiceResult() catch |err| {
                 const msg = self.formatFilesystemOpError("Contract result read failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setFilesystemError(text);
+                }
+            };
+        }
+        if (self.drawButtonWidget(
+            help_rect,
+            "Read Help",
+            .{ .variant = .secondary, .disabled = contract_disabled or self.selectedContractService() == null },
+        )) {
+            self.readSelectedContractServiceHelp() catch |err| {
+                const msg = self.formatFilesystemOpError("Contract help read failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setFilesystemError(text);
+                }
+            };
+        }
+
+        y += row_h + layout.row_gap * 0.45;
+        const schema_rect = Rect.fromXYWH(rect.min[0] + pad, y, contract_button_w, row_h);
+        const template_rect = Rect.fromXYWH(schema_rect.max[0] + pad, y, contract_button_w, row_h);
+        if (self.drawButtonWidget(
+            schema_rect,
+            "Read Schema",
+            .{ .variant = .secondary, .disabled = contract_disabled or self.selectedContractService() == null },
+        )) {
+            self.readSelectedContractServiceSchema() catch |err| {
+                const msg = self.formatFilesystemOpError("Contract schema read failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setFilesystemError(text);
+                }
+            };
+        }
+        if (self.drawButtonWidget(
+            template_rect,
+            "Use Template",
+            .{ .variant = .secondary, .disabled = contract_disabled or self.selectedContractService() == null },
+        )) {
+            self.useSelectedContractServiceTemplate() catch |err| {
+                const msg = self.formatFilesystemOpError("Contract template load failed", err);
                 if (msg) |text| {
                     defer self.allocator.free(text);
                     self.setFilesystemError(text);

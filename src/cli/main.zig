@@ -2349,6 +2349,9 @@ fn executeNodeServiceGet(allocator: std.mem.Allocator, options: args.Options, cm
 }
 
 const NodeServiceRuntimeAction = enum {
+    help,
+    schema,
+    template,
     status,
     metrics,
     health,
@@ -2362,6 +2365,9 @@ const NodeServiceRuntimeAction = enum {
 };
 
 fn parseNodeServiceRuntimeAction(raw: []const u8) ?NodeServiceRuntimeAction {
+    if (std.mem.eql(u8, raw, "help")) return .help;
+    if (std.mem.eql(u8, raw, "schema")) return .schema;
+    if (std.mem.eql(u8, raw, "template")) return .template;
     if (std.mem.eql(u8, raw, "status")) return .status;
     if (std.mem.eql(u8, raw, "metrics")) return .metrics;
     if (std.mem.eql(u8, raw, "health")) return .health;
@@ -2472,6 +2478,50 @@ fn readNodeServiceRuntimeFile(
     return fsrpcReadPathText(allocator, client, path);
 }
 
+fn readNodeServiceRuntimeFileFallback(
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+    runtime_root: []const u8,
+    primary_name: []const u8,
+    fallback_name: []const u8,
+) ![]u8 {
+    return readNodeServiceRuntimeFile(allocator, client, runtime_root, primary_name) catch {
+        return readNodeServiceRuntimeFile(allocator, client, runtime_root, fallback_name);
+    };
+}
+
+fn resolveNodeServiceRuntimeInvokePayload(
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+    runtime_root: []const u8,
+    payload_arg: ?[]const u8,
+) ![]u8 {
+    if (payload_arg) |value| {
+        const trimmed = std.mem.trim(u8, value, " \t\r\n");
+        try validateJsonObjectPayload(allocator, trimmed, "invoke");
+        return allocator.dupe(u8, trimmed);
+    }
+
+    const template_text = readNodeServiceRuntimeFileFallback(
+        allocator,
+        client,
+        runtime_root,
+        "TEMPLATE.json",
+        "template.json",
+    ) catch {
+        return allocator.dupe(u8, "{}");
+    };
+    defer allocator.free(template_text);
+    const trimmed = std.mem.trim(u8, template_text, " \t\r\n");
+    if (trimmed.len == 0) return allocator.dupe(u8, "{}");
+
+    validateJsonObjectPayload(allocator, trimmed, "invoke template") catch {
+        logger.warn("service invoke template is not a JSON object; falling back to {{}}", .{});
+        return allocator.dupe(u8, "{}");
+    };
+    return allocator.dupe(u8, trimmed);
+}
+
 fn writeNodeServiceRuntimeControl(
     allocator: std.mem.Allocator,
     client: *WebSocketClient,
@@ -2495,7 +2545,7 @@ fn executeNodeServiceRuntime(allocator: std.mem.Allocator, options: args.Options
     const node_id = cmd.args[0];
     const service_id = cmd.args[1];
     const action = parseNodeServiceRuntimeAction(cmd.args[2]) orelse {
-        logger.err("node service-runtime action must be status|metrics|health|config-get|config-set|invoke|enable|disable|restart|reset", .{});
+        logger.err("node service-runtime action must be help|schema|template|status|metrics|health|config-get|config-set|invoke|enable|disable|restart|reset", .{});
         return error.InvalidArguments;
     };
     const payload_arg = if (cmd.args.len > 3) cmd.args[3] else null;
@@ -2518,8 +2568,6 @@ fn executeNodeServiceRuntime(allocator: std.mem.Allocator, options: args.Options
 
     if (action == .config_set) {
         try validateJsonObjectPayload(allocator, payload_arg.?, "config-set");
-    } else if (action == .invoke and payload_arg != null) {
-        try validateJsonObjectPayload(allocator, payload_arg.?, "invoke");
     }
 
     const stdout = std.fs.File.stdout().deprecatedWriter();
@@ -2549,6 +2597,33 @@ fn executeNodeServiceRuntime(allocator: std.mem.Allocator, options: args.Options
     try fsrpcBootstrap(allocator, client);
 
     switch (action) {
+        .help => {
+            const text = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "README.md");
+            defer allocator.free(text);
+            try stdout.print("{s}\n", .{text});
+        },
+        .schema => {
+            const text = try readNodeServiceRuntimeFileFallback(
+                allocator,
+                client,
+                runtime_root,
+                "SCHEMA.json",
+                "schema.json",
+            );
+            defer allocator.free(text);
+            try stdout.print("{s}\n", .{text});
+        },
+        .template => {
+            const text = try readNodeServiceRuntimeFileFallback(
+                allocator,
+                client,
+                runtime_root,
+                "TEMPLATE.json",
+                "template.json",
+            );
+            defer allocator.free(text);
+            try stdout.print("{s}\n", .{text});
+        },
         .status => {
             const text = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "status.json");
             defer allocator.free(text);
@@ -2578,7 +2653,13 @@ fn executeNodeServiceRuntime(allocator: std.mem.Allocator, options: args.Options
             try stdout.print("updated config for {s}/{s}\n{s}\n", .{ node_id, service_id, health });
         },
         .invoke => {
-            const invoke_payload = if (payload_arg) |value| std.mem.trim(u8, value, " \t\r\n") else "{}";
+            const invoke_payload = try resolveNodeServiceRuntimeInvokePayload(
+                allocator,
+                client,
+                runtime_root,
+                payload_arg,
+            );
+            defer allocator.free(invoke_payload);
             try writeNodeServiceRuntimeControl(allocator, client, runtime_root, "invoke.json", invoke_payload);
             const status = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "status.json");
             defer allocator.free(status);

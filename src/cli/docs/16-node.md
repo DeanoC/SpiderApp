@@ -96,12 +96,15 @@ ziggystarspider node service-upsert node-1 secret-abc --label site=hq --label ti
 Interact with a service runtime namespace via control files resolved from the node service catalog.
 
 **Actions:**
+- `help` - Read `README.md`
+- `schema` - Read `SCHEMA.json` (falls back to `schema.json`)
+- `template` - Read `TEMPLATE.json` (falls back to `template.json`)
 - `status` - Read `status.json`
 - `metrics` - Read `metrics.json`
 - `health` - Read `health.json`
 - `config-get` - Read `config.json`
 - `config-set <json-object>` - Write `config.json`
-- `invoke [json-object]` - Write `control/invoke.json` (`{}` if omitted), then read status/result/error
+- `invoke [json-object]` - Write `control/invoke.json` (uses `TEMPLATE.json` when omitted, otherwise `{}`), then read status/result/error
 - `enable` - Write `control/enable`
 - `disable` - Write `control/disable`
 - `restart` - Write `control/restart`
@@ -110,6 +113,7 @@ Interact with a service runtime namespace via control files resolved from the no
 **Examples:**
 ```bash
 ziggystarspider node service-runtime node-2 camera-main health
+ziggystarspider node service-runtime node-2 camera-main template
 ziggystarspider node service-runtime node-2 camera-main config-set '{"supervision":{"cooldown_ms":5000}}'
 ziggystarspider node service-runtime node-2 camera-main invoke '{"op":"capture"}'
 ziggystarspider node service-runtime node-2 camera-main restart
