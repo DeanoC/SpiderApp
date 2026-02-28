@@ -9058,6 +9058,17 @@ const App = struct {
         const max_scroll = @max(0.0, total_content_height - output_rect.height());
         if (self.debug_scroll_y < 0.0) self.debug_scroll_y = 0.0;
         if (self.debug_scroll_y > max_scroll) self.debug_scroll_y = max_scroll;
+        const sb_width: f32 = 8.0 * self.ui_scale;
+        const sb_track_rect = if (max_scroll > 0)
+            Rect.fromXYWH(
+                output_rect.max[0] - sb_width - inner * 0.35,
+                output_rect.min[1] + inner * 0.35,
+                sb_width,
+                output_rect.height() - inner * 0.7,
+            )
+        else
+            Rect.fromXYWH(0, 0, 0, 0);
+        const clicked_scrollbar_track = self.mouse_clicked and max_scroll > 0 and sb_track_rect.contains(.{ self.mouse_x, self.mouse_y });
 
         self.ui_commands.pushClip(.{ .min = output_rect.min, .max = output_rect.max });
         defer self.ui_commands.popClip();
@@ -9161,7 +9172,7 @@ const App = struct {
                 }
             }
 
-            const clicked_entry = self.mouse_clicked and entry_rect.contains(.{ self.mouse_x, self.mouse_y });
+            const clicked_entry = self.mouse_clicked and !clicked_scrollbar_track and entry_rect.contains(.{ self.mouse_x, self.mouse_y });
             const clicked_copy = have_copy_rect and copy_btn_rect.contains(.{ self.mouse_x, self.mouse_y });
             if (clicked_entry and !clicked_copy and !clicked_fold_marker) {
                 if (self.debug_selected_index == null or self.debug_selected_index.? != idx) {
@@ -9174,14 +9185,6 @@ const App = struct {
         }
 
         if (max_scroll > 0) {
-            const sb_width: f32 = 8.0 * self.ui_scale;
-            const sb_track_rect = Rect.fromXYWH(
-                output_rect.max[0] - sb_width - inner * 0.35,
-                output_rect.min[1] + inner * 0.35,
-                sb_width,
-                output_rect.height() - inner * 0.7,
-            );
-
             const thumb_height = @max(20.0, sb_track_rect.height() * (output_rect.height() / total_content_height));
             const thumb_y_ratio = self.debug_scroll_y / max_scroll;
             const thumb_y = sb_track_rect.min[1] + thumb_y_ratio * (sb_track_rect.height() - thumb_height);
