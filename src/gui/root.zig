@@ -8353,6 +8353,7 @@ const App = struct {
                 .fill_color = zcolors.withAlpha(zcolors.rgba(92, 173, 255, 255), 0.28),
                 .background_color = zcolors.withAlpha(self.theme.colors.surface, 0.96),
                 .border_color = self.theme.colors.border,
+                .max_columns = 96,
             },
         );
         widgets.sparkline.draw(
@@ -8364,6 +8365,7 @@ const App = struct {
                 .fill_color = zcolors.withAlpha(zcolors.rgba(255, 170, 72, 255), 0.28),
                 .background_color = zcolors.withAlpha(self.theme.colors.surface, 0.96),
                 .border_color = self.theme.colors.border,
+                .max_columns = 96,
             },
         );
         widgets.sparkline.draw(
@@ -8375,6 +8377,7 @@ const App = struct {
                 .fill_color = zcolors.withAlpha(zcolors.rgba(175, 122, 255, 255), 0.28),
                 .background_color = zcolors.withAlpha(self.theme.colors.surface, 0.96),
                 .border_color = self.theme.colors.border,
+                .max_columns = 96,
             },
         );
         widgets.sparkline.draw(
@@ -8386,6 +8389,7 @@ const App = struct {
                 .fill_color = zcolors.withAlpha(zcolors.rgba(98, 205, 128, 255), 0.28),
                 .background_color = zcolors.withAlpha(self.theme.colors.surface, 0.96),
                 .border_color = self.theme.colors.border,
+                .max_columns = 96,
             },
         );
         y += @as(f32, @floatFromInt(spark_rows)) * spark_row_h + layout.row_gap * 0.2;
