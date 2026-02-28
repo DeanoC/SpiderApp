@@ -642,6 +642,12 @@ const App = struct {
     debug_panel_id: ?workspace.PanelId = null,
     debug_events: std.ArrayList(DebugEventEntry) = .empty,
     debug_next_event_id: u64 = 1,
+    debug_events_revision: u64 = 1,
+    debug_filter_cache_valid: bool = false,
+    debug_filter_cache_query_hash: u64 = 0,
+    debug_filter_cache_query_len: usize = 0,
+    debug_filter_cache_events_revision: u64 = 0,
+    debug_filtered_indices: std.ArrayList(u32) = .empty,
     debug_folded_blocks: std.AutoHashMap(DebugFoldKey, void),
     debug_fold_revision: u64 = 1,
     debug_scroll_y: f32 = 0.0,
@@ -998,6 +1004,7 @@ const App = struct {
         self.clearDebugStreamSnapshot();
         self.clearDebugEvents();
         self.debug_events.deinit(self.allocator);
+        self.debug_filtered_indices.deinit(self.allocator);
         self.debug_folded_blocks.deinit();
         self.debug_event_fingerprint_set.deinit(self.allocator);
         self.invalidateWorkspaceSnapshot();
@@ -8596,7 +8603,8 @@ const App = struct {
         {
             self.settings_panel.focused_field = .none;
         }
-        const filtered_events = self.countDebugEventsMatchingFilter(search_trimmed);
+        const filtered_indices = self.ensureDebugFilteredIndices(search_trimmed);
+        const filtered_events = filtered_indices.len;
         var filter_status_buf: [64]u8 = undefined;
         const filter_status = std.fmt.bufPrint(
             &filter_status_buf,
@@ -8895,7 +8903,19 @@ const App = struct {
         const selected_visible = blk: {
             const selected_idx = self.debug_selected_index orelse break :blk false;
             if (selected_idx >= self.debug_events.items.len) break :blk false;
-            break :blk self.debugEventMatchesFilter(&self.debug_events.items[selected_idx], search_trimmed);
+            var lo: usize = 0;
+            var hi: usize = filtered_indices.len;
+            while (lo < hi) {
+                const mid = lo + (hi - lo) / 2;
+                const value = @as(usize, @intCast(filtered_indices[mid]));
+                if (value == selected_idx) break :blk true;
+                if (value < selected_idx) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            break :blk false;
         };
         if (selected_visible) {
             const copy_btn_w: f32 = @max(84.0 * self.ui_scale, layout.line_height * 4.1);
@@ -8910,9 +8930,15 @@ const App = struct {
         }
 
         var total_content_height: f32 = inner * 2.0;
-        for (self.debug_events.items) |*entry| {
-            if (!self.debugEventMatchesFilter(entry, search_trimmed)) continue;
-            const payload_visible_rows = self.countVisibleDebugPayloadRows(output_rect.min[0], output_rect.max[0] - scrollbar_reserved, entry);
+        for (filtered_indices) |raw_idx| {
+            const idx = @as(usize, @intCast(raw_idx));
+            if (idx >= self.debug_events.items.len) continue;
+            const entry = &self.debug_events.items[idx];
+            const is_selected = self.debug_selected_index != null and self.debug_selected_index.? == idx;
+            const payload_visible_rows = if (is_selected)
+                self.countVisibleDebugPayloadRows(output_rect.min[0], output_rect.max[0] - scrollbar_reserved, entry)
+            else
+                0;
             const visible_lines = 1 + payload_visible_rows;
             total_content_height += line_height * @as(f32, @floatFromInt(visible_lines)) + event_gap;
         }
@@ -8924,11 +8950,16 @@ const App = struct {
         defer self.ui_commands.popClip();
 
         var cur_y = output_rect.min[1] + inner - self.debug_scroll_y;
-        for (self.debug_events.items, 0..) |*entry, idx| {
-            if (!self.debugEventMatchesFilter(entry, search_trimmed)) continue;
+        for (filtered_indices) |raw_idx| {
+            const idx = @as(usize, @intCast(raw_idx));
+            if (idx >= self.debug_events.items.len) continue;
+            const entry = &self.debug_events.items[idx];
             const is_selected = self.debug_selected_index != null and self.debug_selected_index.? == idx;
             if (is_selected) self.ensureDebugPayloadLines(entry);
-            const payload_visible_rows = self.countVisibleDebugPayloadRows(output_rect.min[0], output_rect.max[0] - scrollbar_reserved, entry);
+            const payload_visible_rows = if (is_selected)
+                self.countVisibleDebugPayloadRows(output_rect.min[0], output_rect.max[0] - scrollbar_reserved, entry)
+            else
+                0;
             const visible_lines = 1 + payload_visible_rows;
             const entry_h = line_height * @as(f32, @floatFromInt(visible_lines)) + event_gap;
 
@@ -8946,73 +8977,75 @@ const App = struct {
 
             const content_max_x = output_rect.max[0] - scrollbar_reserved;
             self.drawDebugEventHeaderLine(output_rect.min[0] + inner + 2.0, cur_y, content_max_x, entry.*);
-            self.ensureDebugPayloadWrapRows(output_rect.min[0], content_max_x, entry);
-            self.ensureDebugVisiblePayloadLines(output_rect.min[0], content_max_x, entry);
-            const enable_syntax_color = entry.payload_json.len <= DEBUG_SYNTAX_COLOR_MAX_PAYLOAD_BYTES;
-            const space_w = self.measureText(" ");
-            const fold_marker_w_open = self.measureText("[-]");
-            const fold_marker_w_closed = self.measureText("[+]");
-
             var clicked_fold_marker = false;
-            const body_top_y = cur_y + line_height;
-            const min_row: usize = if (output_rect.min[1] <= body_top_y)
-                0
-            else
-                @as(usize, @intFromFloat((output_rect.min[1] - body_top_y) / line_height));
-            const max_row_exclusive: usize = if (output_rect.max[1] <= body_top_y)
-                0
-            else
-                @as(usize, @intFromFloat(((output_rect.max[1] - body_top_y) / line_height) + 1.0));
+            if (is_selected and payload_visible_rows > 0) {
+                self.ensureDebugPayloadWrapRows(output_rect.min[0], content_max_x, entry);
+                self.ensureDebugVisiblePayloadLines(output_rect.min[0], content_max_x, entry);
+                const enable_syntax_color = entry.payload_json.len <= DEBUG_SYNTAX_COLOR_MAX_PAYLOAD_BYTES;
+                const space_w = self.measureText(" ");
+                const fold_marker_w_open = self.measureText("[-]");
+                const fold_marker_w_closed = self.measureText("[+]");
 
-            var visible_idx = findFirstVisiblePayloadLine(entry, min_row);
-            while (visible_idx < entry.payload_visible_line_indices.items.len) : (visible_idx += 1) {
-                const payload_line_idx = @as(usize, @intCast(entry.payload_visible_line_indices.items[visible_idx]));
-                const row_start = @as(usize, @intCast(entry.payload_visible_line_row_starts.items[visible_idx]));
-                if (row_start >= max_row_exclusive) break;
+                const body_top_y = cur_y + line_height;
+                const min_row: usize = if (output_rect.min[1] <= body_top_y)
+                    0
+                else
+                    @as(usize, @intFromFloat((output_rect.min[1] - body_top_y) / line_height));
+                const max_row_exclusive: usize = if (output_rect.max[1] <= body_top_y)
+                    0
+                else
+                    @as(usize, @intFromFloat(((output_rect.max[1] - body_top_y) / line_height) + 1.0));
 
-                _ = payloadLineRowsFromCache(entry, payload_line_idx);
-                const line_y = body_top_y + @as(f32, @floatFromInt(row_start)) * line_height;
-                if (line_y > output_rect.max[1]) break;
+                var visible_idx = findFirstVisiblePayloadLine(entry, min_row);
+                while (visible_idx < entry.payload_visible_line_indices.items.len) : (visible_idx += 1) {
+                    const payload_line_idx = @as(usize, @intCast(entry.payload_visible_line_indices.items[visible_idx]));
+                    const row_start = @as(usize, @intCast(entry.payload_visible_line_row_starts.items[visible_idx]));
+                    if (row_start >= max_row_exclusive) break;
 
-                const meta = entry.payload_lines.items[payload_line_idx];
-                const can_fold = meta.opens_block and meta.matching_close_index != null and
-                    @as(usize, @intCast(meta.matching_close_index.?)) > payload_line_idx + 1;
-                const collapsed = can_fold and self.isDebugBlockCollapsed(entry.id, payload_line_idx);
+                    _ = payloadLineRowsFromCache(entry, payload_line_idx);
+                    const line_y = body_top_y + @as(f32, @floatFromInt(row_start)) * line_height;
+                    if (line_y > output_rect.max[1]) break;
 
-                const line = entry.payload_json[meta.start..meta.end];
-                const indent_width = @as(f32, @floatFromInt(meta.indent_spaces)) * space_w;
-                const line_x_base = output_rect.min[0] + inner + 2.0 + indent_width;
-                const content_start = @min(meta.indent_spaces, line.len);
-                const content = line[content_start..];
-                var text_x = line_x_base;
-                if (can_fold) {
-                    const marker = if (collapsed) "[+]" else "[-]";
-                    const marker_w = if (collapsed) fold_marker_w_closed else fold_marker_w_open;
-                    const marker_rect = Rect.fromXYWH(line_x_base, line_y, marker_w, line_height);
-                    const marker_hovered = marker_rect.contains(.{ self.mouse_x, self.mouse_y });
-                    if (self.mouse_clicked and marker_hovered) {
-                        self.toggleDebugBlockCollapsed(entry.id, payload_line_idx);
-                        clicked_fold_marker = true;
+                    const meta = entry.payload_lines.items[payload_line_idx];
+                    const can_fold = meta.opens_block and meta.matching_close_index != null and
+                        @as(usize, @intCast(meta.matching_close_index.?)) > payload_line_idx + 1;
+                    const collapsed = can_fold and self.isDebugBlockCollapsed(entry.id, payload_line_idx);
+
+                    const line = entry.payload_json[meta.start..meta.end];
+                    const indent_width = @as(f32, @floatFromInt(meta.indent_spaces)) * space_w;
+                    const line_x_base = output_rect.min[0] + inner + 2.0 + indent_width;
+                    const content_start = @min(meta.indent_spaces, line.len);
+                    const content = line[content_start..];
+                    var text_x = line_x_base;
+                    if (can_fold) {
+                        const marker = if (collapsed) "[+]" else "[-]";
+                        const marker_w = if (collapsed) fold_marker_w_closed else fold_marker_w_open;
+                        const marker_rect = Rect.fromXYWH(line_x_base, line_y, marker_w, line_height);
+                        const marker_hovered = marker_rect.contains(.{ self.mouse_x, self.mouse_y });
+                        if (self.mouse_clicked and marker_hovered) {
+                            self.toggleDebugBlockCollapsed(entry.id, payload_line_idx);
+                            clicked_fold_marker = true;
+                        }
+
+                        const marker_color = if (marker_hovered)
+                            zcolors.blend(self.theme.colors.primary, self.theme.colors.text_primary, 0.22)
+                        else
+                            self.theme.colors.primary;
+                        self.drawText(line_x_base, line_y, marker, marker_color);
+                        text_x = line_x_base + marker_w + space_w;
                     }
 
-                    const marker_color = if (marker_hovered)
-                        zcolors.blend(self.theme.colors.primary, self.theme.colors.text_primary, 0.22)
-                    else
-                        self.theme.colors.primary;
-                    self.drawText(line_x_base, line_y, marker, marker_color);
-                    text_x = line_x_base + marker_w + space_w;
-                }
-
-                if (enable_syntax_color and content.len <= DEBUG_SYNTAX_COLOR_MAX_LINE_BYTES) {
-                    _ = self.drawJsonLineColored(text_x, line_y, content_max_x, content);
-                } else {
-                    _ = self.drawTextWrapped(
-                        text_x,
-                        line_y,
-                        @max(1.0, content_max_x - text_x),
-                        content,
-                        self.theme.colors.text_primary,
-                    );
+                    if (enable_syntax_color and content.len <= DEBUG_SYNTAX_COLOR_MAX_LINE_BYTES) {
+                        _ = self.drawJsonLineColored(text_x, line_y, content_max_x, content);
+                    } else {
+                        _ = self.drawTextWrapped(
+                            text_x,
+                            line_y,
+                            @max(1.0, content_max_x - text_x),
+                            content,
+                            self.theme.colors.text_primary,
+                        );
+                    }
                 }
             }
 
@@ -13169,6 +13202,13 @@ const App = struct {
         self.node_service_diff_base_index = null;
         self.clearNodeServiceReloadDiagnostics();
         self.clearNodeServiceDiffPreview();
+        self.bumpDebugEventsRevision();
+    }
+
+    fn bumpDebugEventsRevision(self: *App) void {
+        self.debug_events_revision +%= 1;
+        if (self.debug_events_revision == 0) self.debug_events_revision = 1;
+        self.debug_filter_cache_valid = false;
     }
 
     fn clearDebugStreamSnapshot(self: *App) void {
@@ -13316,6 +13356,43 @@ const App = struct {
             .correlation_id = correlation_copy,
             .payload_json = payload_copy,
         });
+        self.bumpDebugEventsRevision();
+    }
+
+    fn ensureDebugFilteredIndices(self: *App, filter_text: []const u8) []const u32 {
+        const query_hash = std.hash.Wyhash.hash(0, filter_text);
+        if (self.debug_filter_cache_valid and
+            self.debug_filter_cache_query_hash == query_hash and
+            self.debug_filter_cache_query_len == filter_text.len and
+            self.debug_filter_cache_events_revision == self.debug_events_revision)
+        {
+            return self.debug_filtered_indices.items;
+        }
+
+        self.debug_filtered_indices.clearRetainingCapacity();
+        self.debug_filtered_indices.ensureTotalCapacity(self.allocator, self.debug_events.items.len) catch {
+            self.debug_filter_cache_valid = false;
+            return self.debug_filtered_indices.items;
+        };
+
+        if (filter_text.len == 0) {
+            for (self.debug_events.items, 0..) |_, idx| {
+                const value: u32 = @intCast(idx);
+                self.debug_filtered_indices.appendAssumeCapacity(value);
+            }
+        } else {
+            for (self.debug_events.items, 0..) |*entry, idx| {
+                if (!self.debugEventMatchesFilter(entry, filter_text)) continue;
+                const value: u32 = @intCast(idx);
+                self.debug_filtered_indices.appendAssumeCapacity(value);
+            }
+        }
+
+        self.debug_filter_cache_query_hash = query_hash;
+        self.debug_filter_cache_query_len = filter_text.len;
+        self.debug_filter_cache_events_revision = self.debug_events_revision;
+        self.debug_filter_cache_valid = true;
+        return self.debug_filtered_indices.items;
     }
 
     fn debugEventMatchesFilter(self: *App, entry: *const DebugEventEntry, filter_text: []const u8) bool {
