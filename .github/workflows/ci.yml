@@ -33,7 +33,7 @@ jobs:
       - name: Install GUI smoke dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb wine64
+          sudo apt-get install -y xvfb wine64 libx11-dev
 
       - name: Run GUI backend smoke matrix
         run: |
