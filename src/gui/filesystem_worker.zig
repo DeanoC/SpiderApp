@@ -5,6 +5,8 @@ const control_plane = @import("control_plane");
 const fsrpc_default_timeout_ms: u32 = 30_000;
 const fsrpc_clunk_timeout_ms: u32 = 1_000;
 const control_session_attach_timeout_ms: i64 = 20_000;
+const fsrpc_read_chunk_bytes: u32 = 128 * 1024;
+const fsrpc_read_max_total_bytes: usize = 8 * 1024 * 1024;
 
 pub const RequestKind = enum {
     list_dir,
@@ -647,12 +649,18 @@ pub const FilesystemWorker = struct {
         try self.ensureFsrpcOk(&response);
     }
 
-    fn readAllText(self: *FilesystemWorker, client: *ws_client_mod.WebSocketClient, fid: u32) ![]u8 {
+    fn readChunkText(
+        self: *FilesystemWorker,
+        client: *ws_client_mod.WebSocketClient,
+        fid: u32,
+        offset: u64,
+        count: u32,
+    ) ![]u8 {
         const tag = self.nextTag();
         const request_json = try std.fmt.allocPrint(
             self.allocator,
-            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_read\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"count\":1048576}}",
-            .{ tag, fid },
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_read\",\"tag\":{d},\"fid\":{d},\"offset\":{d},\"count\":{d}}}",
+            .{ tag, fid, offset, count },
         );
         defer self.allocator.free(request_json);
         var response = try self.sendAndAwaitFsrpc(client, request_json, tag, fsrpc_default_timeout_ms);
@@ -670,6 +678,28 @@ pub const FilesystemWorker = struct {
         errdefer self.allocator.free(decoded);
         _ = std.base64.standard.Decoder.decode(decoded, data_b64.string) catch return error.InvalidResponse;
         return decoded;
+    }
+
+    fn readAllText(self: *FilesystemWorker, client: *ws_client_mod.WebSocketClient, fid: u32) ![]u8 {
+        var out = std.ArrayListUnmanaged(u8){};
+        errdefer out.deinit(self.allocator);
+
+        var offset: u64 = 0;
+        while (true) {
+            const chunk = try self.readChunkText(client, fid, offset, fsrpc_read_chunk_bytes);
+            defer self.allocator.free(chunk);
+
+            if (chunk.len == 0) break;
+            if (out.items.len + chunk.len > fsrpc_read_max_total_bytes) {
+                return error.ResponseTooLarge;
+            }
+
+            try out.appendSlice(self.allocator, chunk);
+            offset += @as(u64, @intCast(chunk.len));
+            if (chunk.len < @as(usize, fsrpc_read_chunk_bytes)) break;
+        }
+
+        return out.toOwnedSlice(self.allocator);
     }
 
     fn fidIsDir(self: *FilesystemWorker, client: *ws_client_mod.WebSocketClient, fid: u32) !bool {

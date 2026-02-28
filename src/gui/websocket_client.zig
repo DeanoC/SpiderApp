@@ -2,6 +2,9 @@ const std = @import("std");
 const ws = @import("websocket");
 const protocol_messages = @import("protocol_messages.zig");
 
+const ws_client_max_message_bytes: usize = 16 * 1024 * 1024;
+const ws_client_read_buffer_bytes: usize = 16 * 1024;
+
 const MessageQueue = struct {
     const capacity: usize = 4096;
 
@@ -194,6 +197,8 @@ pub const WebSocketClient = struct {
             .host = parsed.host,
             .port = parsed.port,
             .tls = parsed.tls,
+            .max_size = ws_client_max_message_bytes,
+            .buffer_size = ws_client_read_buffer_bytes,
         });
         var client_owned_locally = true;
         errdefer if (client_owned_locally) client.deinit();
