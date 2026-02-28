@@ -39,3 +39,12 @@ jobs:
         run: |
           chmod +x scripts/smoke-gui-terminal-backends.sh
           scripts/smoke-gui-terminal-backends.sh
+
+      - name: Run GUI perf gate
+        env:
+          PERF_GATE_DURATION_MS: 12000
+          PERF_GATE_MIN_FPS: 20
+          PERF_GATE_OPTIMIZE: Debug
+        run: |
+          chmod +x scripts/gui-perf-gate.sh
+          scripts/gui-perf-gate.sh

@@ -70,6 +70,7 @@ const DEBUG_SYNTAX_COLOR_MAX_LINE_BYTES: usize = 768;
 const PERF_SAMPLE_INTERVAL_MS: i64 = 1_000;
 const PERF_HISTORY_CAPACITY: usize = 600;
 const PERF_SPARKLINE_MAX_COLUMNS: usize = 24;
+const PERF_AUTOMATION_DEFAULT_DURATION_MS: i64 = 12_000;
 const TERMINAL_OUTPUT_MAX_BYTES: usize = 512 * 1024;
 const TERMINAL_READ_POLL_INTERVAL_MS: i64 = 120;
 const TERMINAL_READ_TIMEOUT_MS: u32 = 1;
@@ -662,6 +663,12 @@ const App = struct {
     perf_benchmark_last_start_timestamp_ms: i64 = 0,
     perf_benchmark_last_end_timestamp_ms: i64 = 0,
     perf_benchmark_last_label: ?[]u8 = null,
+    perf_automation_enabled: bool = false,
+    perf_automation_started: bool = false,
+    perf_automation_start_ms: i64 = 0,
+    perf_automation_duration_ms: i64 = PERF_AUTOMATION_DEFAULT_DURATION_MS,
+    perf_automation_min_fps: ?f32 = null,
+    perf_automation_report_path: ?[]u8 = null,
     debug_selected_node_service_cache_event_id: u64 = 0,
     debug_selected_node_service_cache_index: ?usize = null,
     debug_selected_node_service_cache_node_id: ?[]u8 = null,
@@ -918,6 +925,7 @@ const App = struct {
             .terminal_backend = initTerminalBackend(settings_panel.terminal_backend_kind),
             .manager = undefined,
         };
+        app.configurePerfAutomationFromEnv();
         app.node_service_watch_filter.appendSlice(allocator, "") catch {};
         app.node_service_watch_replay_limit.appendSlice(allocator, "25") catch {};
         app.debug_search_filter.appendSlice(allocator, "") catch {};
@@ -1027,6 +1035,7 @@ const App = struct {
         self.perf_benchmark_label_input.deinit(self.allocator);
         if (self.perf_benchmark_active_label) |value| self.allocator.free(value);
         if (self.perf_benchmark_last_label) |value| self.allocator.free(value);
+        if (self.perf_automation_report_path) |value| self.allocator.free(value);
         self.clearNodeServiceReloadDiagnostics();
         self.clearNodeServiceDiffPreview();
         self.perf_history.deinit(self.allocator);
@@ -1167,8 +1176,90 @@ const App = struct {
             }
             const frame_elapsed_ns = std.time.nanoTimestamp() - frame_started_ns;
             self.recordPerfSample(frame_elapsed_ns, ws_elapsed_ns, fs_elapsed_ns, debug_elapsed_ns, terminal_elapsed_ns, frame_draw_ns);
+            try self.pollPerfAutomation();
             self.frame_clock.endFrame();
         }
+    }
+
+    fn envTruthy(value: []const u8) bool {
+        if (value.len == 0) return false;
+        if (std.mem.eql(u8, value, "1")) return true;
+        if (std.ascii.eqlIgnoreCase(value, "true")) return true;
+        if (std.ascii.eqlIgnoreCase(value, "yes")) return true;
+        if (std.ascii.eqlIgnoreCase(value, "on")) return true;
+        return false;
+    }
+
+    fn configurePerfAutomationFromEnv(self: *App) void {
+        const enabled_raw = std.process.getEnvVarOwned(self.allocator, "ZSS_GUI_PERF_AUTOMATION") catch null;
+        defer if (enabled_raw) |value| self.allocator.free(value);
+        if (enabled_raw == null or !envTruthy(enabled_raw.?)) return;
+
+        self.perf_automation_enabled = true;
+
+        const duration_raw = std.process.getEnvVarOwned(self.allocator, "ZSS_GUI_PERF_AUTOMATION_DURATION_MS") catch null;
+        defer if (duration_raw) |value| self.allocator.free(value);
+        if (duration_raw) |value| {
+            const parsed = std.fmt.parseInt(i64, value, 10) catch self.perf_automation_duration_ms;
+            self.perf_automation_duration_ms = std.math.clamp(parsed, 1_000, 120_000);
+        }
+
+        const min_fps_raw = std.process.getEnvVarOwned(self.allocator, "ZSS_GUI_PERF_AUTOMATION_MIN_FPS") catch null;
+        defer if (min_fps_raw) |value| self.allocator.free(value);
+        if (min_fps_raw) |value| {
+            const parsed = std.fmt.parseFloat(f32, value) catch -1.0;
+            if (parsed > 0.0) self.perf_automation_min_fps = parsed;
+        }
+
+        const report_raw = std.process.getEnvVarOwned(self.allocator, "ZSS_GUI_PERF_AUTOMATION_REPORT") catch null;
+        defer if (report_raw) |value| self.allocator.free(value);
+        if (report_raw) |value| {
+            const trimmed = std.mem.trim(u8, value, " \t\r\n");
+            if (trimmed.len > 0) {
+                if (self.perf_automation_report_path) |existing| self.allocator.free(existing);
+                self.perf_automation_report_path = self.allocator.dupe(u8, trimmed) catch null;
+            }
+        }
+    }
+
+    fn pollPerfAutomation(self: *App) !void {
+        if (!self.perf_automation_enabled) return;
+
+        const now_ms = std.time.milliTimestamp();
+        if (!self.perf_automation_started) {
+            self.perf_benchmark_label_input.clearRetainingCapacity();
+            try self.perf_benchmark_label_input.appendSlice(self.allocator, "ci-auto");
+            self.startPerfBenchmark() catch {};
+            self.perf_automation_started = true;
+            self.perf_automation_start_ms = now_ms;
+            return;
+        }
+
+        if (now_ms - self.perf_automation_start_ms < self.perf_automation_duration_ms) return;
+
+        if (self.perf_benchmark_active) self.stopPerfBenchmark() catch {};
+
+        const report_opt = try self.buildBenchmarkPerfReportText();
+        defer if (report_opt) |value| self.allocator.free(value);
+        if (report_opt) |report| {
+            if (self.perf_automation_report_path) |path| {
+                std.fs.cwd().writeFile(.{ .sub_path = path, .data = report }) catch |err| {
+                    std.log.warn("perf automation report write failed ({s}): {s}", .{ path, @errorName(err) });
+                };
+            }
+        }
+
+        if (self.perf_automation_min_fps) |min_fps| {
+            if (self.perf_last_fps < min_fps) {
+                std.log.err(
+                    "GUI perf automation gate failed: fps={d:.2} min={d:.2}",
+                    .{ self.perf_last_fps, min_fps },
+                );
+                return error.PerfGateFailed;
+            }
+        }
+
+        self.running = false;
     }
 
     fn bindMainWindowManager(self: *App) void {
