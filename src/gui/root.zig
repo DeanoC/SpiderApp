@@ -382,6 +382,10 @@ const DebugEventEntry = struct {
     correlation_id: ?[]u8 = null,
     payload_json: []u8,
     payload_lines: std.ArrayList(DebugPayloadLine) = .empty,
+    cached_visible_rows: usize = 0,
+    cached_visible_rows_wrap_width: f32 = -1.0,
+    cached_visible_rows_fold_revision: u64 = 0,
+    cached_visible_rows_valid: bool = false,
 
     fn deinit(self: *DebugEventEntry, allocator: std.mem.Allocator) void {
         allocator.free(self.category);
@@ -543,6 +547,7 @@ const App = struct {
     debug_events: std.ArrayList(DebugEventEntry) = .empty,
     debug_next_event_id: u64 = 1,
     debug_folded_blocks: std.AutoHashMap(DebugFoldKey, void),
+    debug_fold_revision: u64 = 1,
     debug_scroll_y: f32 = 0.0,
     debug_selected_index: ?usize = null,
     debug_output_rect: Rect = Rect.fromXYWH(0, 0, 0, 0),
@@ -595,6 +600,7 @@ const App = struct {
     theme: *const zui.Theme,
     ui_scale: f32 = 1.0,
     metrics_context: ui_draw_context.DrawContext,
+    ascii_glyph_width_cache: [128]f32 = [_]f32{-1.0} ** 128,
     config: config_mod.Config,
     client_context: client_state.ClientContext,
     agent_registry: client_agents.AgentRegistry,
@@ -919,7 +925,12 @@ const App = struct {
                 // Get DPI scale for window-specific rendering
                 const dpi_scale_raw: f32 = c.SDL_GetWindowDisplayScale(window.window);
                 const dpi_scale: f32 = if (dpi_scale_raw > 0.0) dpi_scale_raw else 1.0;
-                self.ui_scale = dpi_scale;
+                if (@abs(self.ui_scale - dpi_scale) > 0.001) {
+                    self.ui_scale = dpi_scale;
+                    self.invalidateGlyphWidthCache();
+                } else {
+                    self.ui_scale = dpi_scale;
+                }
                 zui.ui.theme.applyTypography(dpi_scale);
 
                 if (!manager_healthy) {
@@ -4161,6 +4172,15 @@ const App = struct {
         };
         zui.ui.theme.setMode(ui_mode);
         self.theme = zui.theme.current();
+        self.invalidateGlyphWidthCache();
+    }
+
+    fn invalidateGlyphWidthCache(self: *App) void {
+        for (&self.ascii_glyph_width_cache) |*value| {
+            value.* = -1.0;
+        }
+        self.debug_fold_revision +%= 1;
+        if (self.debug_fold_revision == 0) self.debug_fold_revision = 1;
     }
 
     fn drawFrame(self: *App, ui_window: *UiWindow) void {
@@ -8189,9 +8209,13 @@ const App = struct {
         const key = makeDebugFoldKey(event_id, line_index);
         if (self.debug_folded_blocks.contains(key)) {
             _ = self.debug_folded_blocks.remove(key);
+            self.debug_fold_revision +%= 1;
+            if (self.debug_fold_revision == 0) self.debug_fold_revision = 1;
             return;
         }
         self.debug_folded_blocks.put(key, {}) catch {};
+        self.debug_fold_revision +%= 1;
+        if (self.debug_fold_revision == 0) self.debug_fold_revision = 1;
     }
 
     fn pruneDebugFoldStateForEvent(self: *App, event_id: u64) void {
@@ -8207,16 +8231,29 @@ const App = struct {
         for (to_remove.items) |key| {
             _ = self.debug_folded_blocks.remove(key);
         }
+        if (to_remove.items.len > 0) {
+            self.debug_fold_revision +%= 1;
+            if (self.debug_fold_revision == 0) self.debug_fold_revision = 1;
+        }
     }
 
     fn ensureDebugPayloadLines(self: *App, entry: *DebugEventEntry) void {
         if (entry.payload_lines.items.len > 0) return;
         if (entry.payload_json.len == 0) return;
         entry.payload_lines = self.buildDebugPayloadLines(entry.payload_json) catch .empty;
+        entry.cached_visible_rows_valid = false;
     }
 
-    fn countVisibleDebugPayloadRows(self: *App, output_min_x: f32, content_max_x: f32, entry: *const DebugEventEntry) usize {
+    fn countVisibleDebugPayloadRows(self: *App, output_min_x: f32, content_max_x: f32, entry: *DebugEventEntry) usize {
         if (entry.payload_lines.items.len == 0) return 0;
+        const wrap_width = @max(1.0, content_max_x - output_min_x);
+        if (entry.cached_visible_rows_valid and
+            @abs(entry.cached_visible_rows_wrap_width - wrap_width) < 0.5 and
+            entry.cached_visible_rows_fold_revision == self.debug_fold_revision)
+        {
+            return entry.cached_visible_rows;
+        }
+
         const fold_marker_w = self.measureText("[-]") + self.measureText(" ");
         var rows: usize = 0;
         var line_index: usize = 0;
@@ -8242,6 +8279,10 @@ const App = struct {
                 line_index += 1;
             }
         }
+        entry.cached_visible_rows = rows;
+        entry.cached_visible_rows_wrap_width = wrap_width;
+        entry.cached_visible_rows_fold_revision = self.debug_fold_revision;
+        entry.cached_visible_rows_valid = true;
         return rows;
     }
 
@@ -8339,6 +8380,20 @@ const App = struct {
         rows.* += 1;
     }
 
+    fn measureGlyphWidth(self: *App, glyph: []const u8) f32 {
+        if (glyph.len == 1) {
+            const idx = glyph[0];
+            if (idx < self.ascii_glyph_width_cache.len) {
+                const cached = self.ascii_glyph_width_cache[idx];
+                if (cached >= 0.0) return cached;
+                const measured = self.measureText(glyph);
+                self.ascii_glyph_width_cache[idx] = measured;
+                return measured;
+            }
+        }
+        return self.measureText(glyph);
+    }
+
     fn maxFittingPrefix(self: *App, text: []const u8, max_w: f32) usize {
         if (text.len == 0 or max_w <= 0.0) return 0;
         var width: f32 = 0.0;
@@ -8347,7 +8402,7 @@ const App = struct {
         while (idx < text.len) {
             const next = nextUtf8Boundary(text, idx);
             if (next <= idx) break;
-            const glyph_w = self.measureText(text[idx..next]);
+            const glyph_w = self.measureGlyphWidth(text[idx..next]);
             if (width + glyph_w > max_w) break;
             width += glyph_w;
             best_end = next;
@@ -11821,6 +11876,8 @@ const App = struct {
         }
         self.debug_events.clearRetainingCapacity();
         self.debug_folded_blocks.clearRetainingCapacity();
+        self.debug_fold_revision +%= 1;
+        if (self.debug_fold_revision == 0) self.debug_fold_revision = 1;
         self.debug_next_event_id = 1;
         self.node_service_diff_base_index = null;
         self.clearNodeServiceReloadDiagnostics();
@@ -12366,11 +12423,13 @@ const App = struct {
         var cursor = start;
         var last_fit = start;
         var last_space_end: ?usize = null;
+        var width: f32 = 0.0;
         while (cursor < line.len) {
             const next = nextUtf8Boundary(line, cursor);
             if (next <= cursor) break;
-            const width = self.measureText(line[start..next]);
-            if (width <= max_width or last_fit == start) {
+            const glyph_w = self.measureGlyphWidth(line[cursor..next]);
+            if (width + glyph_w <= max_width or last_fit == start) {
+                width += glyph_w;
                 last_fit = next;
                 if (line[cursor] == ' ' or line[cursor] == '\t') {
                     last_space_end = next;
