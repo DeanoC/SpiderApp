@@ -508,6 +508,21 @@ const PerfSample = struct {
     debug_ms: f32,
     terminal_ms: f32,
     draw_ms: f32,
+    panel_chat_ms: f32,
+    panel_settings_ms: f32,
+    panel_debug_ms: f32,
+    panel_projects_ms: f32,
+    panel_filesystem_ms: f32,
+    panel_terminal_ms: f32,
+    panel_other_ms: f32,
+    cmd_total_per_frame: f32,
+    cmd_text_per_frame: f32,
+    cmd_shape_per_frame: f32,
+    cmd_line_per_frame: f32,
+    cmd_image_per_frame: f32,
+    cmd_clip_per_frame: f32,
+    text_bytes_per_frame: f32,
+    text_command_share_pct: f32,
 };
 
 fn perfSampleFrameMsAt(ctx: *const anyopaque, idx: usize) f32 {
@@ -529,6 +544,26 @@ fn perfSampleFsMsAt(ctx: *const anyopaque, idx: usize) f32 {
     const samples = (@as(*const []const PerfSample, @ptrCast(@alignCast(ctx)))).*;
     return samples[idx].fs_request_ms;
 }
+
+const PanelDrawFrameNs = struct {
+    chat: i128 = 0,
+    settings: i128 = 0,
+    debug: i128 = 0,
+    projects: i128 = 0,
+    filesystem: i128 = 0,
+    terminal: i128 = 0,
+    other: i128 = 0,
+};
+
+const RenderCommandFrameStats = struct {
+    total: u64 = 0,
+    text: u64 = 0,
+    shape: u64 = 0,
+    line: u64 = 0,
+    image: u64 = 0,
+    clip: u64 = 0,
+    text_bytes: u64 = 0,
+};
 
 const SelectedNodeServiceEventInfo = struct {
     index: ?usize = null,
@@ -701,6 +736,8 @@ const App = struct {
     next_fsrpc_tag: u32 = 1,
     next_fsrpc_fid: u32 = 2,
     debug_frame_counter: u64 = 0,
+    perf_frame_panel_ns: PanelDrawFrameNs = .{},
+    perf_frame_cmd_stats: RenderCommandFrameStats = .{},
     perf_sample_started_ms: i64 = 0,
     perf_sample_frames: u32 = 0,
     perf_sample_total_frame_ns: i128 = 0,
@@ -709,6 +746,20 @@ const App = struct {
     perf_sample_total_debug_ns: i128 = 0,
     perf_sample_total_terminal_ns: i128 = 0,
     perf_sample_total_draw_ns: i128 = 0,
+    perf_sample_total_panel_chat_ns: i128 = 0,
+    perf_sample_total_panel_settings_ns: i128 = 0,
+    perf_sample_total_panel_debug_ns: i128 = 0,
+    perf_sample_total_panel_projects_ns: i128 = 0,
+    perf_sample_total_panel_filesystem_ns: i128 = 0,
+    perf_sample_total_panel_terminal_ns: i128 = 0,
+    perf_sample_total_panel_other_ns: i128 = 0,
+    perf_sample_total_cmd_total: u64 = 0,
+    perf_sample_total_cmd_text: u64 = 0,
+    perf_sample_total_cmd_shape: u64 = 0,
+    perf_sample_total_cmd_line: u64 = 0,
+    perf_sample_total_cmd_image: u64 = 0,
+    perf_sample_total_cmd_clip: u64 = 0,
+    perf_sample_total_text_bytes: u64 = 0,
     perf_last_fps: f32 = 0,
     perf_last_frame_ms: f32 = 0,
     perf_last_ws_ms: f32 = 0,
@@ -718,6 +769,21 @@ const App = struct {
     perf_last_debug_ms: f32 = 0,
     perf_last_terminal_ms: f32 = 0,
     perf_last_draw_ms: f32 = 0,
+    perf_last_panel_chat_ms: f32 = 0,
+    perf_last_panel_settings_ms: f32 = 0,
+    perf_last_panel_debug_ms: f32 = 0,
+    perf_last_panel_projects_ms: f32 = 0,
+    perf_last_panel_filesystem_ms: f32 = 0,
+    perf_last_panel_terminal_ms: f32 = 0,
+    perf_last_panel_other_ms: f32 = 0,
+    perf_last_cmd_total_per_frame: f32 = 0,
+    perf_last_cmd_text_per_frame: f32 = 0,
+    perf_last_cmd_shape_per_frame: f32 = 0,
+    perf_last_cmd_line_per_frame: f32 = 0,
+    perf_last_cmd_image_per_frame: f32 = 0,
+    perf_last_cmd_clip_per_frame: f32 = 0,
+    perf_last_text_bytes_per_frame: f32 = 0,
+    perf_last_text_command_share_pct: f32 = 0,
     perf_history: std.ArrayListUnmanaged(PerfSample) = .{},
     frame_clock: zapp.frame_clock.FrameClock,
     workspace_recovery_blocked_until: u64 = 0,
@@ -991,6 +1057,8 @@ const App = struct {
         while (self.running) {
             const frame_started_ns = std.time.nanoTimestamp();
             var frame_draw_ns: i128 = 0;
+            self.perf_frame_panel_ns = .{};
+            self.perf_frame_cmd_stats = .{};
             self.bindMainWindowManager();
             self.debug_frame_counter += 1;
             _ = self.frame_clock.beginFrame();
@@ -2832,11 +2900,26 @@ const App = struct {
         self.perf_sample_total_debug_ns += debug_ns;
         self.perf_sample_total_terminal_ns += terminal_ns;
         self.perf_sample_total_draw_ns += draw_ns;
+        self.perf_sample_total_panel_chat_ns += self.perf_frame_panel_ns.chat;
+        self.perf_sample_total_panel_settings_ns += self.perf_frame_panel_ns.settings;
+        self.perf_sample_total_panel_debug_ns += self.perf_frame_panel_ns.debug;
+        self.perf_sample_total_panel_projects_ns += self.perf_frame_panel_ns.projects;
+        self.perf_sample_total_panel_filesystem_ns += self.perf_frame_panel_ns.filesystem;
+        self.perf_sample_total_panel_terminal_ns += self.perf_frame_panel_ns.terminal;
+        self.perf_sample_total_panel_other_ns += self.perf_frame_panel_ns.other;
+        self.perf_sample_total_cmd_total += self.perf_frame_cmd_stats.total;
+        self.perf_sample_total_cmd_text += self.perf_frame_cmd_stats.text;
+        self.perf_sample_total_cmd_shape += self.perf_frame_cmd_stats.shape;
+        self.perf_sample_total_cmd_line += self.perf_frame_cmd_stats.line;
+        self.perf_sample_total_cmd_image += self.perf_frame_cmd_stats.image;
+        self.perf_sample_total_cmd_clip += self.perf_frame_cmd_stats.clip;
+        self.perf_sample_total_text_bytes += self.perf_frame_cmd_stats.text_bytes;
 
         const elapsed_ms = now_ms - self.perf_sample_started_ms;
         if (elapsed_ms < PERF_SAMPLE_INTERVAL_MS) return;
 
-        const frames = @as(f32, @floatFromInt(@max(self.perf_sample_frames, 1)));
+        const frames_u32 = @max(self.perf_sample_frames, 1);
+        const frames = @as(f32, @floatFromInt(frames_u32));
         const elapsed_ms_f = @as(f32, @floatFromInt(@max(elapsed_ms, 1)));
 
         self.perf_last_fps = (frames * 1000.0) / elapsed_ms_f;
@@ -2854,6 +2937,24 @@ const App = struct {
         self.perf_last_debug_ms = nsToMs(self.perf_sample_total_debug_ns) / frames;
         self.perf_last_terminal_ms = nsToMs(self.perf_sample_total_terminal_ns) / frames;
         self.perf_last_draw_ms = nsToMs(self.perf_sample_total_draw_ns) / frames;
+        self.perf_last_panel_chat_ms = nsToMs(self.perf_sample_total_panel_chat_ns) / frames;
+        self.perf_last_panel_settings_ms = nsToMs(self.perf_sample_total_panel_settings_ns) / frames;
+        self.perf_last_panel_debug_ms = nsToMs(self.perf_sample_total_panel_debug_ns) / frames;
+        self.perf_last_panel_projects_ms = nsToMs(self.perf_sample_total_panel_projects_ns) / frames;
+        self.perf_last_panel_filesystem_ms = nsToMs(self.perf_sample_total_panel_filesystem_ns) / frames;
+        self.perf_last_panel_terminal_ms = nsToMs(self.perf_sample_total_panel_terminal_ns) / frames;
+        self.perf_last_panel_other_ms = nsToMs(self.perf_sample_total_panel_other_ns) / frames;
+        self.perf_last_cmd_total_per_frame = @as(f32, @floatFromInt(self.perf_sample_total_cmd_total)) / frames;
+        self.perf_last_cmd_text_per_frame = @as(f32, @floatFromInt(self.perf_sample_total_cmd_text)) / frames;
+        self.perf_last_cmd_shape_per_frame = @as(f32, @floatFromInt(self.perf_sample_total_cmd_shape)) / frames;
+        self.perf_last_cmd_line_per_frame = @as(f32, @floatFromInt(self.perf_sample_total_cmd_line)) / frames;
+        self.perf_last_cmd_image_per_frame = @as(f32, @floatFromInt(self.perf_sample_total_cmd_image)) / frames;
+        self.perf_last_cmd_clip_per_frame = @as(f32, @floatFromInt(self.perf_sample_total_cmd_clip)) / frames;
+        self.perf_last_text_bytes_per_frame = @as(f32, @floatFromInt(self.perf_sample_total_text_bytes)) / frames;
+        self.perf_last_text_command_share_pct = if (self.perf_last_cmd_total_per_frame > 0.0)
+            (self.perf_last_cmd_text_per_frame / self.perf_last_cmd_total_per_frame) * 100.0
+        else
+            0.0;
         self.perf_history.append(self.allocator, .{
             .timestamp_ms = now_ms,
             .fps = self.perf_last_fps,
@@ -2865,6 +2966,21 @@ const App = struct {
             .debug_ms = self.perf_last_debug_ms,
             .terminal_ms = self.perf_last_terminal_ms,
             .draw_ms = self.perf_last_draw_ms,
+            .panel_chat_ms = self.perf_last_panel_chat_ms,
+            .panel_settings_ms = self.perf_last_panel_settings_ms,
+            .panel_debug_ms = self.perf_last_panel_debug_ms,
+            .panel_projects_ms = self.perf_last_panel_projects_ms,
+            .panel_filesystem_ms = self.perf_last_panel_filesystem_ms,
+            .panel_terminal_ms = self.perf_last_panel_terminal_ms,
+            .panel_other_ms = self.perf_last_panel_other_ms,
+            .cmd_total_per_frame = self.perf_last_cmd_total_per_frame,
+            .cmd_text_per_frame = self.perf_last_cmd_text_per_frame,
+            .cmd_shape_per_frame = self.perf_last_cmd_shape_per_frame,
+            .cmd_line_per_frame = self.perf_last_cmd_line_per_frame,
+            .cmd_image_per_frame = self.perf_last_cmd_image_per_frame,
+            .cmd_clip_per_frame = self.perf_last_cmd_clip_per_frame,
+            .text_bytes_per_frame = self.perf_last_text_bytes_per_frame,
+            .text_command_share_pct = self.perf_last_text_command_share_pct,
         }) catch {};
         while (self.perf_history.items.len > PERF_HISTORY_CAPACITY) {
             _ = self.perf_history.orderedRemove(0);
@@ -2878,6 +2994,20 @@ const App = struct {
         self.perf_sample_total_debug_ns = 0;
         self.perf_sample_total_terminal_ns = 0;
         self.perf_sample_total_draw_ns = 0;
+        self.perf_sample_total_panel_chat_ns = 0;
+        self.perf_sample_total_panel_settings_ns = 0;
+        self.perf_sample_total_panel_debug_ns = 0;
+        self.perf_sample_total_panel_projects_ns = 0;
+        self.perf_sample_total_panel_filesystem_ns = 0;
+        self.perf_sample_total_panel_terminal_ns = 0;
+        self.perf_sample_total_panel_other_ns = 0;
+        self.perf_sample_total_cmd_total = 0;
+        self.perf_sample_total_cmd_text = 0;
+        self.perf_sample_total_cmd_shape = 0;
+        self.perf_sample_total_cmd_line = 0;
+        self.perf_sample_total_cmd_image = 0;
+        self.perf_sample_total_cmd_clip = 0;
+        self.perf_sample_total_text_bytes = 0;
     }
 
     fn safeWorkspaceCount(_: *App, value: usize, max: usize) usize {
@@ -4435,10 +4565,41 @@ const App = struct {
 
         // Draw the dock-based UI
         self.drawDockUi(ui_window, fb_width, fb_height);
+        self.accumulateFrameCommandStats();
 
         // Render the UI commands through WebGPU
         self.gpu.ui_renderer.beginFrame(fb_width, fb_height);
         ui_window.swapchain.render(&self.gpu, &self.ui_commands);
+    }
+
+    fn accumulateFrameCommandStats(self: *App) void {
+        for (self.ui_commands.commands.items) |command| {
+            self.perf_frame_cmd_stats.total += 1;
+            switch (command) {
+                .text => |text_cmd| {
+                    self.perf_frame_cmd_stats.text += 1;
+                    self.perf_frame_cmd_stats.text_bytes += text_cmd.text_len;
+                },
+                .line => {
+                    self.perf_frame_cmd_stats.line += 1;
+                },
+                .image => {
+                    self.perf_frame_cmd_stats.image += 1;
+                },
+                .clip_push, .clip_pop => {
+                    self.perf_frame_cmd_stats.clip += 1;
+                },
+                .rect,
+                .rect_gradient,
+                .rounded_rect,
+                .rounded_rect_gradient,
+                .soft_rounded_rect,
+                .nine_slice,
+                => {
+                    self.perf_frame_cmd_stats.shape += 1;
+                },
+            }
+        }
     }
 
     fn drawDockUi(self: *App, ui_window: *UiWindow, fb_width: u32, fb_height: u32) void {
@@ -5126,49 +5287,73 @@ const App = struct {
 
         switch (panel.kind) {
             .Chat => {
+                const started_ns = std.time.nanoTimestamp();
                 self.drawChatPanel(rect);
+                self.perf_frame_panel_ns.chat += std.time.nanoTimestamp() - started_ns;
             },
             .Settings, .Control => {
+                const started_ns = std.time.nanoTimestamp();
                 self.drawSettingsPanel(manager, rect);
+                self.perf_frame_panel_ns.settings += std.time.nanoTimestamp() - started_ns;
             },
             .ToolOutput => {
                 if (self.debug_panel_id != null and self.debug_panel_id.? == panel.id) {
+                    const started_ns = std.time.nanoTimestamp();
                     self.drawDebugPanel(manager, rect);
+                    self.perf_frame_panel_ns.debug += std.time.nanoTimestamp() - started_ns;
                 } else if (self.project_panel_id != null and self.project_panel_id.? == panel.id) {
+                    const started_ns = std.time.nanoTimestamp();
                     self.drawProjectPanel(manager, rect);
+                    self.perf_frame_panel_ns.projects += std.time.nanoTimestamp() - started_ns;
                 } else if (self.filesystem_panel_id != null and self.filesystem_panel_id.? == panel.id) {
+                    const started_ns = std.time.nanoTimestamp();
                     self.drawFilesystemPanel(manager, rect);
+                    self.perf_frame_panel_ns.filesystem += std.time.nanoTimestamp() - started_ns;
                 } else if (self.terminal_panel_id != null and self.terminal_panel_id.? == panel.id) {
+                    const started_ns = std.time.nanoTimestamp();
                     self.drawTerminalPanel(manager, rect);
+                    self.perf_frame_panel_ns.terminal += std.time.nanoTimestamp() - started_ns;
                 } else if (std.mem.eql(u8, panel.title, "Debug Stream")) {
                     self.debug_panel_id = panel.id;
+                    const started_ns = std.time.nanoTimestamp();
                     self.drawDebugPanel(manager, rect);
+                    self.perf_frame_panel_ns.debug += std.time.nanoTimestamp() - started_ns;
                 } else if (std.mem.eql(u8, panel.title, "Projects")) {
                     self.project_panel_id = panel.id;
+                    const started_ns = std.time.nanoTimestamp();
                     self.drawProjectPanel(manager, rect);
+                    self.perf_frame_panel_ns.projects += std.time.nanoTimestamp() - started_ns;
                 } else if (std.mem.eql(u8, panel.title, "Filesystem Browser")) {
                     self.filesystem_panel_id = panel.id;
+                    const started_ns = std.time.nanoTimestamp();
                     self.drawFilesystemPanel(manager, rect);
+                    self.perf_frame_panel_ns.filesystem += std.time.nanoTimestamp() - started_ns;
                 } else if (std.mem.eql(u8, panel.title, "Terminal")) {
                     self.terminal_panel_id = panel.id;
+                    const started_ns = std.time.nanoTimestamp();
                     self.drawTerminalPanel(manager, rect);
+                    self.perf_frame_panel_ns.terminal += std.time.nanoTimestamp() - started_ns;
                 } else {
+                    const started_ns = std.time.nanoTimestamp();
                     self.drawText(
                         rect.min[0] + inset,
                         rect.min[1] + inset,
                         panel.title,
                         self.theme.colors.text_primary,
                     );
+                    self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
                 }
             },
             else => {
                 // Draw placeholder for other panel types
+                const started_ns = std.time.nanoTimestamp();
                 self.drawText(
                     rect.min[0] + inset,
                     rect.min[1] + inset,
                     panel.title,
                     self.theme.colors.text_primary,
                 );
+                self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
             },
         }
     }
@@ -7866,6 +8051,53 @@ const App = struct {
         );
         y += line_height;
 
+        var command_stats_buf: [256]u8 = undefined;
+        const command_stats = std.fmt.bufPrint(
+            &command_stats_buf,
+            "Cmd/frame: total {d:.0} text {d:.0} ({d:.1}%) shape {d:.0} line {d:.0} image {d:.0} clip {d:.0} text-bytes {d:.0}",
+            .{
+                self.perf_last_cmd_total_per_frame,
+                self.perf_last_cmd_text_per_frame,
+                self.perf_last_text_command_share_pct,
+                self.perf_last_cmd_shape_per_frame,
+                self.perf_last_cmd_line_per_frame,
+                self.perf_last_cmd_image_per_frame,
+                self.perf_last_cmd_clip_per_frame,
+                self.perf_last_text_bytes_per_frame,
+            },
+        ) catch "Cmd/frame: collecting...";
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            y,
+            content_width,
+            command_stats,
+            self.theme.colors.text_secondary,
+        );
+        y += line_height;
+
+        var panel_stats_buf: [256]u8 = undefined;
+        const panel_stats = std.fmt.bufPrint(
+            &panel_stats_buf,
+            "Panel draw ms: debug {d:.2} settings {d:.2} chat {d:.2} fs {d:.2} terminal {d:.2} projects {d:.2} other {d:.2}",
+            .{
+                self.perf_last_panel_debug_ms,
+                self.perf_last_panel_settings_ms,
+                self.perf_last_panel_chat_ms,
+                self.perf_last_panel_filesystem_ms,
+                self.perf_last_panel_terminal_ms,
+                self.perf_last_panel_projects_ms,
+                self.perf_last_panel_other_ms,
+            },
+        ) catch "Panel draw: collecting...";
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            y,
+            content_width,
+            panel_stats,
+            self.theme.colors.text_secondary,
+        );
+        y += line_height;
+
         const perf_copy_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
@@ -9603,6 +9835,21 @@ const App = struct {
                 .debug_ms = self.perf_last_debug_ms,
                 .terminal_ms = self.perf_last_terminal_ms,
                 .draw_ms = self.perf_last_draw_ms,
+                .panel_chat_ms = self.perf_last_panel_chat_ms,
+                .panel_settings_ms = self.perf_last_panel_settings_ms,
+                .panel_debug_ms = self.perf_last_panel_debug_ms,
+                .panel_projects_ms = self.perf_last_panel_projects_ms,
+                .panel_filesystem_ms = self.perf_last_panel_filesystem_ms,
+                .panel_terminal_ms = self.perf_last_panel_terminal_ms,
+                .panel_other_ms = self.perf_last_panel_other_ms,
+                .cmd_total_per_frame = self.perf_last_cmd_total_per_frame,
+                .cmd_text_per_frame = self.perf_last_cmd_text_per_frame,
+                .cmd_shape_per_frame = self.perf_last_cmd_shape_per_frame,
+                .cmd_line_per_frame = self.perf_last_cmd_line_per_frame,
+                .cmd_image_per_frame = self.perf_last_cmd_image_per_frame,
+                .cmd_clip_per_frame = self.perf_last_cmd_clip_per_frame,
+                .text_bytes_per_frame = self.perf_last_text_bytes_per_frame,
+                .text_command_share_pct = self.perf_last_text_command_share_pct,
             };
         const latest_other_ms = @max(
             0.0,
@@ -9610,7 +9857,7 @@ const App = struct {
         );
 
         try out.writer(self.allocator).print(
-            "{s}\ncaptured_at_ms={d}\nsamples={d}\nlatest_fps={d:.2}\nlatest_frame_ms={d:.3}\nlatest_draw_ms={d:.3}\nlatest_other_ms={d:.3}\nlatest_ws_poll_ms={d:.3}\nlatest_fs_poll_ms={d:.3}\nlatest_ws_wait_ms={d:.3}\nlatest_fs_request_ms={d:.3}\nlatest_debug_ms={d:.3}\nlatest_terminal_ms={d:.3}\n",
+            "{s}\ncaptured_at_ms={d}\nsamples={d}\nlatest_fps={d:.2}\nlatest_frame_ms={d:.3}\nlatest_draw_ms={d:.3}\nlatest_other_ms={d:.3}\nlatest_ws_poll_ms={d:.3}\nlatest_fs_poll_ms={d:.3}\nlatest_ws_wait_ms={d:.3}\nlatest_fs_request_ms={d:.3}\nlatest_debug_ms={d:.3}\nlatest_terminal_ms={d:.3}\nlatest_panel_chat_ms={d:.3}\nlatest_panel_settings_ms={d:.3}\nlatest_panel_debug_ms={d:.3}\nlatest_panel_projects_ms={d:.3}\nlatest_panel_filesystem_ms={d:.3}\nlatest_panel_terminal_ms={d:.3}\nlatest_panel_other_ms={d:.3}\nlatest_cmd_total_per_frame={d:.3}\nlatest_cmd_text_per_frame={d:.3}\nlatest_cmd_shape_per_frame={d:.3}\nlatest_cmd_line_per_frame={d:.3}\nlatest_cmd_image_per_frame={d:.3}\nlatest_cmd_clip_per_frame={d:.3}\nlatest_text_bytes_per_frame={d:.3}\nlatest_text_command_share_pct={d:.3}\n",
             .{
                 report_name,
                 std.time.milliTimestamp(),
@@ -9625,6 +9872,21 @@ const App = struct {
                 latest.fs_request_ms,
                 latest.debug_ms,
                 latest.terminal_ms,
+                latest.panel_chat_ms,
+                latest.panel_settings_ms,
+                latest.panel_debug_ms,
+                latest.panel_projects_ms,
+                latest.panel_filesystem_ms,
+                latest.panel_terminal_ms,
+                latest.panel_other_ms,
+                latest.cmd_total_per_frame,
+                latest.cmd_text_per_frame,
+                latest.cmd_shape_per_frame,
+                latest.cmd_line_per_frame,
+                latest.cmd_image_per_frame,
+                latest.cmd_clip_per_frame,
+                latest.text_bytes_per_frame,
+                latest.text_command_share_pct,
             },
         );
         if (label) |value| {
@@ -9640,14 +9902,14 @@ const App = struct {
             );
         }
 
-        try out.appendSlice(self.allocator, "\n# sample_table\ntimestamp_ms,fps,frame_ms,draw_ms,other_ms,ws_poll_ms,fs_poll_ms,ws_wait_ms,fs_request_ms,debug_ms,terminal_ms\n");
+        try out.appendSlice(self.allocator, "\n# sample_table\ntimestamp_ms,fps,frame_ms,draw_ms,other_ms,ws_poll_ms,fs_poll_ms,ws_wait_ms,fs_request_ms,debug_ms,terminal_ms,panel_chat_ms,panel_settings_ms,panel_debug_ms,panel_projects_ms,panel_filesystem_ms,panel_terminal_ms,panel_other_ms,cmd_total_per_frame,cmd_text_per_frame,cmd_shape_per_frame,cmd_line_per_frame,cmd_image_per_frame,cmd_clip_per_frame,text_bytes_per_frame,text_command_share_pct\n");
         for (samples) |sample| {
             const other_ms = @max(
                 0.0,
                 sample.frame_ms - (sample.draw_ms + sample.ws_poll_ms + sample.fs_poll_ms + sample.debug_ms + sample.terminal_ms),
             );
             try out.writer(self.allocator).print(
-                "{d},{d:.3},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4}\n",
+                "{d},{d:.3},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3}\n",
                 .{
                     sample.timestamp_ms,
                     sample.fps,
@@ -9660,6 +9922,21 @@ const App = struct {
                     sample.fs_request_ms,
                     sample.debug_ms,
                     sample.terminal_ms,
+                    sample.panel_chat_ms,
+                    sample.panel_settings_ms,
+                    sample.panel_debug_ms,
+                    sample.panel_projects_ms,
+                    sample.panel_filesystem_ms,
+                    sample.panel_terminal_ms,
+                    sample.panel_other_ms,
+                    sample.cmd_total_per_frame,
+                    sample.cmd_text_per_frame,
+                    sample.cmd_shape_per_frame,
+                    sample.cmd_line_per_frame,
+                    sample.cmd_image_per_frame,
+                    sample.cmd_clip_per_frame,
+                    sample.text_bytes_per_frame,
+                    sample.text_command_share_pct,
                 },
             );
         }
