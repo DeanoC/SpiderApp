@@ -11740,10 +11740,8 @@ const App = struct {
         self.pending_send_request_id = try self.allocator.dupe(u8, request_id);
         self.awaiting_reply = true;
 
-        const payload = try protocol_messages.buildSessionSend(self.allocator, request_id, text, session_key);
-        defer self.allocator.free(payload);
-        client.send(payload) catch |err| {
-            std.log.err("[GUI] sendChatMessageText: websocket send failed: {s}", .{@errorName(err)});
+        const job_id = self.submitChatJobViaFsrpc(client, text) catch |err| {
+            std.log.err("[GUI] sendChatMessageText: fsrpc submit failed: {s}", .{@errorName(err)});
             const err_text = try std.fmt.allocPrint(self.allocator, "Send failed: {s}", .{@errorName(err)});
             defer self.allocator.free(err_text);
             try self.appendMessage("system", err_text, null);
@@ -11755,6 +11753,11 @@ const App = struct {
             self.clearPendingSend();
             return err;
         };
+        if (self.pending_send_job_id) |value| {
+            self.allocator.free(value);
+            self.pending_send_job_id = null;
+        }
+        self.pending_send_job_id = job_id;
     }
 
     fn nextFsrpcTag(self: *App) u32 {
@@ -11935,54 +11938,13 @@ const App = struct {
     }
 
     fn sendChatViaFsrpc(self: *App, client: *ws_client_mod.WebSocketClient, text: []const u8) ![]u8 {
-        try self.fsrpcBootstrapGui(client);
+        const job_name_owned = try self.submitChatJobViaFsrpc(client, text);
+        defer self.allocator.free(job_name_owned);
 
-        const input_fid = self.nextFsrpcFid();
         const result_fid = self.nextFsrpcFid();
-        defer self.fsrpcClunkBestEffort(client, input_fid);
         defer self.fsrpcClunkBestEffort(client, result_fid);
 
-        const walk_input_tag = self.nextFsrpcTag();
-        const walk_input_req = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":[\"agents\",\"self\",\"chat\",\"control\",\"input\"]}}",
-            .{ walk_input_tag, input_fid },
-        );
-        defer self.allocator.free(walk_input_req);
-        var walk_input = try self.sendAndAwaitFsrpc(client, walk_input_req, walk_input_tag, FSRPC_DEFAULT_TIMEOUT_MS);
-        defer walk_input.deinit(self.allocator);
-        try self.ensureFsrpcOk(&walk_input);
-
-        const open_input_tag = self.nextFsrpcTag();
-        const open_input_req = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"rw\"}}",
-            .{ open_input_tag, input_fid },
-        );
-        defer self.allocator.free(open_input_req);
-        var open_input = try self.sendAndAwaitFsrpc(client, open_input_req, open_input_tag, FSRPC_DEFAULT_TIMEOUT_MS);
-        defer open_input.deinit(self.allocator);
-        try self.ensureFsrpcOk(&open_input);
-
-        const encoded = try encodeDataB64(self.allocator, text);
-        defer self.allocator.free(encoded);
-        const write_tag = self.nextFsrpcTag();
-        const write_req = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_write\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"data_b64\":\"{s}\"}}",
-            .{ write_tag, input_fid, encoded },
-        );
-        defer self.allocator.free(write_req);
-        var write = try self.sendAndAwaitFsrpc(client, write_req, write_tag, FSRPC_CHAT_WRITE_TIMEOUT_MS);
-        defer write.deinit(self.allocator);
-        try self.ensureFsrpcOk(&write);
-
-        const write_payload = try self.getFsrpcPayloadObject(write.parsed.value.object);
-        const job_value = write_payload.get("job") orelse return error.InvalidResponse;
-        if (job_value != .string) return error.InvalidResponse;
-        const job_name = job_value.string;
-
-        const escaped_job = try jsonEscape(self.allocator, job_name);
+        const escaped_job = try jsonEscape(self.allocator, job_name_owned);
         defer self.allocator.free(escaped_job);
         const walk_result_tag = self.nextFsrpcTag();
         const walk_result_req = try std.fmt.allocPrint(
@@ -12027,6 +11989,53 @@ const App = struct {
         _ = std.base64.standard.Decoder.decode(decoded, data_b64.string) catch return error.InvalidResponse;
 
         return decoded;
+    }
+
+    fn submitChatJobViaFsrpc(self: *App, client: *ws_client_mod.WebSocketClient, text: []const u8) ![]u8 {
+        try self.fsrpcBootstrapGui(client);
+
+        const input_fid = self.nextFsrpcFid();
+        defer self.fsrpcClunkBestEffort(client, input_fid);
+
+        const walk_input_tag = self.nextFsrpcTag();
+        const walk_input_req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":[\"agents\",\"self\",\"chat\",\"control\",\"input\"]}}",
+            .{ walk_input_tag, input_fid },
+        );
+        defer self.allocator.free(walk_input_req);
+        var walk_input = try self.sendAndAwaitFsrpc(client, walk_input_req, walk_input_tag, FSRPC_DEFAULT_TIMEOUT_MS);
+        defer walk_input.deinit(self.allocator);
+        try self.ensureFsrpcOk(&walk_input);
+
+        const open_input_tag = self.nextFsrpcTag();
+        const open_input_req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"rw\"}}",
+            .{ open_input_tag, input_fid },
+        );
+        defer self.allocator.free(open_input_req);
+        var open_input = try self.sendAndAwaitFsrpc(client, open_input_req, open_input_tag, FSRPC_DEFAULT_TIMEOUT_MS);
+        defer open_input.deinit(self.allocator);
+        try self.ensureFsrpcOk(&open_input);
+
+        const encoded = try encodeDataB64(self.allocator, text);
+        defer self.allocator.free(encoded);
+        const write_tag = self.nextFsrpcTag();
+        const write_req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_write\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"data_b64\":\"{s}\"}}",
+            .{ write_tag, input_fid, encoded },
+        );
+        defer self.allocator.free(write_req);
+        var write = try self.sendAndAwaitFsrpc(client, write_req, write_tag, FSRPC_CHAT_WRITE_TIMEOUT_MS);
+        defer write.deinit(self.allocator);
+        try self.ensureFsrpcOk(&write);
+
+        const write_payload = try self.getFsrpcPayloadObject(write.parsed.value.object);
+        const job_value = write_payload.get("job") orelse return error.InvalidResponse;
+        if (job_value != .string) return error.InvalidResponse;
+        return self.allocator.dupe(u8, job_value.string);
     }
 
     fn splitFsPathSegments(self: *App, path: []const u8) !std.ArrayListUnmanaged([]u8) {
