@@ -109,6 +109,20 @@ const SessionAttachUiState = enum {
     err,
 };
 
+const ConnectSetupHint = struct {
+    required: bool = false,
+    message: ?[]u8 = null,
+    project_id: ?[]u8 = null,
+    project_vision: ?[]u8 = null,
+
+    fn deinit(self: *ConnectSetupHint, allocator: std.mem.Allocator) void {
+        if (self.message) |value| allocator.free(value);
+        if (self.project_id) |value| allocator.free(value);
+        if (self.project_vision) |value| allocator.free(value);
+        self.* = undefined;
+    }
+};
+
 const FsrpcEnvelope = struct {
     raw: []u8,
     parsed: std.json.Parsed(std.json.Value),
@@ -720,6 +734,7 @@ const App = struct {
     terminal_auto_poll: bool = true,
     terminal_next_poll_at_ms: i64 = 0,
     session_attach_state: SessionAttachUiState = .unknown,
+    connect_setup_hint: ?ConnectSetupHint = null,
 
     ws_client: ?ws_client_mod.WebSocketClient = null,
 
@@ -3705,6 +3720,7 @@ const App = struct {
         workspace_types.deinitProjectList(self.allocator, &self.projects);
         workspace_types.deinitNodeList(self.allocator, &self.nodes);
         self.project_selector_open = false;
+        self.clearConnectSetupHint();
         if (self.workspace_state) |*status| {
             status.deinit(self.allocator);
             self.workspace_state = null;
@@ -4155,6 +4171,70 @@ const App = struct {
             self.allocator.free(value);
             self.workspace_last_error = null;
         }
+    }
+
+    fn clearConnectSetupHint(self: *App) void {
+        if (self.connect_setup_hint) |*hint| {
+            hint.deinit(self.allocator);
+            self.connect_setup_hint = null;
+        }
+    }
+
+    fn applyConnectSetupHintFromPayload(self: *App, payload_json: []const u8) !void {
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, payload_json, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return error.InvalidResponse;
+        const root = parsed.value.object;
+
+        var hint = ConnectSetupHint{};
+        errdefer hint.deinit(self.allocator);
+
+        if (root.get("project_setup_required")) |value| {
+            if (value != .bool) return error.InvalidResponse;
+            hint.required = value.bool;
+        } else if (root.get("bootstrap_only")) |value| {
+            if (value != .bool) return error.InvalidResponse;
+            hint.required = value.bool;
+        }
+
+        if (root.get("project_setup_message")) |value| {
+            switch (value) {
+                .string => hint.message = try self.allocator.dupe(u8, value.string),
+                .null => {},
+                else => return error.InvalidResponse,
+            }
+        } else if (root.get("bootstrap_message")) |value| {
+            switch (value) {
+                .string => hint.message = try self.allocator.dupe(u8, value.string),
+                .null => {},
+                else => return error.InvalidResponse,
+            }
+        }
+
+        if (root.get("project_setup_project_id")) |value| {
+            switch (value) {
+                .string => hint.project_id = try self.allocator.dupe(u8, value.string),
+                .null => {},
+                else => return error.InvalidResponse,
+            }
+        } else if (root.get("project_id")) |value| {
+            switch (value) {
+                .string => hint.project_id = try self.allocator.dupe(u8, value.string),
+                .null => {},
+                else => return error.InvalidResponse,
+            }
+        }
+
+        if (root.get("project_setup_project_vision")) |value| {
+            switch (value) {
+                .string => hint.project_vision = try self.allocator.dupe(u8, value.string),
+                .null => {},
+                else => return error.InvalidResponse,
+            }
+        }
+
+        self.clearConnectSetupHint();
+        self.connect_setup_hint = hint;
     }
 
     fn selectedProjectId(self: *const App) ?[]const u8 {
@@ -6365,6 +6445,42 @@ const App = struct {
         if (selected_project_line) |line| {
             self.drawLabel(rect.min[0] + pad, y, line, self.theme.colors.text_secondary);
             y += layout.line_height;
+        }
+        if (self.connect_setup_hint) |hint| {
+            const setup_status = if (hint.required) "required" else "ready";
+            var setup_line_buf: [384]u8 = undefined;
+            const setup_line = std.fmt.bufPrint(
+                &setup_line_buf,
+                "Project setup: {s}",
+                .{setup_status},
+            ) catch null;
+            if (setup_line) |line| {
+                self.drawLabel(
+                    rect.min[0] + pad,
+                    y,
+                    line,
+                    if (hint.required) zcolors.rgba(236, 174, 36, 255) else self.theme.colors.text_secondary,
+                );
+                y += layout.line_height;
+            }
+            if (hint.project_vision) |vision| {
+                var vision_line_buf: [640]u8 = undefined;
+                const vision_line = std.fmt.bufPrint(
+                    &vision_line_buf,
+                    "Project vision: {s}",
+                    .{vision},
+                ) catch null;
+                if (vision_line) |line| {
+                    self.drawTextTrimmed(
+                        rect.min[0] + pad,
+                        y,
+                        input_width,
+                        line,
+                        self.theme.colors.text_secondary,
+                    );
+                    y += layout.line_height;
+                }
+            }
         }
 
         if (self.workspace_state) |*status| {
@@ -11207,6 +11323,7 @@ const App = struct {
         const had_pending_send = self.pending_send_message_id != null;
         self.setConnectionState(.connecting, "Connecting...");
         self.session_attach_state = .unknown;
+        self.clearConnectSetupHint();
         self.stopFilesystemWorker();
         self.clearFilesystemDirCache();
         self.clearContractServices();
@@ -11267,7 +11384,7 @@ const App = struct {
         defer if (fetched_worker_agent) |value| self.allocator.free(value);
 
         if (self.ws_client) |*client| {
-            control_plane.ensureUnifiedV2ConnectionWithTimeout(
+            const connect_payload_json = control_plane.ensureUnifiedV2ConnectionPayloadJsonWithTimeout(
                 self.allocator,
                 client,
                 &self.message_counter,
@@ -11297,6 +11414,11 @@ const App = struct {
                 defer self.allocator.free(msg);
                 self.setConnectionState(.error_state, msg);
                 return;
+            };
+            defer self.allocator.free(connect_payload_json);
+            self.applyConnectSetupHintFromPayload(connect_payload_json) catch |err| {
+                std.log.warn("Failed to parse connect setup hint payload: {s}", .{@errorName(err)});
+                self.clearConnectSetupHint();
             };
 
             if (self.settings_panel.default_session.items.len == 0) {
@@ -11456,6 +11578,20 @@ const App = struct {
         if (attach_warning) |warning| {
             self.setWorkspaceError(warning);
             try self.appendMessage("system", warning, null);
+        }
+        if (self.connect_setup_hint) |hint| {
+            if (hint.required) {
+                const base = hint.message orelse "Project setup is required. Ask Mother to gather setup details.";
+                const setup_notice = if (hint.project_vision) |vision|
+                    std.fmt.allocPrint(self.allocator, "{s} Project vision: {s}", .{ base, vision }) catch null
+                else
+                    self.allocator.dupe(u8, base) catch null;
+                defer if (setup_notice) |value| self.allocator.free(value);
+                if (setup_notice) |notice| {
+                    if (attach_warning == null) self.setWorkspaceError(notice);
+                    try self.appendMessage("system", notice, null);
+                }
+            }
         }
 
         if (had_pending_send and try self.tryResumePendingSendJob()) {
