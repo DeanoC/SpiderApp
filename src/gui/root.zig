@@ -12235,6 +12235,44 @@ const App = struct {
         return self.parseJobStatusInfo(raw);
     }
 
+    fn parseSessionReceiveContentsFromJobLog(self: *App, log_text: []const u8) !std.ArrayListUnmanaged([]u8) {
+        var out = std.ArrayListUnmanaged([]u8){};
+        errdefer {
+            for (out.items) |item| self.allocator.free(item);
+            out.deinit(self.allocator);
+        }
+
+        var lines = std.mem.splitScalar(u8, log_text, '\n');
+        while (lines.next()) |line_raw| {
+            const line = std.mem.trim(u8, line_raw, " \t\r\n");
+            if (line.len == 0) continue;
+
+            var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, line, .{}) catch continue;
+            defer parsed.deinit();
+            if (parsed.value != .object) continue;
+
+            const root = parsed.value.object;
+            const type_val = root.get("type") orelse continue;
+            if (type_val != .string or !std.mem.eql(u8, type_val.string, "session.receive")) continue;
+
+            const payload = if (root.get("payload")) |payload_value| switch (payload_value) {
+                .object => payload_value.object,
+                else => root,
+            } else root;
+            const content_val = payload.get("content") orelse continue;
+            if (content_val != .string) continue;
+            const content = std.mem.trim(u8, content_val.string, " \t\r\n");
+            if (content.len == 0) continue;
+
+            if (out.items.len > 0 and std.mem.eql(u8, out.items[out.items.len - 1], content)) {
+                continue;
+            }
+            try out.append(self.allocator, try self.allocator.dupe(u8, content));
+        }
+
+        return out;
+    }
+
     fn tryResumePendingSendJob(self: *App) !bool {
         const job_id = self.pending_send_job_id orelse return false;
         const client = if (self.ws_client) |*value| value else return false;
@@ -12260,6 +12298,10 @@ const App = struct {
             break :blk msg;
         };
         defer self.allocator.free(result);
+        const log_path = try std.fmt.allocPrint(self.allocator, "/agents/self/jobs/{s}/log.txt", .{job_id});
+        defer self.allocator.free(log_path);
+        const maybe_log = self.readFsPathTextGui(client, log_path) catch null;
+        defer if (maybe_log) |value| self.allocator.free(value);
 
         if (std.mem.eql(u8, status.state, "failed")) {
             if (self.pending_send_message_id) |message_id| {
@@ -12285,7 +12327,22 @@ const App = struct {
             value
         else
             try self.currentSessionOrDefault();
-        try self.appendMessageForSession(session_key, "assistant", result, null);
+        if (maybe_log) |log_text| {
+            var receives = try self.parseSessionReceiveContentsFromJobLog(log_text);
+            defer {
+                for (receives.items) |item| self.allocator.free(item);
+                receives.deinit(self.allocator);
+            }
+            if (receives.items.len > 0) {
+                for (receives.items) |content| {
+                    try self.appendMessageForSession(session_key, "assistant", content, null);
+                }
+            } else {
+                try self.appendMessageForSession(session_key, "assistant", result, null);
+            }
+        } else {
+            try self.appendMessageForSession(session_key, "assistant", result, null);
+        }
         self.clearPendingSend();
         return true;
     }
