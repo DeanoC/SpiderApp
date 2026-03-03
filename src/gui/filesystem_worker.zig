@@ -405,23 +405,23 @@ pub const FilesystemWorker = struct {
             self.session_attached = true;
             return;
         };
+        const project_id = self.project_id orelse return error.ProjectIdRequired;
+        const trimmed_project_id = std.mem.trim(u8, project_id, " \t\r\n");
+        if (trimmed_project_id.len == 0) return error.ProjectIdRequired;
 
         const escaped_session = try jsonEscape(self.allocator, session_key);
         defer self.allocator.free(escaped_session);
         const escaped_agent = try jsonEscape(self.allocator, agent_id);
         defer self.allocator.free(escaped_agent);
+        const escaped_project = try jsonEscape(self.allocator, trimmed_project_id);
+        defer self.allocator.free(escaped_project);
 
         var payload = std.ArrayListUnmanaged(u8){};
         defer payload.deinit(self.allocator);
         try payload.writer(self.allocator).print(
-            "{{\"session_key\":\"{s}\",\"agent_id\":\"{s}\"",
-            .{ escaped_session, escaped_agent },
+            "{{\"session_key\":\"{s}\",\"agent_id\":\"{s}\",\"project_id\":\"{s}\"",
+            .{ escaped_session, escaped_agent, escaped_project },
         );
-        if (self.project_id) |project_id| {
-            const escaped_project = try jsonEscape(self.allocator, project_id);
-            defer self.allocator.free(escaped_project);
-            try payload.writer(self.allocator).print(",\"project_id\":\"{s}\"", .{escaped_project});
-        }
         if (self.project_token) |project_token| {
             const escaped_token = try jsonEscape(self.allocator, project_token);
             defer self.allocator.free(escaped_token);

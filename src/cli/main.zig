@@ -1199,7 +1199,11 @@ fn parseSessionAttachArgs(options: args.Options, cmd: args.Command) !SessionAtta
 
 fn executeSessionAttach(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     const parsed = parseSessionAttachArgs(options, cmd) catch {
-        logger.err("session attach usage: session attach <session_key> <agent_id> [--project <project_id>] [--project-token <token>]", .{});
+        logger.err("session attach usage: session attach <session_key> <agent_id> --project <project_id> [--project-token <token>]", .{});
+        return error.InvalidArguments;
+    };
+    const project_id = parsed.project_id orelse {
+        logger.err("session attach requires --project <project_id>", .{});
         return error.InvalidArguments;
     };
 
@@ -1213,7 +1217,7 @@ fn executeSessionAttach(allocator: std.mem.Allocator, options: args.Options, cmd
         &g_control_request_counter,
         parsed.session_key,
         parsed.agent_id,
-        parsed.project_id,
+        project_id,
         parsed.project_token,
     );
     defer status.deinit(allocator);
@@ -1278,12 +1282,18 @@ fn executeSessionRestore(allocator: std.mem.Allocator, options: args.Options, cm
         return;
     }
     const session = restored.session.?;
+    const attach_project_id = session.project_id orelse {
+        logger.err(
+            "restored session has no project_id; choose a project and run: session attach {s} {s} --project <project_id>",
+            .{ session.session_key, session.agent_id },
+        );
+        return error.InvalidResponse;
+    };
     const project_token = if (options.project_token) |token|
         token
-    else if (session.project_id) |project_id|
-        cfg.getProjectToken(project_id)
     else
-        null;
+        cfg.getProjectToken(attach_project_id)
+    ;
     try stdout.print(
         "Restoring session {s} (agent={s}, project={s})\n",
         .{ session.session_key, session.agent_id, session.project_id orelse "(none)" },
@@ -1295,7 +1305,7 @@ fn executeSessionRestore(allocator: std.mem.Allocator, options: args.Options, cm
         &g_control_request_counter,
         session.session_key,
         session.agent_id,
-        session.project_id,
+        attach_project_id,
         project_token,
     );
     defer status.deinit(allocator);

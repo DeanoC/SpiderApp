@@ -649,16 +649,16 @@ pub fn sessionAttach(
     project_id: ?[]const u8,
     project_token: ?[]const u8,
 ) !workspace_types.SessionAttachStatus {
+    const project = project_id orelse return error.ProjectIdRequired;
+    const trimmed_project = std.mem.trim(u8, project, " \t\r\n");
+    if (trimmed_project.len == 0) return error.ProjectIdRequired;
+
     const escaped_session = try unified_v2.jsonEscape(allocator, session_key);
     defer allocator.free(escaped_session);
     const escaped_agent = try unified_v2.jsonEscape(allocator, agent_id);
     defer allocator.free(escaped_agent);
-
-    const escaped_project = if (project_id) |value|
-        try unified_v2.jsonEscape(allocator, value)
-    else
-        null;
-    defer if (escaped_project) |value| allocator.free(value);
+    const escaped_project = try unified_v2.jsonEscape(allocator, trimmed_project);
+    defer allocator.free(escaped_project);
 
     const escaped_token = if (project_token) |value|
         try unified_v2.jsonEscape(allocator, value)
@@ -669,12 +669,9 @@ pub fn sessionAttach(
     var payload = std.ArrayListUnmanaged(u8){};
     defer payload.deinit(allocator);
     try payload.writer(allocator).print(
-        "{{\"session_key\":\"{s}\",\"agent_id\":\"{s}\"",
-        .{ escaped_session, escaped_agent },
+        "{{\"session_key\":\"{s}\",\"agent_id\":\"{s}\",\"project_id\":\"{s}\"",
+        .{ escaped_session, escaped_agent, escaped_project },
     );
-    if (escaped_project) |value| {
-        try payload.writer(allocator).print(",\"project_id\":\"{s}\"", .{value});
-    }
     if (escaped_token) |value| {
         try payload.writer(allocator).print(",\"project_token\":\"{s}\"", .{value});
     }
