@@ -4118,6 +4118,13 @@ const App = struct {
         if (isProjectAuthRemoteError(remote)) return true;
         if (std.mem.indexOf(u8, remote, "project_not_found") != null) return true;
         if (std.mem.indexOf(u8, remote, "project_assignment_forbidden") != null) return true;
+        if (std.mem.indexOf(u8, remote, "invalid project_id") != null) return true;
+        if (std.mem.indexOf(u8, remote, "project_id is required") != null) return true;
+        if (std.mem.indexOf(u8, remote, "invalid_payload") != null and
+            std.mem.indexOf(u8, remote, "project_id") != null)
+        {
+            return true;
+        }
         if (std.mem.indexOf(u8, remote, "control_plane_error") != null and
             std.mem.indexOf(u8, remote, "SyntaxError") != null)
         {
@@ -4240,6 +4247,20 @@ const App = struct {
     fn selectedProjectId(self: *const App) ?[]const u8 {
         if (self.settings_panel.project_id.items.len > 0) return self.settings_panel.project_id.items;
         return self.config.selectedProject();
+    }
+
+    fn defaultAttachProjectId(self: *const App) ?[]const u8 {
+        if (self.connect_setup_hint) |hint| {
+            if (hint.project_id) |project_id| {
+                if (project_id.len > 0) return project_id;
+            }
+        }
+        return null;
+    }
+
+    fn preferredAttachProjectId(self: *const App) ?[]const u8 {
+        if (self.selectedProjectId()) |project_id| return project_id;
+        return self.defaultAttachProjectId();
     }
 
     fn selectedProjectSummary(self: *const App) ?*const workspace_types.ProjectSummary {
@@ -11055,17 +11076,19 @@ const App = struct {
         ) catch |err| {
             const primary_detail = control_plane.lastRemoteError() orelse @errorName(err);
             if (effective_project_id != null and isSelectedProjectAttachRemoteError(primary_detail)) {
+                const fallback_project_id = self.defaultAttachProjectId();
+                const fallback_project_token = self.projectTokenForSessionProject(fallback_project_id);
                 self.attachSessionBindingExplicit(
                     client,
                     session.session_key,
                     session.agent_id,
-                    null,
-                    null,
+                    fallback_project_id,
+                    fallback_project_token,
                 ) catch {
                     return err;
                 };
-                effective_project_id = null;
-                effective_project_token = null;
+                effective_project_id = fallback_project_id;
+                effective_project_token = fallback_project_token;
                 restore_warning = try std.fmt.allocPrint(
                     self.allocator,
                     "Restored session {s}, but project context was unavailable ({s}).",
@@ -11301,11 +11324,8 @@ const App = struct {
     }
 
     fn attachSessionBinding(self: *App, client: *ws_client_mod.WebSocketClient, session_key: []const u8) !void {
-        const project_id = self.selectedProjectId();
-        const project_token = if (project_id) |value|
-            self.selectedProjectToken(value)
-        else
-            null;
+        const project_id = self.preferredAttachProjectId();
+        const project_token = self.projectTokenForSessionProject(project_id);
         try self.attachSessionBindingWithProject(
             client,
             session_key,
@@ -11432,11 +11452,8 @@ const App = struct {
             const attach_session = self.settings_panel.default_session.items;
             try self.ensureSessionExists(attach_session, attach_session);
             worker_attach_session = attach_session;
-            worker_attach_project_id = self.selectedProjectId();
-            worker_attach_project_token = if (worker_attach_project_id) |project_id|
-                self.selectedProjectToken(project_id)
-            else
-                null;
+            worker_attach_project_id = self.preferredAttachProjectId();
+            worker_attach_project_token = self.projectTokenForSessionProject(worker_attach_project_id);
 
             self.attachSessionBinding(client, attach_session) catch |err| {
                 const primary_detail_owned = try self.allocator.dupe(
@@ -11467,7 +11484,9 @@ const App = struct {
                         self.clearSelectedProjectAfterAttachFailure();
                     }
                     var fallback_ok = true;
-                    self.attachSessionBindingWithProject(client, attach_session, null, null) catch |fallback_err| {
+                    const fallback_project_id = self.defaultAttachProjectId();
+                    const fallback_project_token = self.projectTokenForSessionProject(fallback_project_id);
+                    self.attachSessionBindingWithProject(client, attach_session, fallback_project_id, fallback_project_token) catch |fallback_err| {
                         fallback_ok = false;
                         const fallback_detail = control_plane.lastRemoteError() orelse @errorName(fallback_err);
                         std.log.err(
@@ -11481,8 +11500,8 @@ const App = struct {
                         );
                     };
                     if (fallback_ok) {
-                        worker_attach_project_id = null;
-                        worker_attach_project_token = null;
+                        worker_attach_project_id = fallback_project_id;
+                        worker_attach_project_token = fallback_project_token;
                         if (selected_project_invalid) {
                             attach_warning = try self.allocator.dupe(
                                 u8,
@@ -11819,7 +11838,9 @@ const App = struct {
                     if (selected_project_invalid) {
                         self.clearSelectedProjectAfterAttachFailure();
                     }
-                    self.attachSessionBindingWithProject(client, session_key, null, null) catch |fallback_err| {
+                    const fallback_project_id = self.defaultAttachProjectId();
+                    const fallback_project_token = self.projectTokenForSessionProject(fallback_project_id);
+                    self.attachSessionBindingWithProject(client, session_key, fallback_project_id, fallback_project_token) catch |fallback_err| {
                         const fallback_detail = control_plane.lastRemoteError() orelse @errorName(fallback_err);
                         const err_text = try std.fmt.allocPrint(
                             self.allocator,
