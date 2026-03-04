@@ -11564,6 +11564,9 @@ const App = struct {
                                     .{primary_detail_owned},
                                 );
                             }
+                        } else {
+                            worker_attach_project_id = null;
+                            worker_attach_project_token = null;
                         }
                     } else {
                         std.log.err("Session attach failed: {s}", .{primary_detail_owned});
