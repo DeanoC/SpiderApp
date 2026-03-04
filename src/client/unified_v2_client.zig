@@ -108,6 +108,21 @@ pub fn sendControlVersionAndConnect(
     message_counter: *u64,
     timeout_ms: i64,
 ) !void {
+    const payload_json = try sendControlVersionAndConnectPayloadJson(
+        allocator,
+        client,
+        message_counter,
+        timeout_ms,
+    );
+    allocator.free(payload_json);
+}
+
+pub fn sendControlVersionAndConnectPayloadJson(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+    timeout_ms: i64,
+) ![]u8 {
     const version_id = try nextRequestId(allocator, message_counter, "control-version");
     defer allocator.free(version_id);
     var version = try sendControlRequest(
@@ -131,6 +146,8 @@ pub fn sendControlVersionAndConnect(
         timeout_ms,
     );
     defer connect.deinit(allocator);
+
+    return controlReplyPayloadJson(allocator, &connect);
 }
 
 pub fn sendControlRequest(

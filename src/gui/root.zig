@@ -57,6 +57,7 @@ const FSRPC_CLUNK_TIMEOUT_MS: u32 = 1_000;
 const CONTROL_CONNECT_TIMEOUT_MS: i64 = 2_500;
 const CONTROL_SESSION_ATTACH_TIMEOUT_MS: i64 = 8_000;
 const CONTROL_SESSION_STATUS_TIMEOUT_MS: i64 = 2_000;
+const MAX_PROJECT_TOKEN_LEN: usize = 256;
 const WS_MAX_MESSAGES_PER_FRAME: u32 = 32;
 const WS_MAX_POLL_BUDGET_NS: i128 = 2 * std.time.ns_per_ms;
 const FS_WORKER_MAX_RESULTS_PER_FRAME: u32 = 64;
@@ -107,6 +108,20 @@ const SessionAttachUiState = enum {
     warming,
     ready,
     err,
+};
+
+const ConnectSetupHint = struct {
+    required: bool = false,
+    message: ?[]u8 = null,
+    project_id: ?[]u8 = null,
+    project_vision: ?[]u8 = null,
+
+    fn deinit(self: *ConnectSetupHint, allocator: std.mem.Allocator) void {
+        if (self.message) |value| allocator.free(value);
+        if (self.project_id) |value| allocator.free(value);
+        if (self.project_vision) |value| allocator.free(value);
+        self.* = undefined;
+    }
 };
 
 const FsrpcEnvelope = struct {
@@ -251,6 +266,14 @@ fn maskTokenForDisplay(allocator: std.mem.Allocator, token: []const u8) ![]u8 {
         "{s}...{s}",
         .{ token[0..4], token[token.len - 4 ..] },
     );
+}
+
+fn normalizeProjectToken(project_token: ?[]const u8) ?[]const u8 {
+    const token = project_token orelse return null;
+    const trimmed = std.mem.trim(u8, token, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    if (trimmed.len > MAX_PROJECT_TOKEN_LEN) return null;
+    return trimmed;
 }
 
 const SettingsFocusField = enum {
@@ -720,6 +743,7 @@ const App = struct {
     terminal_auto_poll: bool = true,
     terminal_next_poll_at_ms: i64 = 0,
     session_attach_state: SessionAttachUiState = .unknown,
+    connect_setup_hint: ?ConnectSetupHint = null,
 
     ws_client: ?ws_client_mod.WebSocketClient = null,
 
@@ -3705,6 +3729,7 @@ const App = struct {
         workspace_types.deinitProjectList(self.allocator, &self.projects);
         workspace_types.deinitNodeList(self.allocator, &self.nodes);
         self.project_selector_open = false;
+        self.clearConnectSetupHint();
         if (self.workspace_state) |*status| {
             status.deinit(self.allocator);
             self.workspace_state = null;
@@ -4102,6 +4127,13 @@ const App = struct {
         if (isProjectAuthRemoteError(remote)) return true;
         if (std.mem.indexOf(u8, remote, "project_not_found") != null) return true;
         if (std.mem.indexOf(u8, remote, "project_assignment_forbidden") != null) return true;
+        if (std.mem.indexOf(u8, remote, "invalid project_id") != null) return true;
+        if (std.mem.indexOf(u8, remote, "project_id is required") != null) return true;
+        if (std.mem.indexOf(u8, remote, "invalid_payload") != null and
+            std.mem.indexOf(u8, remote, "project_id") != null)
+        {
+            return true;
+        }
         if (std.mem.indexOf(u8, remote, "control_plane_error") != null and
             std.mem.indexOf(u8, remote, "SyntaxError") != null)
         {
@@ -4157,9 +4189,88 @@ const App = struct {
         }
     }
 
+    fn clearConnectSetupHint(self: *App) void {
+        if (self.connect_setup_hint) |*hint| {
+            hint.deinit(self.allocator);
+            self.connect_setup_hint = null;
+        }
+    }
+
+    fn applyConnectSetupHintFromPayload(self: *App, payload_json: []const u8) !void {
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, payload_json, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return error.InvalidResponse;
+        const root = parsed.value.object;
+
+        var hint = ConnectSetupHint{};
+        errdefer hint.deinit(self.allocator);
+
+        if (root.get("project_setup_required")) |value| {
+            if (value != .bool) return error.InvalidResponse;
+            hint.required = value.bool;
+        } else if (root.get("bootstrap_only")) |value| {
+            if (value != .bool) return error.InvalidResponse;
+            hint.required = value.bool;
+        }
+
+        if (root.get("project_setup_message")) |value| {
+            switch (value) {
+                .string => hint.message = try self.allocator.dupe(u8, value.string),
+                .null => {},
+                else => return error.InvalidResponse,
+            }
+        } else if (root.get("bootstrap_message")) |value| {
+            switch (value) {
+                .string => hint.message = try self.allocator.dupe(u8, value.string),
+                .null => {},
+                else => return error.InvalidResponse,
+            }
+        }
+
+        if (root.get("project_setup_project_id")) |value| {
+            switch (value) {
+                .string => hint.project_id = try self.allocator.dupe(u8, value.string),
+                .null => {},
+                else => return error.InvalidResponse,
+            }
+        } else if (root.get("project_id")) |value| {
+            switch (value) {
+                .string => hint.project_id = try self.allocator.dupe(u8, value.string),
+                .null => {},
+                else => return error.InvalidResponse,
+            }
+        }
+
+        if (root.get("project_setup_project_vision")) |value| {
+            switch (value) {
+                .string => hint.project_vision = try self.allocator.dupe(u8, value.string),
+                .null => {},
+                else => return error.InvalidResponse,
+            }
+        }
+
+        self.clearConnectSetupHint();
+        self.connect_setup_hint = hint;
+    }
+
     fn selectedProjectId(self: *const App) ?[]const u8 {
         if (self.settings_panel.project_id.items.len > 0) return self.settings_panel.project_id.items;
         return self.config.selectedProject();
+    }
+
+    fn defaultAttachProjectId(self: *const App) ?[]const u8 {
+        if (self.connect_setup_hint) |hint| {
+            if (hint.project_id) |project_id| {
+                if (project_id.len > 0) return project_id;
+            }
+        }
+        if (self.config.active_role == .admin) return "system";
+        return null;
+    }
+
+    fn preferredAttachProjectId(self: *const App) ?[]const u8 {
+        if (self.selectedProjectId()) |project_id| return project_id;
+        return self.defaultAttachProjectId();
     }
 
     fn selectedProjectSummary(self: *const App) ?*const workspace_types.ProjectSummary {
@@ -6365,6 +6476,42 @@ const App = struct {
         if (selected_project_line) |line| {
             self.drawLabel(rect.min[0] + pad, y, line, self.theme.colors.text_secondary);
             y += layout.line_height;
+        }
+        if (self.connect_setup_hint) |hint| {
+            const setup_status = if (hint.required) "required" else "ready";
+            var setup_line_buf: [384]u8 = undefined;
+            const setup_line = std.fmt.bufPrint(
+                &setup_line_buf,
+                "Project setup: {s}",
+                .{setup_status},
+            ) catch null;
+            if (setup_line) |line| {
+                self.drawLabel(
+                    rect.min[0] + pad,
+                    y,
+                    line,
+                    if (hint.required) zcolors.rgba(236, 174, 36, 255) else self.theme.colors.text_secondary,
+                );
+                y += layout.line_height;
+            }
+            if (hint.project_vision) |vision| {
+                var vision_line_buf: [640]u8 = undefined;
+                const vision_line = std.fmt.bufPrint(
+                    &vision_line_buf,
+                    "Project vision: {s}",
+                    .{vision},
+                ) catch null;
+                if (vision_line) |line| {
+                    self.drawTextTrimmed(
+                        rect.min[0] + pad,
+                        y,
+                        input_width,
+                        line,
+                        self.theme.colors.text_secondary,
+                    );
+                    y += layout.line_height;
+                }
+            }
         }
 
         if (self.workspace_state) |*status| {
@@ -10925,7 +11072,10 @@ const App = struct {
         try self.settings_panel.default_session.appendSlice(self.allocator, session.session_key);
         try self.setDefaultAgentInSettings(session.agent_id);
 
-        var effective_project_id = session.project_id;
+        var effective_project_id: ?[]const u8 = session.project_id;
+        if (effective_project_id == null) {
+            effective_project_id = self.preferredAttachProjectId();
+        }
         var effective_project_token = self.projectTokenForSessionProject(effective_project_id);
         var restore_warning: ?[]u8 = null;
         defer if (restore_warning) |value| self.allocator.free(value);
@@ -10937,19 +11087,24 @@ const App = struct {
             effective_project_id,
             effective_project_token,
         ) catch |err| {
-            const primary_detail = control_plane.lastRemoteError() orelse @errorName(err);
+            const primary_detail = if (err == error.RemoteError)
+                (control_plane.lastRemoteError() orelse @errorName(err))
+            else
+                @errorName(err);
             if (effective_project_id != null and isSelectedProjectAttachRemoteError(primary_detail)) {
+                const fallback_project_id = self.defaultAttachProjectId() orelse return err;
+                const fallback_project_token = self.projectTokenForSessionProject(fallback_project_id);
                 self.attachSessionBindingExplicit(
                     client,
                     session.session_key,
                     session.agent_id,
-                    null,
-                    null,
+                    fallback_project_id,
+                    fallback_project_token,
                 ) catch {
                     return err;
                 };
-                effective_project_id = null;
-                effective_project_token = null;
+                effective_project_id = fallback_project_id;
+                effective_project_token = fallback_project_token;
                 restore_warning = try std.fmt.allocPrint(
                     self.allocator,
                     "Restored session {s}, but project context was unavailable ({s}).",
@@ -11064,23 +11219,34 @@ const App = struct {
         project_id: ?[]const u8,
         project_token: ?[]const u8,
     ) ![]u8 {
+        const project = project_id orelse return error.ProjectIdRequired;
+        const trimmed_project = std.mem.trim(u8, project, " \t\r\n");
+        if (trimmed_project.len == 0) return error.ProjectIdRequired;
+        const normalized_project_token = normalizeProjectToken(project_token);
+        if (project_token) |raw_token| {
+            const trimmed_token = std.mem.trim(u8, raw_token, " \t\r\n");
+            if (trimmed_token.len > MAX_PROJECT_TOKEN_LEN) {
+                std.log.warn(
+                    "Skipping session attach project token because it exceeds {d} bytes",
+                    .{MAX_PROJECT_TOKEN_LEN},
+                );
+            }
+        }
+
         const escaped_session = try jsonEscape(self.allocator, session_key);
         defer self.allocator.free(escaped_session);
         const escaped_agent = try jsonEscape(self.allocator, agent_id);
         defer self.allocator.free(escaped_agent);
+        const escaped_project = try jsonEscape(self.allocator, trimmed_project);
+        defer self.allocator.free(escaped_project);
 
         var out = std.ArrayListUnmanaged(u8){};
         defer out.deinit(self.allocator);
         try out.writer(self.allocator).print(
-            "{{\"session_key\":\"{s}\",\"agent_id\":\"{s}\"",
-            .{ escaped_session, escaped_agent },
+            "{{\"session_key\":\"{s}\",\"agent_id\":\"{s}\",\"project_id\":\"{s}\"",
+            .{ escaped_session, escaped_agent, escaped_project },
         );
-        if (project_id) |project| {
-            const escaped_project = try jsonEscape(self.allocator, project);
-            defer self.allocator.free(escaped_project);
-            try out.writer(self.allocator).print(",\"project_id\":\"{s}\"", .{escaped_project});
-        }
-        if (project_token) |token| {
+        if (normalized_project_token) |token| {
             const escaped_token = try jsonEscape(self.allocator, token);
             defer self.allocator.free(escaped_token);
             try out.writer(self.allocator).print(",\"project_token\":\"{s}\"", .{escaped_token});
@@ -11185,11 +11351,8 @@ const App = struct {
     }
 
     fn attachSessionBinding(self: *App, client: *ws_client_mod.WebSocketClient, session_key: []const u8) !void {
-        const project_id = self.selectedProjectId();
-        const project_token = if (project_id) |value|
-            self.selectedProjectToken(value)
-        else
-            null;
+        const project_id = self.preferredAttachProjectId();
+        const project_token = self.projectTokenForSessionProject(project_id);
         try self.attachSessionBindingWithProject(
             client,
             session_key,
@@ -11207,6 +11370,7 @@ const App = struct {
         const had_pending_send = self.pending_send_message_id != null;
         self.setConnectionState(.connecting, "Connecting...");
         self.session_attach_state = .unknown;
+        self.clearConnectSetupHint();
         self.stopFilesystemWorker();
         self.clearFilesystemDirCache();
         self.clearContractServices();
@@ -11267,7 +11431,7 @@ const App = struct {
         defer if (fetched_worker_agent) |value| self.allocator.free(value);
 
         if (self.ws_client) |*client| {
-            control_plane.ensureUnifiedV2ConnectionWithTimeout(
+            const connect_payload_json = control_plane.ensureUnifiedV2ConnectionPayloadJsonWithTimeout(
                 self.allocator,
                 client,
                 &self.message_counter,
@@ -11298,6 +11462,11 @@ const App = struct {
                 self.setConnectionState(.error_state, msg);
                 return;
             };
+            defer self.allocator.free(connect_payload_json);
+            self.applyConnectSetupHintFromPayload(connect_payload_json) catch |err| {
+                std.log.warn("Failed to parse connect setup hint payload: {s}", .{@errorName(err)});
+                self.clearConnectSetupHint();
+            };
 
             if (self.settings_panel.default_session.items.len == 0) {
                 if (self.config.default_session) |default_session| {
@@ -11310,79 +11479,105 @@ const App = struct {
             const attach_session = self.settings_panel.default_session.items;
             try self.ensureSessionExists(attach_session, attach_session);
             worker_attach_session = attach_session;
-            worker_attach_project_id = self.selectedProjectId();
-            worker_attach_project_token = if (worker_attach_project_id) |project_id|
-                self.selectedProjectToken(project_id)
-            else
-                null;
+            worker_attach_project_id = self.preferredAttachProjectId();
+            worker_attach_project_token = self.projectTokenForSessionProject(worker_attach_project_id);
 
             self.attachSessionBinding(client, attach_session) catch |err| {
-                const primary_detail_owned = try self.allocator.dupe(
-                    u8,
-                    control_plane.lastRemoteError() orelse @errorName(err),
-                );
-                defer self.allocator.free(primary_detail_owned);
-
-                if (isProvisioningRemoteError(primary_detail_owned)) {
-                    std.log.err("Session attach blocked: {s}", .{primary_detail_owned});
-                    client.deinit();
-                    self.ws_client = null;
-                    const msg = self.formatControlRemoteMessage("Session attach failed", primary_detail_owned) orelse
-                        try std.fmt.allocPrint(self.allocator, "Session attach failed: {s}", .{primary_detail_owned});
-                    defer self.allocator.free(msg);
-                    self.setConnectionState(.error_state, msg);
-                    return;
-                }
-
-                const has_selected_project = self.selectedProjectId() != null;
-                if (has_selected_project) {
-                    std.log.warn(
-                        "Session attach with selected project failed; retrying default attach: {s}",
-                        .{primary_detail_owned},
+                if (err == error.ProjectIdRequired) {
+                    attach_warning = try self.allocator.dupe(
+                        u8,
+                        "Session attach requires an explicit project. Select a project in Settings and reconnect.",
                     );
-                    const selected_project_invalid = isSelectedProjectAttachRemoteError(primary_detail_owned);
-                    if (selected_project_invalid) {
-                        self.clearSelectedProjectAfterAttachFailure();
-                    }
-                    var fallback_ok = true;
-                    self.attachSessionBindingWithProject(client, attach_session, null, null) catch |fallback_err| {
-                        fallback_ok = false;
-                        const fallback_detail = control_plane.lastRemoteError() orelse @errorName(fallback_err);
-                        std.log.err(
-                            "Session attach failed with selected project ({s}); fallback attach also failed ({s})",
-                            .{ primary_detail_owned, fallback_detail },
-                        );
-                        attach_warning = try std.fmt.allocPrint(
-                            self.allocator,
-                            "Session attach failed: {s} (fallback also failed: {s}). Continuing with default server session binding.",
-                            .{ primary_detail_owned, fallback_detail },
-                        );
-                    };
-                    if (fallback_ok) {
-                        worker_attach_project_id = null;
-                        worker_attach_project_token = null;
-                        if (selected_project_invalid) {
-                            attach_warning = try self.allocator.dupe(
-                                u8,
-                                "Selected project is not available for this session; connected using default project.",
-                            );
-                        } else {
-                            attach_warning = try std.fmt.allocPrint(
-                                self.allocator,
-                                "Selected project attach failed ({s}); connected using default project.",
-                                .{primary_detail_owned},
-                            );
-                        }
-                    }
-                } else {
-                    std.log.err("Session attach failed: {s}", .{primary_detail_owned});
                     worker_attach_project_id = null;
                     worker_attach_project_token = null;
-                    attach_warning = try std.fmt.allocPrint(
-                        self.allocator,
-                        "Session attach failed ({s}); continuing with default server session binding.",
-                        .{primary_detail_owned},
+                } else {
+                    const primary_detail_owned = try self.allocator.dupe(
+                        u8,
+                        if (err == error.RemoteError)
+                            (control_plane.lastRemoteError() orelse @errorName(err))
+                        else
+                            @errorName(err),
                     );
+                    defer self.allocator.free(primary_detail_owned);
+
+                    if (isProvisioningRemoteError(primary_detail_owned)) {
+                        std.log.err("Session attach blocked: {s}", .{primary_detail_owned});
+                        client.deinit();
+                        self.ws_client = null;
+                        const msg = self.formatControlRemoteMessage("Session attach failed", primary_detail_owned) orelse
+                            try std.fmt.allocPrint(self.allocator, "Session attach failed: {s}", .{primary_detail_owned});
+                        defer self.allocator.free(msg);
+                        self.setConnectionState(.error_state, msg);
+                        return;
+                    }
+
+                    const has_selected_project = self.selectedProjectId() != null;
+                    if (has_selected_project) {
+                        std.log.warn(
+                            "Session attach with selected project failed; retrying default attach: {s}",
+                            .{primary_detail_owned},
+                        );
+                        const selected_project_invalid = isSelectedProjectAttachRemoteError(primary_detail_owned);
+                        if (selected_project_invalid) {
+                            self.clearSelectedProjectAfterAttachFailure();
+                        }
+                        var fallback_ok = true;
+                        const fallback_project_id = self.defaultAttachProjectId();
+                        const fallback_project_token = self.projectTokenForSessionProject(fallback_project_id);
+                        if (fallback_project_id == null) {
+                            fallback_ok = false;
+                            attach_warning = try std.fmt.allocPrint(
+                                self.allocator,
+                                "Session attach failed: {s}. Select a project and reconnect.",
+                                .{primary_detail_owned},
+                            );
+                        } else {
+                            self.attachSessionBindingWithProject(client, attach_session, fallback_project_id, fallback_project_token) catch |fallback_err| {
+                                fallback_ok = false;
+                                const fallback_detail = if (fallback_err == error.RemoteError)
+                                    (control_plane.lastRemoteError() orelse @errorName(fallback_err))
+                                else
+                                    @errorName(fallback_err);
+                                std.log.err(
+                                    "Session attach failed with selected project ({s}); fallback attach also failed ({s})",
+                                    .{ primary_detail_owned, fallback_detail },
+                                );
+                                attach_warning = try std.fmt.allocPrint(
+                                    self.allocator,
+                                    "Session attach failed: {s} (fallback also failed: {s}). Select a project and reconnect.",
+                                    .{ primary_detail_owned, fallback_detail },
+                                );
+                            };
+                        }
+                        if (fallback_ok) {
+                            worker_attach_project_id = fallback_project_id;
+                            worker_attach_project_token = fallback_project_token;
+                            if (selected_project_invalid) {
+                                attach_warning = try self.allocator.dupe(
+                                    u8,
+                                    "Selected project is not available for this session; connected using default project.",
+                                );
+                            } else {
+                                attach_warning = try std.fmt.allocPrint(
+                                    self.allocator,
+                                    "Selected project attach failed ({s}); connected using default project.",
+                                    .{primary_detail_owned},
+                                );
+                            }
+                        } else {
+                            worker_attach_project_id = null;
+                            worker_attach_project_token = null;
+                        }
+                    } else {
+                        std.log.err("Session attach failed: {s}", .{primary_detail_owned});
+                        worker_attach_project_id = null;
+                        worker_attach_project_token = null;
+                        attach_warning = try std.fmt.allocPrint(
+                            self.allocator,
+                            "Session attach failed ({s}). Select a project and reconnect.",
+                            .{primary_detail_owned},
+                        );
+                    }
                 }
             };
 
@@ -11398,23 +11593,27 @@ const App = struct {
             self.subscribeNodeServiceEvents(client);
         }
 
-        self.startFilesystemWorker(
-            effective_url,
-            connect_token,
-            worker_attach_session,
-            worker_attach_agent,
-            worker_attach_project_id,
-            worker_attach_project_token,
-        ) catch |err| {
-            std.log.warn("Failed to start filesystem worker: {s}", .{@errorName(err)});
-            const warning = std.fmt.allocPrint(
-                self.allocator,
-                "Filesystem worker unavailable: {s}",
-                .{@errorName(err)},
-            ) catch null;
-            defer if (warning) |value| self.allocator.free(value);
-            if (warning) |value| self.setFilesystemError(value);
-        };
+        if (worker_attach_project_id != null) {
+            self.startFilesystemWorker(
+                effective_url,
+                connect_token,
+                worker_attach_session,
+                worker_attach_agent,
+                worker_attach_project_id,
+                worker_attach_project_token,
+            ) catch |err| {
+                std.log.warn("Failed to start filesystem worker: {s}", .{@errorName(err)});
+                const warning = std.fmt.allocPrint(
+                    self.allocator,
+                    "Filesystem worker unavailable: {s}",
+                    .{@errorName(err)},
+                ) catch null;
+                defer if (warning) |value| self.allocator.free(value);
+                if (warning) |value| self.setFilesystemError(value);
+            };
+        } else {
+            self.setFilesystemError("Filesystem worker unavailable until a project is selected and attached.");
+        }
 
         self.setConnectionState(.connected, "Connected");
         self.requestDebugStreamSnapshot(true);
@@ -11456,6 +11655,20 @@ const App = struct {
         if (attach_warning) |warning| {
             self.setWorkspaceError(warning);
             try self.appendMessage("system", warning, null);
+        }
+        if (self.connect_setup_hint) |hint| {
+            if (hint.required) {
+                const base = hint.message orelse "Project setup is required. Ask Mother to gather setup details.";
+                const setup_notice = if (hint.project_vision) |vision|
+                    std.fmt.allocPrint(self.allocator, "{s} Project vision: {s}", .{ base, vision }) catch null
+                else
+                    self.allocator.dupe(u8, base) catch null;
+                defer if (setup_notice) |value| self.allocator.free(value);
+                if (setup_notice) |notice| {
+                    if (attach_warning == null) self.setWorkspaceError(notice);
+                    try self.appendMessage("system", notice, null);
+                }
+            }
         }
 
         if (had_pending_send and try self.tryResumePendingSendJob()) {
@@ -11660,11 +11873,23 @@ const App = struct {
             try self.appendMessage("system", "No active session available", null);
             return;
         }
+        var attach_project_id = self.preferredAttachProjectId();
+        var attach_project_token = self.projectTokenForSessionProject(attach_project_id);
+        var attached_during_send = false;
         if (self.session_attach_state == .unknown or self.session_attach_state == .err) {
             self.attachSessionBinding(client, session_key) catch |err| {
+                if (err == error.ProjectIdRequired) {
+                    const msg = "Session attach requires an explicit project. Select a project in Settings.";
+                    self.setWorkspaceError(msg);
+                    try self.appendMessage("system", msg, null);
+                    return err;
+                }
                 const primary_detail_owned = try self.allocator.dupe(
                     u8,
-                    control_plane.lastRemoteError() orelse @errorName(err),
+                    if (err == error.RemoteError)
+                        (control_plane.lastRemoteError() orelse @errorName(err))
+                    else
+                        @errorName(err),
                 );
                 defer self.allocator.free(primary_detail_owned);
 
@@ -11683,8 +11908,23 @@ const App = struct {
                     if (selected_project_invalid) {
                         self.clearSelectedProjectAfterAttachFailure();
                     }
-                    self.attachSessionBindingWithProject(client, session_key, null, null) catch |fallback_err| {
-                        const fallback_detail = control_plane.lastRemoteError() orelse @errorName(fallback_err);
+                    const fallback_project_id = self.defaultAttachProjectId();
+                    const fallback_project_token = self.projectTokenForSessionProject(fallback_project_id);
+                    if (fallback_project_id == null) {
+                        const err_text = try std.fmt.allocPrint(
+                            self.allocator,
+                            "Session attach failed: {s}. Select a project and retry.",
+                            .{primary_detail_owned},
+                        );
+                        defer self.allocator.free(err_text);
+                        try self.appendMessage("system", err_text, null);
+                        return err;
+                    }
+                    self.attachSessionBindingWithProject(client, session_key, fallback_project_id, fallback_project_token) catch |fallback_err| {
+                        const fallback_detail = if (fallback_err == error.RemoteError)
+                            (control_plane.lastRemoteError() orelse @errorName(fallback_err))
+                        else
+                            @errorName(fallback_err);
                         const err_text = try std.fmt.allocPrint(
                             self.allocator,
                             "Session attach failed: {s} (fallback also failed: {s})",
@@ -11694,6 +11934,8 @@ const App = struct {
                         try self.appendMessage("system", err_text, null);
                         return fallback_err;
                     };
+                    attach_project_id = fallback_project_id;
+                    attach_project_token = fallback_project_token;
 
                     const warning = if (selected_project_invalid) blk: {
                         break :blk "Selected project is not available for this session; using default project for this message.";
@@ -11709,6 +11951,7 @@ const App = struct {
                     return err;
                 }
             };
+            attached_during_send = true;
             self.refreshSessionAttachStatusOnce(client, session_key);
         } else if (self.session_attach_state == .warming) {
             // Avoid re-attaching while warmup is in-flight; that re-arms backend warmup and can
@@ -11723,6 +11966,38 @@ const App = struct {
             const detail = self.workspace_last_error orelse "Sandbox runtime is unavailable for this session.";
             try self.appendMessage("system", detail, null);
             return error.RemoteError;
+        }
+
+        if (attached_during_send and self.filesystem_worker == null and attach_project_id != null) {
+            var late_worker_agent = self.selectedAgentId();
+            var fetched_late_worker_agent: ?[]u8 = null;
+            defer if (fetched_late_worker_agent) |value| self.allocator.free(value);
+            if (late_worker_agent == null) {
+                fetched_late_worker_agent = self.fetchDefaultAgentFromServer(client, session_key) catch null;
+                if (fetched_late_worker_agent) |agent_id| {
+                    late_worker_agent = agent_id;
+                    self.setDefaultAgentInSettings(agent_id) catch {};
+                }
+            }
+            if (self.startFilesystemWorker(
+                client.url_buf,
+                client.token_buf,
+                session_key,
+                late_worker_agent,
+                attach_project_id,
+                attach_project_token,
+            )) |_| {
+                self.clearFilesystemError();
+            } else |worker_err| {
+                std.log.warn("Failed to start filesystem worker after late attach: {s}", .{@errorName(worker_err)});
+                const warning = std.fmt.allocPrint(
+                    self.allocator,
+                    "Filesystem worker unavailable: {s}",
+                    .{@errorName(worker_err)},
+                ) catch null;
+                defer if (warning) |value| self.allocator.free(value);
+                if (warning) |value| self.setFilesystemError(value);
+            }
         }
 
         const user_msg_id = try self.nextMessageId("msg");
@@ -11740,10 +12015,8 @@ const App = struct {
         self.pending_send_request_id = try self.allocator.dupe(u8, request_id);
         self.awaiting_reply = true;
 
-        const payload = try protocol_messages.buildSessionSend(self.allocator, request_id, text, session_key);
-        defer self.allocator.free(payload);
-        client.send(payload) catch |err| {
-            std.log.err("[GUI] sendChatMessageText: websocket send failed: {s}", .{@errorName(err)});
+        const job_id = self.submitChatJobViaFsrpc(client, text) catch |err| {
+            std.log.err("[GUI] sendChatMessageText: fsrpc submit failed: {s}", .{@errorName(err)});
             const err_text = try std.fmt.allocPrint(self.allocator, "Send failed: {s}", .{@errorName(err)});
             defer self.allocator.free(err_text);
             try self.appendMessage("system", err_text, null);
@@ -11755,6 +12028,11 @@ const App = struct {
             self.clearPendingSend();
             return err;
         };
+        if (self.pending_send_job_id) |value| {
+            self.allocator.free(value);
+            self.pending_send_job_id = null;
+        }
+        self.pending_send_job_id = job_id;
     }
 
     fn nextFsrpcTag(self: *App) u32 {
@@ -11935,54 +12213,13 @@ const App = struct {
     }
 
     fn sendChatViaFsrpc(self: *App, client: *ws_client_mod.WebSocketClient, text: []const u8) ![]u8 {
-        try self.fsrpcBootstrapGui(client);
+        const job_name_owned = try self.submitChatJobViaFsrpc(client, text);
+        defer self.allocator.free(job_name_owned);
 
-        const input_fid = self.nextFsrpcFid();
         const result_fid = self.nextFsrpcFid();
-        defer self.fsrpcClunkBestEffort(client, input_fid);
         defer self.fsrpcClunkBestEffort(client, result_fid);
 
-        const walk_input_tag = self.nextFsrpcTag();
-        const walk_input_req = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":[\"agents\",\"self\",\"chat\",\"control\",\"input\"]}}",
-            .{ walk_input_tag, input_fid },
-        );
-        defer self.allocator.free(walk_input_req);
-        var walk_input = try self.sendAndAwaitFsrpc(client, walk_input_req, walk_input_tag, FSRPC_DEFAULT_TIMEOUT_MS);
-        defer walk_input.deinit(self.allocator);
-        try self.ensureFsrpcOk(&walk_input);
-
-        const open_input_tag = self.nextFsrpcTag();
-        const open_input_req = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"rw\"}}",
-            .{ open_input_tag, input_fid },
-        );
-        defer self.allocator.free(open_input_req);
-        var open_input = try self.sendAndAwaitFsrpc(client, open_input_req, open_input_tag, FSRPC_DEFAULT_TIMEOUT_MS);
-        defer open_input.deinit(self.allocator);
-        try self.ensureFsrpcOk(&open_input);
-
-        const encoded = try encodeDataB64(self.allocator, text);
-        defer self.allocator.free(encoded);
-        const write_tag = self.nextFsrpcTag();
-        const write_req = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_write\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"data_b64\":\"{s}\"}}",
-            .{ write_tag, input_fid, encoded },
-        );
-        defer self.allocator.free(write_req);
-        var write = try self.sendAndAwaitFsrpc(client, write_req, write_tag, FSRPC_CHAT_WRITE_TIMEOUT_MS);
-        defer write.deinit(self.allocator);
-        try self.ensureFsrpcOk(&write);
-
-        const write_payload = try self.getFsrpcPayloadObject(write.parsed.value.object);
-        const job_value = write_payload.get("job") orelse return error.InvalidResponse;
-        if (job_value != .string) return error.InvalidResponse;
-        const job_name = job_value.string;
-
-        const escaped_job = try jsonEscape(self.allocator, job_name);
+        const escaped_job = try jsonEscape(self.allocator, job_name_owned);
         defer self.allocator.free(escaped_job);
         const walk_result_tag = self.nextFsrpcTag();
         const walk_result_req = try std.fmt.allocPrint(
@@ -12027,6 +12264,64 @@ const App = struct {
         _ = std.base64.standard.Decoder.decode(decoded, data_b64.string) catch return error.InvalidResponse;
 
         return decoded;
+    }
+
+    fn submitChatJobViaFsrpc(self: *App, client: *ws_client_mod.WebSocketClient, text: []const u8) ![]u8 {
+        try self.fsrpcBootstrapGui(client);
+
+        const input_fid = self.nextFsrpcFid();
+        defer self.fsrpcClunkBestEffort(client, input_fid);
+
+        const walk_input_tag = self.nextFsrpcTag();
+        const walk_input_req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":[\"agents\",\"self\",\"chat\",\"control\",\"input\"]}}",
+            .{ walk_input_tag, input_fid },
+        );
+        defer self.allocator.free(walk_input_req);
+        var walk_input = try self.sendAndAwaitFsrpc(client, walk_input_req, walk_input_tag, FSRPC_DEFAULT_TIMEOUT_MS);
+        defer walk_input.deinit(self.allocator);
+        try self.ensureFsrpcOk(&walk_input);
+
+        const open_input_tag = self.nextFsrpcTag();
+        const open_input_req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"rw\"}}",
+            .{ open_input_tag, input_fid },
+        );
+        defer self.allocator.free(open_input_req);
+        var open_input = try self.sendAndAwaitFsrpc(client, open_input_req, open_input_tag, FSRPC_DEFAULT_TIMEOUT_MS);
+        defer open_input.deinit(self.allocator);
+        try self.ensureFsrpcOk(&open_input);
+
+        const encoded = try encodeDataB64(self.allocator, text);
+        defer self.allocator.free(encoded);
+        var generated_write_request_id: ?[]const u8 = null;
+        defer if (generated_write_request_id) |value| self.allocator.free(value);
+        const write_request_id = if (self.pending_send_request_id) |pending|
+            pending
+        else blk: {
+            const generated = try self.nextMessageId("job");
+            generated_write_request_id = generated;
+            break :blk generated;
+        };
+        const escaped_write_request_id = try jsonEscape(self.allocator, write_request_id);
+        defer self.allocator.free(escaped_write_request_id);
+        const write_tag = self.nextFsrpcTag();
+        const write_req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_write\",\"tag\":{d},\"id\":\"{s}\",\"fid\":{d},\"offset\":0,\"data_b64\":\"{s}\"}}",
+            .{ write_tag, escaped_write_request_id, input_fid, encoded },
+        );
+        defer self.allocator.free(write_req);
+        var write = try self.sendAndAwaitFsrpc(client, write_req, write_tag, FSRPC_CHAT_WRITE_TIMEOUT_MS);
+        defer write.deinit(self.allocator);
+        try self.ensureFsrpcOk(&write);
+
+        const write_payload = try self.getFsrpcPayloadObject(write.parsed.value.object);
+        const job_value = write_payload.get("job") orelse return error.InvalidResponse;
+        if (job_value != .string) return error.InvalidResponse;
+        return self.allocator.dupe(u8, job_value.string);
     }
 
     fn splitFsPathSegments(self: *App, path: []const u8) !std.ArrayListUnmanaged([]u8) {
@@ -12226,6 +12521,73 @@ const App = struct {
         return self.parseJobStatusInfo(raw);
     }
 
+    fn replaySessionReceiveFromJobLog(self: *App, fallback_session_key: []const u8, log_text: []const u8) !bool {
+        var replayed = false;
+        var lines = std.mem.splitScalar(u8, log_text, '\n');
+        while (lines.next()) |line_raw| {
+            const line = std.mem.trim(u8, line_raw, " \t\r\n");
+            if (line.len == 0) continue;
+
+            var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, line, .{}) catch continue;
+            defer parsed.deinit();
+            if (parsed.value != .object) continue;
+
+            const root = parsed.value.object;
+            const type_val = root.get("type") orelse continue;
+            if (type_val != .string or !std.mem.eql(u8, type_val.string, "session.receive")) continue;
+
+            const payload_opt: ?std.json.ObjectMap = if (root.get("payload")) |payload_value| switch (payload_value) {
+                .object => payload_value.object,
+                else => null,
+            } else root;
+            const payload = payload_opt orelse root;
+            const request_id = extractRequestId(root, payload_opt);
+            const session_key = extractSessionKey(root, payload_opt) orelse fallback_session_key;
+            const timestamp = if (payload.get("timestamp")) |value| switch (value) {
+                .integer => value.integer,
+                else => if (root.get("timestamp")) |root_value| switch (root_value) {
+                    .integer => root_value.integer,
+                    else => std.time.milliTimestamp(),
+                } else std.time.milliTimestamp(),
+            } else if (root.get("timestamp")) |value| switch (value) {
+                .integer => value.integer,
+                else => std.time.milliTimestamp(),
+            } else std.time.milliTimestamp();
+            const final = if (payload.get("final")) |value| switch (value) {
+                .bool => value.bool,
+                else => true,
+            } else true;
+
+            const content_delta = if (payload.get("content_delta")) |value| switch (value) {
+                .string => value.string,
+                else => null,
+            } else if (root.get("content_delta")) |value| switch (value) {
+                .string => value.string,
+                else => null,
+            } else null;
+            if (content_delta) |delta| {
+                if (delta.len > 0) {
+                    try self.appendOrUpdateStreamingMessage(request_id, session_key, delta, false, timestamp);
+                    replayed = true;
+                }
+            }
+
+            const content = if (payload.get("content")) |value| switch (value) {
+                .string => value.string,
+                else => "",
+            } else if (root.get("content")) |value| switch (value) {
+                .string => value.string,
+                else => "",
+            } else "";
+            if (content.len > 0) {
+                try self.appendOrUpdateStreamingMessage(request_id, session_key, content, final, timestamp);
+                replayed = true;
+            }
+        }
+
+        return replayed;
+    }
+
     fn tryResumePendingSendJob(self: *App) !bool {
         const job_id = self.pending_send_job_id orelse return false;
         const client = if (self.ws_client) |*value| value else return false;
@@ -12251,6 +12613,10 @@ const App = struct {
             break :blk msg;
         };
         defer self.allocator.free(result);
+        const log_path = try std.fmt.allocPrint(self.allocator, "/agents/self/jobs/{s}/log.txt", .{job_id});
+        defer self.allocator.free(log_path);
+        const maybe_log = self.readFsPathTextGui(client, log_path) catch null;
+        defer if (maybe_log) |value| self.allocator.free(value);
 
         if (std.mem.eql(u8, status.state, "failed")) {
             if (self.pending_send_message_id) |message_id| {
@@ -12276,7 +12642,14 @@ const App = struct {
             value
         else
             try self.currentSessionOrDefault();
-        try self.appendMessageForSession(session_key, "assistant", result, null);
+        if (maybe_log) |log_text| {
+            const replayed = try self.replaySessionReceiveFromJobLog(session_key, log_text);
+            if (!replayed) {
+                try self.appendMessageForSession(session_key, "assistant", result, null);
+            }
+        } else {
+            try self.appendMessageForSession(session_key, "assistant", result, null);
+        }
         self.clearPendingSend();
         return true;
     }
@@ -12423,6 +12796,26 @@ const App = struct {
             if (obj.get("id")) |value| {
                 if (value == .string) return value.string;
             }
+        }
+        return null;
+    }
+
+    fn extractSessionKey(root: std.json.ObjectMap, payload: ?std.json.ObjectMap) ?[]const u8 {
+        if (payload) |obj| {
+            if (obj.get("session_key")) |value| {
+                if (value == .string) return value.string;
+            }
+        }
+        if (root.get("session_key")) |value| {
+            if (value == .string) return value.string;
+        }
+        if (payload) |obj| {
+            if (obj.get("sessionKey")) |value| {
+                if (value == .string) return value.string;
+            }
+        }
+        if (root.get("sessionKey")) |value| {
+            if (value == .string) return value.string;
         }
         return null;
     }
