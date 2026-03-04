@@ -3,6 +3,15 @@ const unified_v2 = @import("unified_v2_client.zig");
 pub const workspace_types = @import("workspace_types.zig");
 
 pub const default_timeout_ms: i64 = unified_v2.default_control_timeout_ms;
+const max_project_token_len: usize = 256;
+
+fn normalizeProjectToken(project_token: ?[]const u8) ?[]const u8 {
+    const token = project_token orelse return null;
+    const trimmed = std.mem.trim(u8, token, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    if (trimmed.len > max_project_token_len) return null;
+    return trimmed;
+}
 
 pub fn lastRemoteError() ?[]const u8 {
     return unified_v2.lastRemoteError();
@@ -196,9 +205,10 @@ pub fn activateProject(
     project_id: []const u8,
     project_token: ?[]const u8,
 ) !workspace_types.WorkspaceStatus {
+    const normalized_project_token = normalizeProjectToken(project_token);
     const escaped_project = try unified_v2.jsonEscape(allocator, project_id);
     defer allocator.free(escaped_project);
-    const payload_req = if (project_token) |token| blk: {
+    const payload_req = if (normalized_project_token) |token| blk: {
         const escaped_token = try unified_v2.jsonEscape(allocator, token);
         defer allocator.free(escaped_token);
         break :blk try std.fmt.allocPrint(
@@ -239,9 +249,10 @@ pub fn setProjectMount(
     export_name: []const u8,
     mount_path: []const u8,
 ) !workspace_types.ProjectDetail {
+    const normalized_project_token = normalizeProjectToken(project_token);
     const escaped_project = try unified_v2.jsonEscape(allocator, project_id);
     defer allocator.free(escaped_project);
-    const escaped_token = if (project_token) |value|
+    const escaped_token = if (normalized_project_token) |value|
         try unified_v2.jsonEscape(allocator, value)
     else
         null;
@@ -292,9 +303,10 @@ pub fn removeProjectMount(
 ) !workspace_types.ProjectDetail {
     if ((node_id_filter == null) != (export_name_filter == null)) return error.InvalidArguments;
 
+    const normalized_project_token = normalizeProjectToken(project_token);
     const escaped_project = try unified_v2.jsonEscape(allocator, project_id);
     defer allocator.free(escaped_project);
-    const escaped_token = if (project_token) |value|
+    const escaped_token = if (normalized_project_token) |value|
         try unified_v2.jsonEscape(allocator, value)
     else
         null;
@@ -360,9 +372,10 @@ pub fn rotateProjectToken(
     project_id: []const u8,
     current_project_token: ?[]const u8,
 ) !ProjectTokenMutation {
+    const normalized_project_token = normalizeProjectToken(current_project_token);
     const escaped_project = try unified_v2.jsonEscape(allocator, project_id);
     defer allocator.free(escaped_project);
-    const escaped_token = if (current_project_token) |value|
+    const escaped_token = if (normalized_project_token) |value|
         try unified_v2.jsonEscape(allocator, value)
     else
         null;
@@ -399,9 +412,10 @@ pub fn revokeProjectToken(
     project_id: []const u8,
     current_project_token: ?[]const u8,
 ) !ProjectTokenMutation {
+    const normalized_project_token = normalizeProjectToken(current_project_token);
     const escaped_project = try unified_v2.jsonEscape(allocator, project_id);
     defer allocator.free(escaped_project);
-    const escaped_token = if (current_project_token) |value|
+    const escaped_token = if (normalized_project_token) |value|
         try unified_v2.jsonEscape(allocator, value)
     else
         null;
@@ -555,13 +569,14 @@ pub fn workspaceStatus(
     project_id: ?[]const u8,
     project_token: ?[]const u8,
 ) !workspace_types.WorkspaceStatus {
+    const normalized_project_token = normalizeProjectToken(project_token);
     var payload_req: ?[]u8 = null;
     defer if (payload_req) |value| allocator.free(value);
 
     if (project_id) |project| {
         const escaped_project = try unified_v2.jsonEscape(allocator, project);
         defer allocator.free(escaped_project);
-        if (project_token) |token| {
+        if (normalized_project_token) |token| {
             const escaped_token = try unified_v2.jsonEscape(allocator, token);
             defer allocator.free(escaped_token);
             payload_req = try std.fmt.allocPrint(
@@ -652,6 +667,7 @@ pub fn sessionAttach(
     const project = project_id orelse return error.ProjectIdRequired;
     const trimmed_project = std.mem.trim(u8, project, " \t\r\n");
     if (trimmed_project.len == 0) return error.ProjectIdRequired;
+    const normalized_project_token = normalizeProjectToken(project_token);
 
     const escaped_session = try unified_v2.jsonEscape(allocator, session_key);
     defer allocator.free(escaped_session);
@@ -660,7 +676,7 @@ pub fn sessionAttach(
     const escaped_project = try unified_v2.jsonEscape(allocator, trimmed_project);
     defer allocator.free(escaped_project);
 
-    const escaped_token = if (project_token) |value|
+    const escaped_token = if (normalized_project_token) |value|
         try unified_v2.jsonEscape(allocator, value)
     else
         null;
@@ -1269,6 +1285,18 @@ fn getOptionalI64(obj: std.json.ObjectMap, name: []const u8, default_value: i64)
     const value = obj.get(name) orelse return default_value;
     if (value != .integer) return error.InvalidResponse;
     return value.integer;
+}
+
+test "normalizeProjectToken trims empty and drops oversized tokens" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect(normalizeProjectToken(null) == null);
+    try std.testing.expect(normalizeProjectToken("   \t\r\n") == null);
+    try std.testing.expectEqualStrings("proj-secret", normalizeProjectToken("  proj-secret  ").?);
+
+    const oversized = try allocator.alloc(u8, max_project_token_len + 1);
+    defer allocator.free(oversized);
+    @memset(oversized, 'x');
+    try std.testing.expect(normalizeProjectToken(oversized) == null);
 }
 
 test "parseProjectSummary accepts project_id key" {

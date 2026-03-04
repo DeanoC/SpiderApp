@@ -57,6 +57,7 @@ const FSRPC_CLUNK_TIMEOUT_MS: u32 = 1_000;
 const CONTROL_CONNECT_TIMEOUT_MS: i64 = 2_500;
 const CONTROL_SESSION_ATTACH_TIMEOUT_MS: i64 = 8_000;
 const CONTROL_SESSION_STATUS_TIMEOUT_MS: i64 = 2_000;
+const MAX_PROJECT_TOKEN_LEN: usize = 256;
 const WS_MAX_MESSAGES_PER_FRAME: u32 = 32;
 const WS_MAX_POLL_BUDGET_NS: i128 = 2 * std.time.ns_per_ms;
 const FS_WORKER_MAX_RESULTS_PER_FRAME: u32 = 64;
@@ -265,6 +266,14 @@ fn maskTokenForDisplay(allocator: std.mem.Allocator, token: []const u8) ![]u8 {
         "{s}...{s}",
         .{ token[0..4], token[token.len - 4 ..] },
     );
+}
+
+fn normalizeProjectToken(project_token: ?[]const u8) ?[]const u8 {
+    const token = project_token orelse return null;
+    const trimmed = std.mem.trim(u8, token, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    if (trimmed.len > MAX_PROJECT_TOKEN_LEN) return null;
+    return trimmed;
 }
 
 const SettingsFocusField = enum {
@@ -11213,6 +11222,16 @@ const App = struct {
         const project = project_id orelse return error.ProjectIdRequired;
         const trimmed_project = std.mem.trim(u8, project, " \t\r\n");
         if (trimmed_project.len == 0) return error.ProjectIdRequired;
+        const normalized_project_token = normalizeProjectToken(project_token);
+        if (project_token) |raw_token| {
+            const trimmed_token = std.mem.trim(u8, raw_token, " \t\r\n");
+            if (trimmed_token.len > MAX_PROJECT_TOKEN_LEN) {
+                std.log.warn(
+                    "Skipping session attach project token because it exceeds {d} bytes",
+                    .{MAX_PROJECT_TOKEN_LEN},
+                );
+            }
+        }
 
         const escaped_session = try jsonEscape(self.allocator, session_key);
         defer self.allocator.free(escaped_session);
@@ -11227,7 +11246,7 @@ const App = struct {
             "{{\"session_key\":\"{s}\",\"agent_id\":\"{s}\",\"project_id\":\"{s}\"",
             .{ escaped_session, escaped_agent, escaped_project },
         );
-        if (project_token) |token| {
+        if (normalized_project_token) |token| {
             const escaped_token = try jsonEscape(self.allocator, token);
             defer self.allocator.free(escaped_token);
             try out.writer(self.allocator).print(",\"project_token\":\"{s}\"", .{escaped_token});
