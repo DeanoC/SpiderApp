@@ -20,6 +20,9 @@ var g_fsrpc_tag: u32 = 1;
 var g_fsrpc_fid: u32 = 2;
 const fsrpc_default_timeout_ms: i64 = 15_000;
 const fsrpc_chat_write_timeout_ms: i64 = 180_000;
+const session_status_timeout_ms: i64 = 5_000;
+const session_warming_wait_timeout_ms: i64 = 30_000;
+const session_warming_poll_interval_ms: u64 = 250;
 const system_project_id = "system";
 const system_agent_id = "mother";
 
@@ -544,6 +547,84 @@ fn resolveAttachAgentForProject(
     return resolved_agent;
 }
 
+fn sessionStatusMatchesTarget(
+    status: *const workspace_types.SessionAttachStatus,
+    agent_id: []const u8,
+    project_id: []const u8,
+) bool {
+    if (!std.mem.eql(u8, status.agent_id, agent_id)) return false;
+    const attached_project_id = status.project_id orelse return false;
+    return std.mem.eql(u8, attached_project_id, project_id);
+}
+
+fn waitForSessionReady(
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+    session_key: []const u8,
+    agent_id: []const u8,
+    project_id: []const u8,
+) !void {
+    const start_ms = std.time.milliTimestamp();
+    var printed_warming = false;
+
+    while (true) {
+        var status = control_plane.sessionStatusWithTimeout(
+            allocator,
+            client,
+            &g_control_request_counter,
+            session_key,
+            session_status_timeout_ms,
+        ) catch |err| {
+            if (err == error.RemoteError) {
+                if (control_plane.lastRemoteError()) |remote| {
+                    logger.err("session status failed while waiting for ready: {s}", .{remote});
+                }
+            }
+            return err;
+        };
+        defer status.deinit(allocator);
+
+        if (!sessionStatusMatchesTarget(&status, agent_id, project_id)) {
+            logger.err(
+                "session binding changed while waiting: expected {s}@{s}, got {s}@{s}",
+                .{ agent_id, project_id, status.agent_id, status.project_id orelse "(none)" },
+            );
+            return error.SessionAttachMismatch;
+        }
+
+        if (std.mem.eql(u8, status.state, "ready")) return;
+
+        if (std.mem.eql(u8, status.state, "error")) {
+            const code = status.error_code orelse "runtime_unavailable";
+            const message = status.error_message orelse "runtime unavailable";
+            logger.err("session attach error: {s} [{s}]", .{ message, code });
+            return error.RemoteError;
+        }
+
+        if (std.mem.eql(u8, status.state, "warming")) {
+            if (!printed_warming) {
+                printed_warming = true;
+                logger.info(
+                    "Session runtime warming for {s}@{s}; waiting up to {d}ms...",
+                    .{ agent_id, project_id, session_warming_wait_timeout_ms },
+                );
+            }
+        } else {
+            logger.info("Session attach pending state={s}; waiting...", .{status.state});
+        }
+
+        if (std.time.milliTimestamp() - start_ms >= session_warming_wait_timeout_ms) {
+            logger.err(
+                "Session runtime did not become ready within {d}ms",
+                .{session_warming_wait_timeout_ms},
+            );
+            return error.RuntimeWarming;
+        }
+
+        std.Thread.sleep(session_warming_poll_interval_ms * std.time.ns_per_ms);
+    }
+}
+
 fn printWorkspaceStatus(stdout: anytype, status: *const workspace_types.WorkspaceStatus, verbose: bool) !void {
     try stdout.print("Agent: {s}\n", .{status.agent_id});
     if (status.project_id) |project_id| {
@@ -636,31 +717,89 @@ fn maybeApplyProjectContext(
     };
     defer allocator.free(attach_agent);
 
-    var attached = control_plane.sessionAttach(
+    var attach_state: []const u8 = "ready";
+    var active_agent: []const u8 = attach_agent;
+    var did_attach = true;
+
+    var existing_status = control_plane.sessionStatusWithTimeout(
         allocator,
         client,
         &g_control_request_counter,
         session_key,
-        attach_agent,
-        project_id,
-        token,
-    ) catch |err| {
-        if (err == error.RemoteError) {
-            if (control_plane.lastRemoteError()) |remote| {
-                logger.err("session attach failed: {s}", .{remote});
+        session_status_timeout_ms,
+    ) catch null;
+    defer if (existing_status) |*value| value.deinit(allocator);
+
+    if (existing_status) |*status| {
+        if (sessionStatusMatchesTarget(status, attach_agent, project_id)) {
+            did_attach = false;
+            active_agent = status.agent_id;
+            attach_state = status.state;
+            if (std.mem.eql(u8, status.state, "warming")) {
+                try waitForSessionReady(
+                    allocator,
+                    client,
+                    session_key,
+                    status.agent_id,
+                    project_id,
+                );
+                attach_state = "ready";
+            } else if (std.mem.eql(u8, status.state, "error")) {
+                // Re-attach below to attempt self-heal from stale error state.
+                did_attach = true;
+            } else if (!std.mem.eql(u8, status.state, "ready")) {
+                // Unknown/non-ready state: fall through to explicit attach.
+                did_attach = true;
             }
         }
-        return err;
-    };
-    defer attached.deinit(allocator);
+    }
+
+    if (did_attach) {
+        var attached = control_plane.sessionAttach(
+            allocator,
+            client,
+            &g_control_request_counter,
+            session_key,
+            attach_agent,
+            project_id,
+            token,
+        ) catch |err| {
+            if (err == error.RemoteError) {
+                if (control_plane.lastRemoteError()) |remote| {
+                    logger.err("session attach failed: {s}", .{remote});
+                }
+            }
+            return err;
+        };
+        defer attached.deinit(allocator);
+
+        active_agent = attached.agent_id;
+        attach_state = attached.state;
+
+        if (std.mem.eql(u8, attached.state, "warming")) {
+            try waitForSessionReady(
+                allocator,
+                client,
+                session_key,
+                attached.agent_id,
+                project_id,
+            );
+            attach_state = "ready";
+        } else if (std.mem.eql(u8, attached.state, "error")) {
+            const code = attached.error_code orelse "runtime_unavailable";
+            const message = attached.error_message orelse "runtime unavailable";
+            logger.err("session attach error: {s} [{s}]", .{ message, code });
+            return error.RemoteError;
+        }
+    }
 
     cfg.setDefaultSession(session_key) catch {};
-    cfg.setDefaultAgent(attached.agent_id) catch {};
+    cfg.setDefaultAgent(active_agent) catch {};
     cfg.save() catch {};
 
     logger.info(
         "Project context active: project={s} session={s} agent={s} state={s}",
-        .{ project_id, attached.session_key, attached.agent_id, attached.state },
+        .{ project_id, session_key, active_agent, attach_state },
     );
 }
 
