@@ -359,6 +359,18 @@ fn isUserScopedAgentId(agent_id: []const u8) bool {
     return std.mem.eql(u8, agent_id, "user") or std.mem.eql(u8, agent_id, "user-isolated");
 }
 
+const system_project_id = "system";
+const system_agent_id = "mother";
+
+fn isSystemProjectId(project_id: ?[]const u8) bool {
+    const concrete = project_id orelse return false;
+    return std.mem.eql(u8, concrete, system_project_id);
+}
+
+fn isSystemAgentId(agent_id: []const u8) bool {
+    return std.mem.eql(u8, agent_id, system_agent_id);
+}
+
 const SettingsPanel = struct {
     server_url: std.ArrayList(u8) = .empty,
     project_id: std.ArrayList(u8) = .empty,
@@ -11936,6 +11948,59 @@ const App = struct {
         return self.parseAgentFromSessionListPayload(payload_json, preferred_session_key);
     }
 
+    fn fetchFirstNonSystemAgentFromServer(
+        self: *App,
+        client: *ws_client_mod.WebSocketClient,
+    ) ![]u8 {
+        var agents = try control_plane.listAgents(
+            self.allocator,
+            client,
+            &self.message_counter,
+        );
+        defer workspace_types.deinitAgentList(self.allocator, &agents);
+
+        var fallback_non_system: ?[]const u8 = null;
+        for (agents.items) |agent| {
+            if (isSystemAgentId(agent.id)) continue;
+            if (agent.is_default) return self.allocator.dupe(u8, agent.id);
+            if (fallback_non_system == null) fallback_non_system = agent.id;
+        }
+
+        if (fallback_non_system) |agent_id| return self.allocator.dupe(u8, agent_id);
+        return error.NoProjectCompatibleAgent;
+    }
+
+    fn resolveAttachAgentForProject(
+        self: *App,
+        client: *ws_client_mod.WebSocketClient,
+        session_key: []const u8,
+        project_id: ?[]const u8,
+    ) ![]u8 {
+        var resolved_agent = if (self.selectedAgentId()) |value| blk: {
+            // Prevent stale persisted user-scoped agent ids from being reused on admin connects.
+            if (self.config.active_role == .admin and isUserScopedAgentId(value)) {
+                break :blk try self.fetchDefaultAgentFromServer(client, session_key);
+            }
+            break :blk try self.allocator.dupe(u8, value);
+        } else try self.fetchDefaultAgentFromServer(client, session_key);
+        errdefer self.allocator.free(resolved_agent);
+
+        if (isSystemProjectId(project_id)) {
+            if (!isSystemAgentId(resolved_agent)) {
+                self.allocator.free(resolved_agent);
+                resolved_agent = try self.allocator.dupe(u8, system_agent_id);
+            }
+            return resolved_agent;
+        }
+
+        if (project_id != null and isSystemAgentId(resolved_agent)) {
+            self.allocator.free(resolved_agent);
+            resolved_agent = try self.fetchFirstNonSystemAgentFromServer(client);
+        }
+
+        return resolved_agent;
+    }
+
     fn buildSessionAttachPayload(
         self: *App,
         session_key: []const u8,
@@ -12044,13 +12109,11 @@ const App = struct {
         project_id: ?[]const u8,
         project_token: ?[]const u8,
     ) !void {
-        const resolved_agent = if (self.selectedAgentId()) |value| blk: {
-            // Prevent stale persisted user-scoped agent ids from being reused on admin connects.
-            if (self.config.active_role == .admin and isUserScopedAgentId(value)) {
-                break :blk try self.fetchDefaultAgentFromServer(client, session_key);
-            }
-            break :blk try self.allocator.dupe(u8, value);
-        } else try self.fetchDefaultAgentFromServer(client, session_key);
+        const resolved_agent = try self.resolveAttachAgentForProject(
+            client,
+            session_key,
+            project_id,
+        );
         defer self.allocator.free(resolved_agent);
 
         const payload_json = try self.buildSessionAttachPayload(
@@ -12208,6 +12271,13 @@ const App = struct {
                     attach_warning = try self.allocator.dupe(
                         u8,
                         "Session attach requires an explicit project. Select a project in Settings and reconnect.",
+                    );
+                    worker_attach_project_id = null;
+                    worker_attach_project_token = null;
+                } else if (err == error.NoProjectCompatibleAgent) {
+                    attach_warning = try self.allocator.dupe(
+                        u8,
+                        "No non-system agent is available for the selected project. Provision/select a project agent and reconnect.",
                     );
                     worker_attach_project_id = null;
                     worker_attach_project_token = null;
@@ -12870,6 +12940,12 @@ const App = struct {
             self.attachSessionBinding(client, session_key) catch |err| {
                 if (err == error.ProjectIdRequired) {
                     const msg = "Session attach requires an explicit project. Select a project in Settings.";
+                    self.setWorkspaceError(msg);
+                    try self.appendMessage("system", msg, null);
+                    return err;
+                }
+                if (err == error.NoProjectCompatibleAgent) {
+                    const msg = "No non-system agent is available for the selected project. Provision/select a project agent first.";
                     self.setWorkspaceError(msg);
                     try self.appendMessage("system", msg, null);
                     return err;
