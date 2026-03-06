@@ -4960,13 +4960,8 @@ const App = struct {
     }
 
     fn selectedProjectId(self: *const App) ?[]const u8 {
-        if (self.settings_panel.project_id.items.len > 0) {
-            if (isValidProjectIdForAttach(self.settings_panel.project_id.items)) return self.settings_panel.project_id.items;
-            return null;
-        }
-        const configured = self.config.selectedProject() orelse return null;
-        if (!isValidProjectIdForAttach(configured)) return null;
-        return configured;
+        if (self.settings_panel.project_id.items.len > 0) return self.settings_panel.project_id.items;
+        return self.config.selectedProject();
     }
 
     fn defaultAttachProjectId(self: *const App) ?[]const u8 {
