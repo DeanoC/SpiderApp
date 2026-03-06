@@ -306,7 +306,15 @@ pub const WebSocketClient = struct {
                         self.inbound_queues.push(copy);
                     },
                     .ping => {
-                        client.writePong(@constCast(msg.data)) catch {};
+                        self.send_mutex.lock();
+                        defer self.send_mutex.unlock();
+                        if (self.connection_alive.load(.acquire) and !self.should_stop.load(.acquire)) {
+                            client.writePong(@constCast(msg.data)) catch |err| {
+                                std.log.warn("[WS] Pong write failed: {s}", .{@errorName(err)});
+                                self.connection_alive.store(false, .release);
+                                self.failAllWaiters();
+                            };
+                        }
                     },
                     .close => {
                         self.logVerbose("[WS] Got close frame", .{});
@@ -331,27 +339,35 @@ pub const WebSocketClient = struct {
         self.connection_alive.store(false, .release);
         self.failAllWaiters();
 
-        // Close connection
+        // Serialize close/deinit against send() to avoid socket-handle races.
+        self.send_mutex.lock();
         if (self.client) |*client| {
             client.close(.{}) catch {};
+        }
+        self.send_mutex.unlock();
 
-            // Wait for read thread to finish
-            if (self.read_thread) |thread| {
-                thread.join();
-                self.read_thread = null;
-            }
+        // Wait for read thread to finish after close wakes the read loop.
+        if (self.read_thread) |thread| {
+            thread.join();
+            self.read_thread = null;
+        }
 
+        self.send_mutex.lock();
+        defer self.send_mutex.unlock();
+        if (self.client) |*client| {
             client.deinit();
             self.client = null;
         }
     }
 
     pub fn send(self: *WebSocketClient, payload: []const u8) !void {
-        if (self.client == null) return error.NotConnected;
-        if (!self.connection_alive.load(.acquire)) return error.ConnectionClosed;
-        self.logVerbose("[WS] Sending {d} bytes", .{payload.len});
         self.send_mutex.lock();
         defer self.send_mutex.unlock();
+        if (self.client == null) return error.NotConnected;
+        if (!self.connection_alive.load(.acquire) or self.should_stop.load(.acquire)) {
+            return error.ConnectionClosed;
+        }
+        self.logVerbose("[WS] Sending {d} bytes", .{payload.len});
         if (self.client) |*client| {
             client.write(@constCast(payload)) catch |err| {
                 std.log.err("[WS] Send failed: {s}", .{@errorName(err)});
@@ -505,7 +521,15 @@ pub const WebSocketClient = struct {
                     };
                 },
                 .ping => {
-                    client.writePong(@constCast(msg.data)) catch {};
+                    self.send_mutex.lock();
+                    defer self.send_mutex.unlock();
+                    if (self.connection_alive.load(.acquire) and !self.should_stop.load(.acquire)) {
+                        client.writePong(@constCast(msg.data)) catch |err| {
+                            std.log.warn("[WS] Pong write failed: {s}", .{@errorName(err)});
+                            self.connection_alive.store(false, .release);
+                            self.failAllWaiters();
+                        };
+                    }
                     return null;
                 },
                 .close => {
