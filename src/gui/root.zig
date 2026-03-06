@@ -400,6 +400,60 @@ fn isUserScopedAgentId(agent_id: []const u8) bool {
     return std.mem.eql(u8, agent_id, "user") or std.mem.eql(u8, agent_id, "user-isolated");
 }
 
+fn isValidSessionKeyForAttach(value: []const u8) bool {
+    if (value.len == 0 or value.len > 128) return false;
+    for (value) |char| {
+        if (std.ascii.isAlphanumeric(char)) continue;
+        if (char == '-' or char == '_' or char == '.' or char == ':') continue;
+        return false;
+    }
+    return true;
+}
+
+fn isValidAgentIdForAttach(value: []const u8) bool {
+    if (value.len == 0 or value.len > 128) return false;
+    if (std.mem.eql(u8, value, ".")) return false;
+    for (value) |char| {
+        if (std.ascii.isAlphanumeric(char)) continue;
+        if (char == '_' or char == '-') continue;
+        return false;
+    }
+    return true;
+}
+
+fn isValidProjectIdForAttach(value: []const u8) bool {
+    if (value.len == 0 or value.len > 128) return false;
+    if (std.mem.eql(u8, value, ".") or std.mem.eql(u8, value, "..")) return false;
+    for (value) |char| {
+        if (std.ascii.isAlphanumeric(char)) continue;
+        if (char == '_' or char == '-' or char == '.') continue;
+        return false;
+    }
+    return true;
+}
+
+fn sanitizeSessionKey(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    if (trimmed.len == 0) return allocator.dupe(u8, "main");
+
+    var out = std.ArrayListUnmanaged(u8){};
+    errdefer out.deinit(allocator);
+
+    for (trimmed) |char| {
+        if (out.items.len >= 128) break;
+        if (std.ascii.isAlphanumeric(char) or char == '-' or char == '_' or char == '.' or char == ':') {
+            try out.append(allocator, char);
+        } else {
+            try out.append(allocator, '-');
+        }
+    }
+
+    if (out.items.len == 0) {
+        try out.appendSlice(allocator, "main");
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 const system_project_id = "system";
 const system_agent_id = "mother";
 
@@ -4904,8 +4958,13 @@ const App = struct {
     }
 
     fn selectedProjectId(self: *const App) ?[]const u8 {
-        if (self.settings_panel.project_id.items.len > 0) return self.settings_panel.project_id.items;
-        return self.config.selectedProject();
+        if (self.settings_panel.project_id.items.len > 0) {
+            if (isValidProjectIdForAttach(self.settings_panel.project_id.items)) return self.settings_panel.project_id.items;
+            return null;
+        }
+        const configured = self.config.selectedProject() orelse return null;
+        if (!isValidProjectIdForAttach(configured)) return null;
+        return configured;
     }
 
     fn defaultAttachProjectId(self: *const App) ?[]const u8 {
@@ -12477,8 +12536,13 @@ const App = struct {
     }
 
     fn selectedAgentId(self: *App) ?[]const u8 {
-        if (self.settings_panel.default_agent.items.len > 0) return self.settings_panel.default_agent.items;
-        return self.config.selectedAgent();
+        if (self.settings_panel.default_agent.items.len > 0) {
+            if (isValidAgentIdForAttach(self.settings_panel.default_agent.items)) return self.settings_panel.default_agent.items;
+            return null;
+        }
+        const configured = self.config.selectedAgent() orelse return null;
+        if (!isValidAgentIdForAttach(configured)) return null;
+        return configured;
     }
 
     fn sessionHistoryAgentFilter(self: *App) ?[]const u8 {
@@ -12837,6 +12901,9 @@ const App = struct {
         const project = project_id orelse return error.ProjectIdRequired;
         const trimmed_project = std.mem.trim(u8, project, " \t\r\n");
         if (trimmed_project.len == 0) return error.ProjectIdRequired;
+        if (!isValidSessionKeyForAttach(session_key)) return error.InvalidSessionKey;
+        if (!isValidAgentIdForAttach(agent_id)) return error.InvalidAgentId;
+        if (!isValidProjectIdForAttach(trimmed_project)) return error.InvalidProjectId;
         const normalized_project_token = normalizeProjectToken(project_token);
 
         const escaped_session = try jsonEscape(self.allocator, session_key);
@@ -14605,11 +14672,17 @@ const App = struct {
     fn currentSessionOrDefault(self: *App) ![]const u8 {
         self.sanitizeCurrentSessionSelection();
 
-        if (self.current_session_key) |current| return current;
+        if (self.current_session_key) |current| {
+            if (isValidSessionKeyForAttach(current)) return current;
+            try self.ensureSessionExists("main", "Main");
+            return self.current_session_key.?;
+        }
         if (self.chat_sessions.items.len > 0) {
             const fallback = self.chat_sessions.items[0].key;
-            try self.setCurrentSessionKey(fallback);
-            return fallback;
+            if (isValidSessionKeyForAttach(fallback)) {
+                try self.setCurrentSessionKey(fallback);
+                return fallback;
+            }
         }
         const fallback = "main";
         try self.ensureSessionExists(fallback, fallback);
@@ -16218,12 +16291,14 @@ const App = struct {
 
         if (action.new_chat_session_key) |new_key| {
             defer self.allocator.free(new_key);
+            const sanitized_key = sanitizeSessionKey(self.allocator, new_key) catch return;
+            defer self.allocator.free(sanitized_key);
 
-            if (self.setCurrentSessionByKey(new_key)) {
+            if (self.setCurrentSessionByKey(sanitized_key)) {
                 return;
             }
-            self.addSession(new_key, new_key) catch {};
-            _ = self.setCurrentSessionByKey(new_key);
+            self.addSession(sanitized_key, new_key) catch {};
+            _ = self.setCurrentSessionByKey(sanitized_key);
         }
     }
 
