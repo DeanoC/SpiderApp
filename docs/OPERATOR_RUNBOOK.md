@@ -1,6 +1,6 @@
-# ZiggyStarSpider Operator Runbook
+# SpiderApp Operator Runbook
 
-This runbook is for operating a distributed Spiderweb workspace from ZiggyStarSpider (CLI + GUI) using unified-v2.
+This runbook is for operating a distributed Spiderweb workspace from SpiderApp (CLI + GUI) using unified-v2.
 
 ## 1. Preconditions
 
@@ -10,15 +10,15 @@ This runbook is for operating a distributed Spiderweb workspace from ZiggyStarSp
 
 ## 2. Auth Setup + Rotation
 
-Spiderweb uses two main roles (`admin`, `user`). ZiggyStarSpider stores them in local config as role-specific secrets.
+Spiderweb uses two main roles (`admin`, `user`). SpiderApp stores them in local config as role-specific secrets.
 
 CLI:
 
 ```bash
-zss auth status
-zss auth status --reveal
-zss auth rotate admin
-zss auth rotate user --reveal
+spider auth status
+spider auth status --reveal
+spider auth rotate admin
+spider auth rotate user --reveal
 ```
 
 Notes:
@@ -29,10 +29,10 @@ Notes:
 ## 3. Basic Bring-Up (CLI)
 
 ```bash
-zss --url ws://127.0.0.1:18790 connect
-zss --url ws://127.0.0.1:18790 node list
-zss --url ws://127.0.0.1:18790 project up "My Project"
-zss --url ws://127.0.0.1:18790 --verbose workspace status
+spider --url ws://127.0.0.1:18790 connect
+spider --url ws://127.0.0.1:18790 node list
+spider --url ws://127.0.0.1:18790 project up "My Project"
+spider --url ws://127.0.0.1:18790 --verbose workspace status
 ```
 
 Expected outcome:
@@ -43,9 +43,9 @@ Expected outcome:
 ## 4. Filesystem Validation
 
 ```bash
-zss --url ws://127.0.0.1:18790 fs ls /
-zss --url ws://127.0.0.1:18790 fs tree / --max-depth 2
-zss --url ws://127.0.0.1:18790 fs read /capabilities/chat/control/help
+spider --url ws://127.0.0.1:18790 fs ls /
+spider --url ws://127.0.0.1:18790 fs tree / --max-depth 2
+spider --url ws://127.0.0.1:18790 fs read /capabilities/chat/control/help
 ```
 
 Expected outcome:
@@ -56,19 +56,19 @@ Expected outcome:
 ## 5. Chat Capability Validation
 
 ```bash
-zss --url ws://127.0.0.1:18790 chat send "summarize active mounts"
+spider --url ws://127.0.0.1:18790 chat send "summarize active mounts"
 ```
 
 If the request is queued or interrupted, use:
 
 ```bash
-zss --url ws://127.0.0.1:18790 chat resume
-zss --url ws://127.0.0.1:18790 chat resume <job-id>
+spider --url ws://127.0.0.1:18790 chat resume
+spider --url ws://127.0.0.1:18790 chat resume <job-id>
 ```
 
 ## 6. GUI Bring-Up
 
-1. Run `zig build run-gui` (or launch `zig-out/bin/zss-gui`).
+1. Run `zig build run-gui` (or launch `zig-out/bin/spider-gui`).
 2. In Settings:
    - set server URL
    - choose connect role (`Admin` or `User`)

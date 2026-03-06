@@ -1,4 +1,4 @@
-//! TUI Testing Framework for ZiggyStarSpider
+//! TUI Testing Framework for SpiderApp
 //! 
 //! This module provides a headless testing framework for the TUI application.
 //! It allows programmatic control of the TUI for automated testing.

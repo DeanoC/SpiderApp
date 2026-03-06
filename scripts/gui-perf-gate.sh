@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ZIG_BIN="${ZIG_BIN:-zig}"
-GUI_BIN="$ROOT_DIR/zig-out/bin/zss-gui"
+GUI_BIN="$ROOT_DIR/zig-out/bin/spider-gui"
 PERF_GATE_DURATION_MS="${PERF_GATE_DURATION_MS:-12000}"
 PERF_GATE_MIN_FPS="${PERF_GATE_MIN_FPS:-20}"
 PERF_GATE_REPORT="${PERF_GATE_REPORT:-$ROOT_DIR/zig-out/gui-perf-gate-report.txt}"

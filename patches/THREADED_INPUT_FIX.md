@@ -102,7 +102,7 @@ pub fn deinit(self: *App) void {
 ```bash
 cd /root/.cache/zig/p/tui-0.0.1-TMwxp-tWBgBwZqdkgqHn4c_YDJSUQhha2-OKOFBGYig3/
 cp src/app.zig src/app.zig.bak
-cp /root/.openclaw/workspace/ZiggyStarSpider/patches/app_threaded_input.zig src/app.zig
+cp /root/.openclaw/workspace/SpiderApp/patches/app_threaded_input.zig src/app.zig
 ```
 
 ### Option 2: Use as a local override
@@ -115,7 +115,7 @@ Apply the patch to a fork of `tui.zig` and update your `build.zig.zon` to use yo
 
 Build and run the TUI:
 ```bash
-cd /root/.openclaw/workspace/ZiggyStarSpider
+cd /root/.openclaw/workspace/SpiderApp
 zig build run-tui
 ```
 

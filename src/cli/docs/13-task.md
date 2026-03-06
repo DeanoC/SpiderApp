@@ -8,7 +8,7 @@ List active tasks.
 
 **Examples:**
 ```bash
-ziggystarspider task list
+spider task list
 ```
 
 **Output:**
@@ -27,7 +27,7 @@ Show detailed information about a task.
 
 **Examples:**
 ```bash
-ziggystarspider task info T1
+spider task info T1
 ```
 
 **Output:**

@@ -8,7 +8,7 @@ Show running workers.
 
 **Examples:**
 ```bash
-ziggystarspider worker list
+spider worker list
 ```
 
 **Output:**
@@ -27,5 +27,5 @@ Show logs for a specific worker.
 
 **Examples:**
 ```bash
-ziggystarspider worker logs worker-1
+spider worker logs worker-1
 ```

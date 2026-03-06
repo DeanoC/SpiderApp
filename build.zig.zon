@@ -1,27 +1,20 @@
 .{
-    .name = .ziggystarspider,
+    .name = .spiderapp,
     .version = "0.1.0",
-    .fingerprint = 0x32bce781e04ead22,
+    .fingerprint = 0xa8f707a3f86a209b,
     .minimum_zig_version = "0.15.0",
     .dependencies = .{
         .websocket = .{
             .path = "deps/websocket",
         },
         .ziggy_core = .{
-            .url = "https://github.com/DeanoC/ziggy-core/archive/refs/heads/master.tar.gz",
-            .hash = "ziggy_core-0.1.0-q2d-rGiFAAA8ZiSbvWysW_gbVUJMoh-fGGn8PINTljE6",
+            .path = "deps/ziggy-core",
         },
-        .ziggy_spider_protocol = .{
-            .url = "https://github.com/DeanoC/ZiggySpiderProtocol/archive/2eb0e87000bbdbcaca51c2281fd7c0048ce4bc90.tar.gz",
-            .hash = "ziggy_spider_protocol-0.1.0-Tn7uq8cvCQDowm7A_0nXIXG1ltU5ov_kYbpSqVtcA0cK",
+        .spider_protocol = .{
+            .path = "deps/spider-protocol",
         },
         .ziggy_ui = .{
-            .url = "https://github.com/DeanoC/ziggy-ui/archive/f66fb6d8218d4bc42493aead05fa449c6c677cbf.tar.gz",
-            .hash = "ziggy_ui-0.1.0-dS4PqODE8QFJ4vcMimQQGm_DStkTyquXFeyh-ussojL1",
-        },
-        .ziggy_ui_local = .{
-            .path = "../ziggy-ui",
-            .lazy = true,
+            .path = "deps/ziggy-ui",
         },
         .sdl3 = .{
             .url = "https://github.com/castholm/SDL/archive/refs/heads/main.zip",

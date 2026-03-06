@@ -1,6 +1,6 @@
 # ZSS Data Model Documentation
 
-> Project/Goal/Task data model for ZiggyStarSpider (ZSS) - Issue #4
+> Project/Goal/Task data model for SpiderApp (ZSS) - Issue #4
 
 ## Overview
 
@@ -978,7 +978,7 @@ For the MVP, Spiderweb uses simple JSON file storage:
 ZSS maintains a local cache for offline viewing:
 
 ```
-~/.zss/
+~/.spider/
 ├── cache/
 │   ├── projects.json       # Last known project list
 │   ├── goals_<project_id>.json

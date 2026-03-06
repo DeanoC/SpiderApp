@@ -164,7 +164,7 @@ The MVP is achieved when:
 ## GitHub Issues Template
 
 Each issue should have:
-- **Label:** `spiderweb`, `zss`, `protocol`, `ui`, `core`
+- **Label:** `spiderweb`, `spider`, `protocol`, `ui`, `core`
 - **Milestone:** One of Phase 0-5
 - **Size:** `small`, `medium`, `large`
 - **Dependencies:** Other issues that must be done first
@@ -180,7 +180,7 @@ Dependencies: #1 (data model)
 
 ## Next Steps
 
-1. Create GitHub repos for ZiggyStarSpider
+1. Create GitHub repos for SpiderApp
 2. Create issues for Phase 0-1 (immediate work)
 3. Set up milestones in GitHub
 4. Start with #1: Design project data model

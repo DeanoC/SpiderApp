@@ -16,7 +16,7 @@ const debug_tui = @import("debug_tui.zig");
 
 pub fn main() !void {
     std.debug.print("\n========================================\n", .{});
-    std.debug.print("ZiggyStarSpider TUI Test Suite\n", .{});
+    std.debug.print("SpiderApp TUI Test Suite\n", .{});
     std.debug.print("========================================\n", .{});
     
     std.debug.print("\nTUI Testing Framework initialized.\n", .{});

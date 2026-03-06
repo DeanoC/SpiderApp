@@ -1,6 +1,6 @@
 const std = @import("std");
 
-// Client configuration for ZiggyStarSpider
+// Client configuration for SpiderApp
 
 pub const ProjectTokenEntry = struct {
     project_id: []const u8,
@@ -106,7 +106,7 @@ pub const Config = struct {
         errdefer allocator.free(admin_token);
         const user_token = try allocator.dupe(u8, "");
         errdefer allocator.free(user_token);
-        const update_manifest_url = try allocator.dupe(u8, "https://github.com/DeanoC/ZiggyStarSpider/releases/latest/download/update.json");
+        const update_manifest_url = try allocator.dupe(u8, "https://github.com/DeanoC/SpiderApp/releases/latest/download/update.json");
         errdefer allocator.free(update_manifest_url);
         const profiles = try allocator.alloc(ConnectionProfile, 1);
         errdefer allocator.free(profiles);
@@ -820,7 +820,7 @@ pub const Config = struct {
         };
         defer allocator.free(home);
 
-        return std.fs.path.join(allocator, &.{ home, ".config", "zss" });
+        return std.fs.path.join(allocator, &.{ home, ".config", "spider" });
     }
 
     fn loadFromJsonSlice(allocator: std.mem.Allocator, data: []const u8) !Config {
@@ -928,7 +928,7 @@ pub const Config = struct {
             .recent_projects = loaded_recent_projects,
             .project_workspace_layout_index = loaded_layout_index,
             .update_manifest_url = try duplicateOptionalString(allocator, json.update_manifest_url) orelse
-                try allocator.dupe(u8, "https://github.com/DeanoC/ZiggyStarSpider/releases/latest/download/update.json"),
+                try allocator.dupe(u8, "https://github.com/DeanoC/SpiderApp/releases/latest/download/update.json"),
             .ui_theme = try duplicateOptionalString(allocator, json.ui_theme),
             .ui_theme_pack = try duplicateOptionalString(allocator, json.ui_theme_pack),
             .ui_watch_theme_pack = json.ui_watch_theme_pack orelse false,

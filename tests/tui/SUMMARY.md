@@ -2,7 +2,7 @@
 
 ## What Was Created
 
-A complete headless testing framework for the ZiggyStarSpider TUI application has been created in the `tests/tui/` directory.
+A complete headless testing framework for the SpiderApp TUI application has been created in the `tests/tui/` directory.
 
 ## Files Created
 
@@ -103,7 +103,7 @@ zig build test-tui
 
 # Build test executable
 zig build build-tui-test
-./zig-out/bin/zss-tui-test
+./zig-out/bin/spider-tui-test
 ```
 
 ### Writing New Tests

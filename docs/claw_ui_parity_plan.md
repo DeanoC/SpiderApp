@@ -1,7 +1,7 @@
 # Plan: Port Main Window, Chat, and Settings Parity from ZiggyStarClaw
 
 ## Goal
-Advance `ZiggyStarSpider` UI parity with `ZiggyStarClaw` for:
+Advance `SpiderApp` UI parity with `ZiggyStarClaw` for:
 
 - main window/workspace behavior
 - chat session + streaming behavior

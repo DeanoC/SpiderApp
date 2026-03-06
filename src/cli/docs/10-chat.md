@@ -9,14 +9,14 @@ Send a message to the AI assistant.
 
 **Examples:**
 ```bash
-ziggystarspider chat send "Hello!"
-ziggystarspider chat send "What's the status of the project?"
+spider chat send "Hello!"
+spider chat send "What's the status of the project?"
 ```
 
 **Interactive mode:**
 ```
-ZiggyStarSpider> send Hello!
-ZiggyStarSpider> send What's next?
+SpiderApp> send Hello!
+SpiderApp> send What's next?
 ```
 
 ## chat history
@@ -25,8 +25,8 @@ Show recent chat history for the current session.
 
 **Examples:**
 ```bash
-ziggystarspider chat history
-ziggystarspider chat history --limit 20
+spider chat history
+spider chat history --limit 20
 ```
 
 **Notes:**
@@ -39,6 +39,6 @@ Inspect queued/running/done chat jobs and resume by job id.
 
 **Examples:**
 ```bash
-ziggystarspider chat resume
-ziggystarspider chat resume job-12
+spider chat resume
+spider chat resume job-12
 ```

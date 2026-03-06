@@ -3,7 +3,7 @@ const cli = @import("cli/main.zig");
 const ziggy_core = @import("ziggy-core");
 const logger = ziggy_core.utils.logger;
 
-// ZiggyStarSpider - Native client for ZiggySpiderweb
+// SpiderApp - Native client for ZiggySpiderweb
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};

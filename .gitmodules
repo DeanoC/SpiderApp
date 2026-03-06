@@ -1,0 +1,9 @@
+[submodule "deps/ziggy-core"]
+	path = deps/ziggy-core
+	url = https://github.com/DeanoC/ziggy-core
+[submodule "deps/spider-protocol"]
+	path = deps/spider-protocol
+	url = https://github.com/DeanoC/SpiderProtocol
+[submodule "deps/ziggy-ui"]
+	path = deps/ziggy-ui
+	url = https://github.com/DeanoC/ziggy-ui

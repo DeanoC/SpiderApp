@@ -22,7 +22,7 @@ zig build test
 
 ```bash
 zig build
-./zig-out/bin/ziggystarspider --help
+./zig-out/bin/spider --help
 ```
 
 ### GUI
@@ -34,7 +34,7 @@ zig build run-gui
 zig build gui -Dterminal-backend=ghostty-vt
 ```
 
-GUI binary: `zig-out/bin/zss-gui`
+GUI binary: `zig-out/bin/spider-gui`
 
 Terminal backend notes:
 - build option sets the default (`plain` or `ghostty-vt`)
@@ -45,32 +45,32 @@ Terminal backend notes:
 
 ```bash
 # Connect
-ziggystarspider connect --url ws://127.0.0.1:18790
+spider connect --url ws://127.0.0.1:18790
 
 # Project control
-ziggystarspider project list
-ziggystarspider --operator-token op-secret project create "Distributed Workspace" "unified mounts"
-ziggystarspider project use proj-1 proj-token-abc
-ziggystarspider workspace status
+spider project list
+spider --operator-token op-secret project create "Distributed Workspace" "unified mounts"
+spider project use proj-1 proj-token-abc
+spider workspace status
 
 # Topology
-ziggystarspider node list
-ziggystarspider node info node-1
+spider node list
+spider node info node-1
 
 # Unified filesystem access
-ziggystarspider fs ls /
-ziggystarspider fs tree /spiderweb
-ziggystarspider fs read /spiderweb/projects/proj-1/workspace/README.md
+spider fs ls /
+spider fs tree /spiderweb
+spider fs read /spiderweb/projects/proj-1/workspace/README.md
 
 # Agent chat via FS-RPC capability path
-ziggystarspider chat send "summarize current mounts"
+spider chat send "summarize current mounts"
 
 # Session control
-ziggystarspider session list
-ziggystarspider session history --limit 5
-ziggystarspider session attach review mother --project system
-ziggystarspider session resume review
-ziggystarspider session restore
+spider session list
+spider session history --limit 5
+spider session attach review mother --project system
+spider session resume review
+spider session restore
 ```
 
 Useful options:

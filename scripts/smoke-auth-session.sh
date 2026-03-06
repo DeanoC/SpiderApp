@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Auth/session smoke checks for ZiggyStarSpider.
+# Auth/session smoke checks for SpiderApp.
 # Covers auth role matrix, token rotation, and session_busy behavior.
 
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ZSS_BIN="${ZSS_BIN:-$ROOT_DIR/zig-out/bin/zss}"
+ZSS_BIN="${ZSS_BIN:-$ROOT_DIR/zig-out/bin/spider}"
 SPIDERWEB_URL="${SPIDERWEB_URL:-ws://127.0.0.1:18790}"
 SPIDERWEB_CONTROL_BIN="${SPIDERWEB_CONTROL_BIN:-spiderweb-control}"
 
@@ -92,7 +92,7 @@ if run_user auth status >"$tmp_forbidden" 2>&1; then
 fi
 if ! grep -Eq 'forbidden|requires admin token|"code":"forbidden"' "$tmp_forbidden"; then
     if grep -q 'RemoteError' "$tmp_forbidden" && verify_user_forbidden_with_control "$tmp_forbidden_control"; then
-        log "user auth status returned RemoteError in zss output; control-plane confirms forbidden"
+        log "user auth status returned RemoteError in spider output; control-plane confirms forbidden"
     else
         cat "$tmp_forbidden"
         if [[ -s "$tmp_forbidden_control" ]]; then
@@ -120,7 +120,7 @@ if run_user auth status >"$tmp_forbidden" 2>&1; then
 fi
 if ! grep -Eq 'forbidden|requires admin token|"code":"forbidden"' "$tmp_forbidden"; then
     if grep -q 'RemoteError' "$tmp_forbidden" && verify_user_forbidden_with_control "$tmp_forbidden_control"; then
-        log "post-rotate user auth status returned RemoteError in zss output; control-plane confirms forbidden"
+        log "post-rotate user auth status returned RemoteError in spider output; control-plane confirms forbidden"
     else
         cat "$tmp_forbidden"
         if [[ -s "$tmp_forbidden_control" ]]; then

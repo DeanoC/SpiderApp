@@ -440,7 +440,7 @@ pub const DiagnosticConnectScreen = struct {
         s.clear();
 
         // Title
-        const title = "ZiggyStarSpider TUI";
+        const title = "SpiderApp TUI";
         const title_x = if (width > title.len) @divTrunc(width - @as(u16, @intCast(title.len)), 2) else 0;
         s.moveCursor(title_x, 2);
         s.setStyle(.{ .fg = .cyan, .attrs = .{ .bold = true } });
@@ -854,7 +854,7 @@ pub const TuiDiagnostics = struct {
 
         // Check what's on screen
         std.debug.print("[DIAG] Screen content check:\n", .{});
-        std.debug.print("  - Has 'ZiggyStarSpider TUI': {}\n", .{self.terminal.hasText("ZiggyStarSpider TUI")});
+        std.debug.print("  - Has 'SpiderApp TUI': {}\n", .{self.terminal.hasText("SpiderApp TUI")});
         self.terminal.hasText("Connect to Spiderweb Server");
         self.terminal.hasText("Server URL:");
         self.terminal.hasText("Press Enter to Connect");
@@ -994,7 +994,7 @@ pub fn runDiagnostics() !void {
 
     std.debug.print("\n", .{});
     std.debug.print("╔══════════════════════════════════════════════════════════════╗\n", .{});
-    std.debug.print("║     ZiggyStarSpider TUI Diagnostic Tool                      ║\n", .{});
+    std.debug.print("║     SpiderApp TUI Diagnostic Tool                      ║\n", .{});
     std.debug.print("║     Investigating: 'clears screen and never exits'           ║\n", .{});
     std.debug.print("╚══════════════════════════════════════════════════════════════╝\n", .{});
 
