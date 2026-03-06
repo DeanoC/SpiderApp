@@ -1,6 +1,5 @@
 const std = @import("std");
 const ws = @import("websocket");
-const protocol_messages = @import("protocol_messages.zig");
 
 const ws_client_max_message_bytes: usize = 16 * 1024 * 1024;
 const ws_client_read_buffer_bytes: usize = 16 * 1024;
@@ -15,6 +14,8 @@ const MessageQueue = struct {
     dropped_messages: std.atomic.Value(u32),
     allocator: std.mem.Allocator,
     label: []const u8,
+    wait_mutex: std.Thread.Mutex = .{},
+    wait_cond: std.Thread.Condition = .{},
 
     fn init(allocator: std.mem.Allocator, label: []const u8) MessageQueue {
         return .{
@@ -48,6 +49,9 @@ const MessageQueue = struct {
         const slot_index = tail % capacity;
         self.slots[slot_index] = msg;
         self.tail.store(tail + 1, .release);
+        self.wait_mutex.lock();
+        self.wait_cond.broadcast();
+        self.wait_mutex.unlock();
         return true;
     }
 
@@ -66,18 +70,32 @@ const MessageQueue = struct {
     }
 
     fn popWait(self: *MessageQueue, timeout_ms: u32) ?[]u8 {
-        const deadline_ms = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
-        while (std.time.milliTimestamp() <= deadline_ms) {
+        const deadline_ns: i128 = std.time.nanoTimestamp() + @as(i128, @intCast(timeout_ms)) * std.time.ns_per_ms;
+        self.wait_mutex.lock();
+        defer self.wait_mutex.unlock();
+        while (true) {
             if (self.pop()) |item| return item;
-            std.Thread.sleep(1 * std.time.ns_per_ms);
+            const now_ns = std.time.nanoTimestamp();
+            if (now_ns >= deadline_ns) return null;
+            const remaining_ns: u64 = @intCast(deadline_ns - now_ns);
+            self.wait_cond.timedWait(&self.wait_mutex, remaining_ns) catch |err| switch (err) {
+                error.Timeout => return null,
+            };
         }
-        return null;
     }
 };
 
-const InboundLane = enum {
-    protocol,
-    debug,
+const PendingFrameWaiter = struct {
+    mutex: std.Thread.Mutex = .{},
+    cond: std.Thread.Condition = .{},
+    done: bool = false,
+    failed: bool = false,
+    frame: ?[]u8 = null,
+
+    fn deinit(self: *PendingFrameWaiter, allocator: std.mem.Allocator) void {
+        if (self.frame) |value| allocator.free(value);
+        self.* = undefined;
+    }
 };
 
 pub const Mode = enum {
@@ -87,29 +105,23 @@ pub const Mode = enum {
 
 const InboundMessageQueues = struct {
     protocol: MessageQueue,
-    debug: MessageQueue,
 
     fn init(allocator: std.mem.Allocator) InboundMessageQueues {
         return .{
             .protocol = MessageQueue.init(allocator, "protocol"),
-            .debug = MessageQueue.init(allocator, "debug"),
         };
     }
 
     fn deinit(self: *InboundMessageQueues) void {
         self.protocol.deinit();
-        self.debug.deinit();
     }
 
     fn push(self: *InboundMessageQueues, msg: []u8) void {
-        switch (classifyInboundLane(msg)) {
-            .protocol => _ = self.protocol.push(msg),
-            .debug => _ = self.debug.push(msg),
-        }
+        _ = self.protocol.push(msg);
     }
 
     fn pop(self: *InboundMessageQueues) ?[]u8 {
-        return self.protocol.pop() orelse self.debug.pop();
+        return self.protocol.pop();
     }
 
     fn popWait(self: *InboundMessageQueues, timeout_ms: u32) ?[]u8 {
@@ -121,11 +133,6 @@ const InboundMessageQueues = struct {
         return null;
     }
 };
-
-fn classifyInboundLane(msg: []const u8) InboundLane {
-    const message_type = protocol_messages.parseMessageType(msg) orelse return .protocol;
-    return if (message_type == .debug_event) .debug else .protocol;
-}
 
 fn normalizedAuthorizationToken(token: []const u8) ?[]const u8 {
     const trimmed = std.mem.trim(u8, token, " \t");
@@ -147,6 +154,12 @@ pub const WebSocketClient = struct {
     connection_alive: std.atomic.Value(bool),
     inbound_queues: InboundMessageQueues,
     verbose_logs: bool = false,
+    send_mutex: std.Thread.Mutex = .{},
+    waiters_mutex: std.Thread.Mutex = .{},
+    acheron_waiters: std.AutoHashMapUnmanaged(u32, *PendingFrameWaiter) = .{},
+    control_waiters: std.StringHashMapUnmanaged(*PendingFrameWaiter) = .{},
+    next_acheron_tag: std.atomic.Value(u32) = std.atomic.Value(u32).init(1),
+    next_acheron_fid: std.atomic.Value(u32) = std.atomic.Value(u32).init(2),
 
     pub fn init(allocator: std.mem.Allocator, url: []const u8, token: []const u8) !WebSocketClient {
         return initWithMode(allocator, url, token, .threaded_queue);
@@ -195,6 +208,7 @@ pub const WebSocketClient = struct {
         self.allocator.free(self.url_buf);
         self.allocator.free(self.token_buf);
         self.inbound_queues.deinit();
+        self.clearWaiters();
     }
 
     pub fn connect(self: *WebSocketClient) !void {
@@ -238,6 +252,8 @@ pub const WebSocketClient = struct {
         client_owned_locally = false;
         self.should_stop.store(false, .release);
         self.connection_alive.store(true, .release);
+        self.next_acheron_tag.store(1, .release);
+        self.next_acheron_fid.store(2, .release);
 
         // Threaded mode mirrors the GUI main websocket usage.
         if (self.mode == .threaded_queue) {
@@ -253,6 +269,13 @@ pub const WebSocketClient = struct {
             if (self.client) |*client| {
                 const msg = client.read() catch |err| switch (err) {
                     error.WouldBlock => {
+                        std.Thread.sleep(1 * std.time.ns_per_ms);
+                        continue;
+                    },
+                    error.InvalidMessageType => {
+                        // Some servers can emit control/extension frames the current parser
+                        // does not map into normal message variants. Treat as non-fatal.
+                        std.log.warn("[WS] ignoring unsupported frame type", .{});
                         std.Thread.sleep(1 * std.time.ns_per_ms);
                         continue;
                     },
@@ -279,6 +302,7 @@ pub const WebSocketClient = struct {
                             std.log.err("[WS] Failed to allocate copy: {s}", .{@errorName(err)});
                             continue;
                         };
+                        if (self.dispatchPendingReply(copy)) continue;
                         self.inbound_queues.push(copy);
                     },
                     .ping => {
@@ -297,6 +321,7 @@ pub const WebSocketClient = struct {
         }
 
         self.connection_alive.store(false, .release);
+        self.failAllWaiters();
         self.logVerbose("[WS] readLoop thread stopped (should_stop={})", .{self.should_stop.load(.acquire)});
     }
 
@@ -304,6 +329,7 @@ pub const WebSocketClient = struct {
         // Signal thread to stop
         self.should_stop.store(true, .release);
         self.connection_alive.store(false, .release);
+        self.failAllWaiters();
 
         // Close connection
         if (self.client) |*client| {
@@ -324,10 +350,13 @@ pub const WebSocketClient = struct {
         if (self.client == null) return error.NotConnected;
         if (!self.connection_alive.load(.acquire)) return error.ConnectionClosed;
         self.logVerbose("[WS] Sending {d} bytes", .{payload.len});
+        self.send_mutex.lock();
+        defer self.send_mutex.unlock();
         if (self.client) |*client| {
             client.write(@constCast(payload)) catch |err| {
                 std.log.err("[WS] Send failed: {s}", .{@errorName(err)});
                 self.connection_alive.store(false, .release);
+                self.failAllWaiters();
                 return err;
             };
             self.logVerbose("[WS] Send successful", .{});
@@ -338,6 +367,82 @@ pub const WebSocketClient = struct {
 
     pub fn isAlive(self: *WebSocketClient) bool {
         return self.client != null and self.connection_alive.load(.acquire);
+    }
+
+    pub fn nextAcheronTag(self: *WebSocketClient) u32 {
+        while (true) {
+            const current = self.next_acheron_tag.load(.acquire);
+            const next = if (current == std.math.maxInt(u32)) 1 else current + 1;
+            if (self.next_acheron_tag.cmpxchgWeak(current, next, .acq_rel, .acquire) == null) {
+                return if (current == 0) 1 else current;
+            }
+        }
+    }
+
+    pub fn nextAcheronFid(self: *WebSocketClient) u32 {
+        while (true) {
+            const current = self.next_acheron_fid.load(.acquire);
+            var next = current +% 1;
+            if (next == 0 or next == 1) next = 2;
+            if (self.next_acheron_fid.cmpxchgWeak(current, next, .acq_rel, .acquire) == null) {
+                return if (current == 0 or current == 1) 2 else current;
+            }
+        }
+    }
+
+    pub fn awaitAcheronFrame(self: *WebSocketClient, tag: u32, timeout_ms: u32) !?[]u8 {
+        if (self.mode != .threaded_queue) return self.receive(timeout_ms);
+
+        var waiter = try self.allocator.create(PendingFrameWaiter);
+        waiter.* = .{};
+        errdefer self.allocator.destroy(waiter);
+
+        self.waiters_mutex.lock();
+        if (self.acheron_waiters.contains(tag)) {
+            self.waiters_mutex.unlock();
+            waiter.deinit(self.allocator);
+            self.allocator.destroy(waiter);
+            return error.Busy;
+        }
+        try self.acheron_waiters.put(self.allocator, tag, waiter);
+        self.waiters_mutex.unlock();
+        errdefer self.removeAcheronWaiter(tag, waiter);
+
+        const result = self.waitForPendingFrame(waiter, timeout_ms) catch |err| {
+            self.removeAcheronWaiter(tag, waiter);
+            return err;
+        };
+        self.removeAcheronWaiter(tag, waiter);
+        return result;
+    }
+
+    pub fn awaitControlFrame(self: *WebSocketClient, request_id: []const u8, timeout_ms: u32) !?[]u8 {
+        if (self.mode != .threaded_queue) return self.receive(timeout_ms);
+
+        const key = try self.allocator.dupe(u8, request_id);
+        errdefer self.allocator.free(key);
+
+        var waiter = try self.allocator.create(PendingFrameWaiter);
+        waiter.* = .{};
+        errdefer self.allocator.destroy(waiter);
+
+        self.waiters_mutex.lock();
+        if (self.control_waiters.contains(request_id)) {
+            self.waiters_mutex.unlock();
+            waiter.deinit(self.allocator);
+            self.allocator.destroy(waiter);
+            return error.Busy;
+        }
+        try self.control_waiters.put(self.allocator, key, waiter);
+        self.waiters_mutex.unlock();
+        errdefer self.removeControlWaiter(request_id, waiter);
+
+        const result = self.waitForPendingFrame(waiter, timeout_ms) catch |err| {
+            self.removeControlWaiter(request_id, waiter);
+            return err;
+        };
+        self.removeControlWaiter(request_id, waiter);
+        return result;
     }
 
     /// Non-blocking check for messages. Returns null if none available.
@@ -381,14 +486,20 @@ pub const WebSocketClient = struct {
         if (self.client) |*client| {
             const msg = client.read() catch |err| switch (err) {
                 error.WouldBlock => return null,
+                error.InvalidMessageType => {
+                    std.log.warn("[WS] ignoring unsupported frame type", .{});
+                    return null;
+                },
                 error.Closed, error.ConnectionResetByPeer => {
                     std.log.info("[WS] Connection closed", .{});
                     self.connection_alive.store(false, .release);
+                    self.failAllWaiters();
                     return null;
                 },
                 else => {
                     std.log.err("[WS] read error: {s}", .{@errorName(err)});
                     self.connection_alive.store(false, .release);
+                    self.failAllWaiters();
                     return null;
                 },
             } orelse return null;
@@ -407,6 +518,7 @@ pub const WebSocketClient = struct {
                 },
                 .close => {
                     self.connection_alive.store(false, .release);
+                    self.failAllWaiters();
                     return null;
                 },
                 .pong => return null,
@@ -415,7 +527,163 @@ pub const WebSocketClient = struct {
 
         return null;
     }
+
+    fn waitForPendingFrame(self: *WebSocketClient, waiter: *PendingFrameWaiter, timeout_ms: u32) !?[]u8 {
+        _ = self;
+        const deadline_ns: i128 = std.time.nanoTimestamp() + @as(i128, @intCast(timeout_ms)) * std.time.ns_per_ms;
+        waiter.mutex.lock();
+        defer waiter.mutex.unlock();
+        while (!waiter.done) {
+            const now_ns = std.time.nanoTimestamp();
+            if (now_ns >= deadline_ns) return null;
+            const remaining_ns: u64 = @intCast(deadline_ns - now_ns);
+            waiter.cond.timedWait(&waiter.mutex, remaining_ns) catch |err| switch (err) {
+                error.Timeout => return null,
+            };
+        }
+        if (waiter.failed) return error.ConnectionClosed;
+        if (waiter.frame) |value| {
+            waiter.frame = null;
+            return value;
+        }
+        return null;
+    }
+
+    fn removeAcheronWaiter(self: *WebSocketClient, tag: u32, waiter: *PendingFrameWaiter) void {
+        self.waiters_mutex.lock();
+        _ = self.acheron_waiters.remove(tag);
+        self.waiters_mutex.unlock();
+        waiter.deinit(self.allocator);
+        self.allocator.destroy(waiter);
+    }
+
+    fn removeControlWaiter(self: *WebSocketClient, request_id: []const u8, waiter: *PendingFrameWaiter) void {
+        self.waiters_mutex.lock();
+        if (self.control_waiters.fetchRemove(request_id)) |entry| {
+            self.allocator.free(entry.key);
+        }
+        self.waiters_mutex.unlock();
+        waiter.deinit(self.allocator);
+        self.allocator.destroy(waiter);
+    }
+
+    fn dispatchPendingReply(self: *WebSocketClient, msg: []u8) bool {
+        if (extractAcheronTag(msg)) |tag| {
+            self.waiters_mutex.lock();
+            const waiter = self.acheron_waiters.get(tag);
+            self.waiters_mutex.unlock();
+            if (waiter) |matched| {
+                self.signalWaiter(matched, msg);
+                return true;
+            }
+        }
+
+        if (extractControlRequestId(msg)) |request_id| {
+            self.waiters_mutex.lock();
+            const waiter = self.control_waiters.get(request_id);
+            self.waiters_mutex.unlock();
+            if (waiter) |matched| {
+                self.signalWaiter(matched, msg);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn signalWaiter(self: *WebSocketClient, waiter: *PendingFrameWaiter, msg: []u8) void {
+        waiter.mutex.lock();
+        if (waiter.done) {
+            waiter.mutex.unlock();
+            self.allocator.free(msg);
+            return;
+        }
+        waiter.frame = msg;
+        waiter.done = true;
+        waiter.failed = false;
+        waiter.cond.broadcast();
+        waiter.mutex.unlock();
+    }
+
+    fn failAllWaiters(self: *WebSocketClient) void {
+        self.waiters_mutex.lock();
+        defer self.waiters_mutex.unlock();
+
+        var acheron_it = self.acheron_waiters.iterator();
+        while (acheron_it.next()) |entry| {
+            failPendingWaiter(entry.value_ptr.*);
+        }
+        self.acheron_waiters.clearRetainingCapacity();
+
+        var control_it = self.control_waiters.iterator();
+        while (control_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            failPendingWaiter(entry.value_ptr.*);
+        }
+        self.control_waiters.clearRetainingCapacity();
+    }
+
+    fn clearWaiters(self: *WebSocketClient) void {
+        self.waiters_mutex.lock();
+        defer self.waiters_mutex.unlock();
+
+        var acheron_it = self.acheron_waiters.iterator();
+        while (acheron_it.next()) |entry| {
+            var waiter = entry.value_ptr.*;
+            waiter.deinit(self.allocator);
+            self.allocator.destroy(waiter);
+        }
+        self.acheron_waiters.deinit(self.allocator);
+
+        var control_it = self.control_waiters.iterator();
+        while (control_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            var waiter = entry.value_ptr.*;
+            waiter.deinit(self.allocator);
+            self.allocator.destroy(waiter);
+        }
+        self.control_waiters.deinit(self.allocator);
+    }
 };
+
+fn failPendingWaiter(waiter: *PendingFrameWaiter) void {
+    waiter.mutex.lock();
+    waiter.done = true;
+    waiter.failed = true;
+    waiter.cond.broadcast();
+    waiter.mutex.unlock();
+}
+
+fn extractJsonStringFieldValue(msg: []const u8, key: []const u8) ?[]const u8 {
+    var prefix_buf: [64]u8 = undefined;
+    const prefix = std.fmt.bufPrint(&prefix_buf, "\"{s}\":\"", .{key}) catch return null;
+    const start = std.mem.indexOf(u8, msg, prefix) orelse return null;
+    const value_start = start + prefix.len;
+    const value_end = std.mem.indexOfScalarPos(u8, msg, value_start, '"') orelse return null;
+    return msg[value_start..value_end];
+}
+
+fn extractJsonUnsignedFieldValue(msg: []const u8, key: []const u8) ?u32 {
+    var prefix_buf: [64]u8 = undefined;
+    const prefix = std.fmt.bufPrint(&prefix_buf, "\"{s}\":", .{key}) catch return null;
+    const start = std.mem.indexOf(u8, msg, prefix) orelse return null;
+    const value_start = start + prefix.len;
+    var value_end = value_start;
+    while (value_end < msg.len and std.ascii.isDigit(msg[value_end])) : (value_end += 1) {}
+    if (value_end == value_start) return null;
+    return std.fmt.parseInt(u32, msg[value_start..value_end], 10) catch null;
+}
+
+fn extractAcheronTag(msg: []const u8) ?u32 {
+    const channel = extractJsonStringFieldValue(msg, "channel") orelse return null;
+    if (!std.mem.eql(u8, channel, "acheron")) return null;
+    return extractJsonUnsignedFieldValue(msg, "tag");
+}
+
+fn extractControlRequestId(msg: []const u8) ?[]const u8 {
+    const channel = extractJsonStringFieldValue(msg, "channel") orelse return null;
+    if (!std.mem.eql(u8, channel, "control")) return null;
+    return extractJsonStringFieldValue(msg, "id");
+}
 
 const ParsedUrl = struct {
     host: []u8,
@@ -525,19 +793,19 @@ test "MessageQueue preserves FIFO order" {
     try std.testing.expect(q.pop() == null);
 }
 
-test "InboundMessageQueues prioritizes protocol frames over debug frames" {
+test "InboundMessageQueues preserves FIFO order for unmatched frames" {
     const allocator = std.testing.allocator;
     var queues = InboundMessageQueues.init(allocator);
     defer queues.deinit();
 
-    queues.push(try allocator.dupe(u8, "{\"type\":\"debug.event\",\"payload\":{}}"));
+    queues.push(try allocator.dupe(u8, "{\"type\":\"control.error\",\"error\":{}}"));
     queues.push(try allocator.dupe(u8, "{\"type\":\"session.receive\",\"payload\":{\"content\":\"ok\"}}"));
 
     const first = queues.pop().?;
     defer allocator.free(first);
-    try std.testing.expectEqualStrings("{\"type\":\"session.receive\",\"payload\":{\"content\":\"ok\"}}", first);
+    try std.testing.expectEqualStrings("{\"type\":\"control.error\",\"error\":{}}", first);
 
     const second = queues.pop().?;
     defer allocator.free(second);
-    try std.testing.expectEqualStrings("{\"type\":\"debug.event\",\"payload\":{}}", second);
+    try std.testing.expectEqualStrings("{\"type\":\"session.receive\",\"payload\":{\"content\":\"ok\"}}", second);
 }

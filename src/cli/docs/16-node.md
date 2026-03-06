@@ -121,11 +121,13 @@ spider node service-runtime node-2 camera-main restart
 
 ## node watch [node_id] [--replay-limit <n>]
 
-Subscribe to live `control.node_service_event` updates pushed by Spiderweb when node service catalogs change.
+Poll the retained node-service event feed at `/global/services/node-service-events.ndjson`
+over Acheron and print newly appended events as catalogs change.
 
 Use `node_id` to filter to one node, or omit it to watch all nodes.
-Use `--replay-limit <n>` (or `--replay-limit=<n>`) to request recent historical
-events first before live streaming. Default is `25` and maximum is `10000`.
+Use `--replay-limit <n>` (or `--replay-limit=<n>`) to replay the latest matching
+events from the retained feed on startup or after feed rotation. Default is `25`
+and maximum is `10000`.
 
 **Examples:**
 ```bash

@@ -1574,8 +1574,7 @@ fn executeSessionRestore(allocator: std.mem.Allocator, options: args.Options, cm
     const project_token = if (options.project_token) |token|
         token
     else
-        cfg.getProjectToken(attach_project_id)
-    ;
+        cfg.getProjectToken(attach_project_id);
     try stdout.print(
         "Restoring session {s} (agent={s}, project={s})\n",
         .{ session.session_key, session.agent_id, session.project_id orelse "(none)" },
@@ -1828,6 +1827,55 @@ fn printNodeServiceEventPayload(
     try stdout.print("{s}\n", .{payload_json});
 }
 
+fn nodeServiceSnapshotLineMatchesFilterCli(
+    allocator: std.mem.Allocator,
+    line: []const u8,
+    node_filter: ?[]const u8,
+) !bool {
+    const filter = node_filter orelse return true;
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch return false;
+    defer parsed.deinit();
+    if (parsed.value != .object) return false;
+    const root = parsed.value.object;
+    const node_id = root.get("node_id") orelse return false;
+    if (node_id != .string) return false;
+    return std.mem.eql(u8, node_id.string, filter);
+}
+
+fn printNodeServiceSnapshotChunk(
+    allocator: std.mem.Allocator,
+    stdout: anytype,
+    snapshot: []const u8,
+    node_filter: ?[]const u8,
+    replay_limit: usize,
+    verbose: bool,
+    full_refresh: bool,
+) !void {
+    var matching_lines = std.ArrayListUnmanaged([]const u8){};
+    defer matching_lines.deinit(allocator);
+
+    var lines = std.mem.splitScalar(u8, snapshot, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r\n");
+        if (line.len == 0) continue;
+        if (!try nodeServiceSnapshotLineMatchesFilterCli(allocator, line, node_filter)) continue;
+        try matching_lines.append(allocator, line);
+    }
+
+    const start_index = if (full_refresh and replay_limit > 0 and matching_lines.items.len > replay_limit)
+        matching_lines.items.len - replay_limit
+    else
+        0;
+
+    for (matching_lines.items[start_index..]) |line| {
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch continue;
+        defer parsed.deinit();
+        if (parsed.value != .object) continue;
+        const payload = parsed.value.object.get("payload") orelse continue;
+        try printNodeServiceEventPayload(allocator, stdout, payload, verbose);
+    }
+}
+
 fn executeNodeServiceWatch(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     var node_filter: ?[]const u8 = null;
     var replay_limit: usize = 25;
@@ -1869,75 +1917,80 @@ fn executeNodeServiceWatch(allocator: std.mem.Allocator, options: args.Options, 
 
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const client = try getOrCreateClient(allocator, options);
-    try ensureUnifiedV2Control(allocator, client);
-
-    const watch_payload = if (node_filter) |node_id| blk: {
-        const escaped_node = try unified.jsonEscape(allocator, node_id);
-        defer allocator.free(escaped_node);
-        break :blk try std.fmt.allocPrint(
-            allocator,
-            "{{\"node_id\":\"{s}\",\"replay_limit\":{d}}}",
-            .{ escaped_node, replay_limit },
-        );
-    } else try std.fmt.allocPrint(
-        allocator,
-        "{{\"replay_limit\":{d}}}",
-        .{replay_limit},
-    );
-    defer allocator.free(watch_payload);
-
-    const watch_ack = try control_plane.requestControlPayloadJson(
-        allocator,
-        client,
-        &g_control_request_counter,
-        "control.node_service_watch",
-        watch_payload,
-    );
-    defer allocator.free(watch_ack);
+    try maybeApplyProjectContext(allocator, options, client);
+    try fsrpcBootstrap(allocator, client);
 
     if (node_filter) |node_id| {
         try stdout.print(
-            "Watching node service events for node {s} (replay_limit={d}, Ctrl+C to stop)\n",
+            "Watching node service events for node {s} via /global/services/node-service-events.ndjson (replay_limit={d}, Ctrl+C to stop)\n",
             .{ node_id, replay_limit },
         );
     } else {
         try stdout.print(
-            "Watching node service events for all nodes (replay_limit={d}, Ctrl+C to stop)\n",
+            "Watching node service events for all nodes via /global/services/node-service-events.ndjson (replay_limit={d}, Ctrl+C to stop)\n",
             .{replay_limit},
         );
     }
 
+    var previous_snapshot: ?[]u8 = null;
+    defer if (previous_snapshot) |value| allocator.free(value);
+
     while (true) {
-        const raw = client.readTimeout(1_000) catch |err| {
-            logger.err("node watch connection failed: {s}", .{@errorName(err)});
+        const fid = fsrpcWalkPath(allocator, client, "/global/services/node-service-events.ndjson") catch |err| {
+            logger.err("node watch open failed: {s}", .{@errorName(err)});
             return err;
-        } orelse continue;
-        defer allocator.free(raw);
+        };
+        defer fsrpcClunkBestEffort(allocator, client, fid);
+        try fsrpcOpen(allocator, client, fid, "r");
 
-        var parsed = std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch continue;
-        defer parsed.deinit();
-        if (parsed.value != .object) continue;
-        const root = parsed.value.object;
+        const snapshot = fsrpcReadAllText(allocator, client, fid) catch |err| {
+            logger.err("node watch read failed: {s}", .{@errorName(err)});
+            return err;
+        };
+        defer allocator.free(snapshot);
 
-        const channel = root.get("channel") orelse continue;
-        if (channel != .string or !std.mem.eql(u8, channel.string, "control")) continue;
-        const typ = root.get("type") orelse continue;
-        if (typ != .string) continue;
-
-        if (std.mem.eql(u8, typ.string, "control.node_service_event")) {
-            const payload = root.get("payload") orelse continue;
-            try printNodeServiceEventPayload(allocator, stdout, payload, options.verbose);
-            continue;
-        }
-
-        if (std.mem.eql(u8, typ.string, "control.error")) {
-            const error_value = root.get("error") orelse continue;
-            if (error_value == .object) {
-                const message = jsonObjectStringOr(error_value.object, "message", "control error");
-                const code = jsonObjectStringOr(error_value.object, "code", "unknown");
-                logger.err("node watch remote error: {s} [{s}]", .{ message, code });
+        if (previous_snapshot) |previous| {
+            if (std.mem.eql(u8, previous, snapshot)) {
+                std.Thread.sleep(1 * std.time.ns_per_s);
+                continue;
             }
+            if (snapshot.len >= previous.len and std.mem.startsWith(u8, snapshot, previous)) {
+                try printNodeServiceSnapshotChunk(
+                    allocator,
+                    stdout,
+                    snapshot[previous.len..],
+                    node_filter,
+                    replay_limit,
+                    options.verbose,
+                    false,
+                );
+            } else {
+                try printNodeServiceSnapshotChunk(
+                    allocator,
+                    stdout,
+                    snapshot,
+                    node_filter,
+                    replay_limit,
+                    options.verbose,
+                    true,
+                );
+            }
+            allocator.free(previous);
+            previous_snapshot = try allocator.dupe(u8, snapshot);
+        } else {
+            try printNodeServiceSnapshotChunk(
+                allocator,
+                stdout,
+                snapshot,
+                node_filter,
+                replay_limit,
+                options.verbose,
+                true,
+            );
+            previous_snapshot = try allocator.dupe(u8, snapshot);
         }
+
+        std.Thread.sleep(1 * std.time.ns_per_s);
     }
 }
 
@@ -3973,15 +4026,6 @@ fn sendAndAwaitFsrpcWithTimeout(
 fn logOutOfBandFrame(root: std.json.ObjectMap) void {
     const type_value = root.get("type") orelse return;
     if (type_value != .string) return;
-
-    if (std.mem.eql(u8, type_value.string, "debug.event")) {
-        const category = if (root.get("category")) |value| switch (value) {
-            .string => value.string,
-            else => "unknown",
-        } else "unknown";
-        logger.info("Debug event: {s}", .{category});
-        return;
-    }
 
     if (std.mem.eql(u8, type_value.string, "control.error")) {
         const message = if (root.get("message")) |value| switch (value) {

@@ -185,7 +185,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const spider_protocol_module = spider_protocol.module("ziggy-spider-protocol");
+    const spider_protocol_module = spider_protocol.module("spider-protocol");
 
     const ziggy_ui = b.dependency("ziggy_ui", .{
         .target = target,
