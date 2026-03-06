@@ -8,7 +8,7 @@ List available agents.
 
 **Examples:**
 ```bash
-ziggystarspider agent list
+spider agent list
 ```
 
 ## agent info <agent_id>
@@ -20,6 +20,6 @@ Show details for one agent.
 
 **Examples:**
 ```bash
-ziggystarspider agent info mother
-ziggystarspider agent get mother
+spider agent info mother
+spider agent get mother
 ```

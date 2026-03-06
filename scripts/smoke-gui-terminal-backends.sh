@@ -4,8 +4,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ZIG_BIN="${ZIG_BIN:-zig}"
-GUI_BIN="$ROOT_DIR/zig-out/bin/zss-gui"
-WIN_GUI_BIN="$ROOT_DIR/zig-out/bin/zss-gui.exe"
+GUI_BIN="$ROOT_DIR/zig-out/bin/spider-gui"
+WIN_GUI_BIN="$ROOT_DIR/zig-out/bin/spider-gui.exe"
 SMOKE_TIMEOUT_SEC="${SMOKE_TIMEOUT_SEC:-12}"
 SMOKE_SKIP_WINDOWS="${SMOKE_SKIP_WINDOWS:-0}"
 SMOKE_SKIP_LINUX="${SMOKE_SKIP_LINUX:-0}"

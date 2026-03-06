@@ -8,7 +8,7 @@ List goals for the current project.
 
 **Examples:**
 ```bash
-ziggystarspider goal list
+spider goal list
 ```
 
 **Output:**
@@ -31,7 +31,7 @@ Create a new goal.
 
 **Examples:**
 ```bash
-ziggystarspider goal create "Add logging system" --priority 8
+spider goal create "Add logging system" --priority 8
 ```
 
 ## goal complete <id>
@@ -43,5 +43,5 @@ Mark a goal as completed.
 
 **Examples:**
 ```bash
-ziggystarspider goal complete 1
+spider goal complete 1
 ```

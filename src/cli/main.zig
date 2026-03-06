@@ -5,9 +5,9 @@ const WebSocketClient = @import("../client/websocket.zig").WebSocketClient;
 const Config = @import("../client/config.zig").Config;
 const control_plane = @import("../client/control_plane.zig");
 const workspace_types = @import("../client/workspace_types.zig");
-const unified = @import("ziggy-spider-protocol").unified;
+const unified = @import("spider-protocol").unified;
 
-// Main CLI entry point for ZiggyStarSpider
+// Main CLI entry point for SpiderApp
 
 var g_client: ?WebSocketClient = null;
 var g_connected: bool = false;
@@ -63,9 +63,9 @@ pub fn run(allocator: std.mem.Allocator) !void {
     }
 
     if (std.mem.eql(u8, args.gitRevision(), "unknown")) {
-        logger.info("ZiggyStarSpider v{s}", .{args.appVersion()});
+        logger.info("SpiderApp v{s}", .{args.appVersion()});
     } else {
-        logger.info("ZiggyStarSpider v{s} ({s})", .{ args.appVersion(), args.gitRevision() });
+        logger.info("SpiderApp v{s} ({s})", .{ args.appVersion(), args.gitRevision() });
     }
     logger.info("Server: {s}", .{options.url});
     if (options.project) |p| {
@@ -379,12 +379,12 @@ fn runInteractive(allocator: std.mem.Allocator, options: args.Options) !void {
 
     const stdout = std.fs.File.stdout().deprecatedWriter();
 
-    try stdout.print("\nZiggyStarSpider Interactive Mode\n", .{});
+    try stdout.print("\nSpiderApp Interactive Mode\n", .{});
     try stdout.print("Type 'help' for commands, 'quit' to exit.\n\n", .{});
 
     // TODO: Implement actual interactive REPL with connection
     try stdout.print("Interactive mode not yet implemented.\n", .{});
-    try stdout.print("Use command mode for now: ziggystarspider chat send \"hello\"\n", .{});
+    try stdout.print("Use command mode for now: spider chat send \"hello\"\n", .{});
 }
 
 const JsonEnvelope = struct {
@@ -3409,7 +3409,7 @@ fn executeChatSend(allocator: std.mem.Allocator, options: args.Options, cmd: arg
         if (write.correlation_id) |value| {
             try stdout.print("Correlation ID: {s}\n", .{value});
         }
-        try stdout.print("Result is not ready yet ({s}). Resume with: ziggystarspider chat resume {s}\n", .{ @errorName(err), job_name });
+        try stdout.print("Result is not ready yet ({s}). Resume with: spider chat resume {s}\n", .{ @errorName(err), job_name });
         return;
     };
     defer allocator.free(content);

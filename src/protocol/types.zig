@@ -1,6 +1,6 @@
 const std = @import("std");
 
-// Core data types for ZiggyStarSpider (ZSS) protocol
+// Core data types for SpiderApp (ZSS) protocol
 // Defines Project, Goal, Task, and Agent entities
 
 // ============================================================================

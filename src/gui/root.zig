@@ -906,7 +906,7 @@ const App = struct {
         try zapp.sdl_app.init(.{ .video = true, .events = true, .gamepad = false });
         zapp.clipboard.init();
 
-        const window = zapp.sdl_app.createWindow("ZiggyStarSpider GUI", initial_width, initial_height, c.SDL_WINDOW_RESIZABLE) catch {
+        const window = zapp.sdl_app.createWindow("SpiderApp GUI", initial_width, initial_height, c.SDL_WINDOW_RESIZABLE) catch {
             return error.SdlWindowCreateFailed;
         };
         errdefer c.SDL_DestroyWindow(window);
@@ -941,7 +941,7 @@ const App = struct {
                 }
                 if (panel.data.Chat.agent_id) |id| {
                     allocator.free(id);
-                    panel.data.Chat.agent_id = try allocator.dupe(u8, "zss");
+                    panel.data.Chat.agent_id = try allocator.dupe(u8, "spider");
                 }
             }
         }
@@ -1071,7 +1071,7 @@ const App = struct {
 
         const main_window = try app.createUiWindowFromExisting(
             window,
-            "ZiggyStarSpider GUI",
+            "SpiderApp GUI",
             &app.manager,
             true,
             false,
@@ -1080,7 +1080,7 @@ const App = struct {
         );
         try app.ui_windows.append(allocator, main_window);
         app.main_window_id = main_window.id;
-        _ = c.SDL_SetWindowTitle(window, "ZiggyStarSpider - Launcher");
+        _ = c.SDL_SetWindowTitle(window, "SpiderApp - Launcher");
 
         errdefer app.settings_panel.deinit(allocator);
         errdefer allocator.free(app.status_text);
@@ -1572,7 +1572,7 @@ const App = struct {
     fn spawnUiWindow(self: *App) !void {
         const width: c_int = 960;
         const height: c_int = 720;
-        const title = try std.fmt.allocPrint(self.allocator, "ZiggyStarSpider GUI ({d})", .{self.ui_windows.items.len});
+        const title = try std.fmt.allocPrint(self.allocator, "SpiderApp GUI ({d})", .{self.ui_windows.items.len});
         defer self.allocator.free(title);
         const title_with_null = try self.allocator.alloc(u8, title.len + 1);
         defer self.allocator.free(title_with_null);
@@ -5645,10 +5645,10 @@ const App = struct {
                 .help => {
                     if (self.drawButtonWidget(
                         Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                        "About ZiggyStarSpider",
+                        "About SpiderApp",
                         .{ .variant = .secondary },
                     )) {
-                        self.appendMessage("system", "ZiggyStarSpider IDE - launcher/workspace flow enabled.", null) catch {};
+                        self.appendMessage("system", "SpiderApp IDE - launcher/workspace flow enabled.", null) catch {};
                         self.ide_menu_open = null;
                     }
                 },
@@ -6206,7 +6206,7 @@ const App = struct {
         const button_height = layout.button_height;
         const input_width = @max(220.0, rect_width - pad * 2.0);
 
-        self.drawFormSectionTitle(rect.min[0] + pad, &y, input_width, layout, "ZiggyStarSpider - Settings");
+        self.drawFormSectionTitle(rect.min[0] + pad, &y, input_width, layout, "SpiderApp - Settings");
         self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "Server URL");
         const input_rect = Rect.fromXYWH(
             rect.min[0] + pad,
@@ -7884,7 +7884,7 @@ const App = struct {
 
         const payload = try std.fmt.allocPrint(
             self.allocator,
-            "{{\"session_id\":\"{s}\",\"label\":\"zss-gui\"}}",
+            "{{\"session_id\":\"{s}\",\"label\":\"spider-gui\"}}",
             .{escaped_session},
         );
         defer self.allocator.free(payload);
@@ -11032,7 +11032,7 @@ const App = struct {
 
     fn buildPerfReportText(self: *App) ![]u8 {
         return self.buildPerfReportTextForSlice(
-            "zss_gui_perf_report",
+            "spider_gui_perf_report",
             null,
             null,
             null,
@@ -11064,7 +11064,7 @@ const App = struct {
         while (end_idx < self.perf_history.items.len and self.perf_history.items[end_idx].timestamp_ms <= end_ms) : (end_idx += 1) {}
 
         return @as(?[]u8, try self.buildPerfReportTextForSlice(
-            "zss_gui_perf_benchmark_report",
+            "spider_gui_perf_benchmark_report",
             label,
             start_ms,
             end_ms,
@@ -11075,7 +11075,7 @@ const App = struct {
     fn exportPerfReport(self: *App, report_text: []const u8) ![]u8 {
         const filename = try std.fmt.allocPrint(
             self.allocator,
-            "zss-gui-perf-{d}.txt",
+            "spider-gui-perf-{d}.txt",
             .{std.time.milliTimestamp()},
         );
         defer self.allocator.free(filename);
@@ -11395,7 +11395,7 @@ const App = struct {
         const action = ChatPanel.draw(
             self.allocator,
             &self.chat_panel_state,
-            "zss-gui",
+            "spider-gui",
             session_key_for_panel,
             self.activeMessages(),
             null,
@@ -12738,7 +12738,7 @@ const App = struct {
         self.restoreWorkspaceLayout(profile_id, project_id) catch {};
         self.config.recordRecentProject(profile_id, project_id, null) catch {};
         self.config.save() catch {};
-        _ = c.SDL_SetWindowTitle(self.window, "ZiggyStarSpider - Workspace");
+        _ = c.SDL_SetWindowTitle(self.window, "SpiderApp - Workspace");
     }
 
     fn returnToLauncher(self: *App, reason: stage_machine.ReturnReason) void {
@@ -12755,7 +12755,7 @@ const App = struct {
             self.active_project_id = null;
         }
         self.closeAllSecondaryWindows();
-        _ = c.SDL_SetWindowTitle(self.window, "ZiggyStarSpider - Launcher");
+        _ = c.SDL_SetWindowTitle(self.window, "SpiderApp - Launcher");
         switch (reason) {
             .switched_project => self.setLauncherNotice("Switched back to launcher. Select another project."),
             .connection_lost => self.setLauncherNotice("Connection lost. Reconnect to continue."),

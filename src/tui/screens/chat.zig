@@ -30,7 +30,7 @@ pub const ChatScreen = struct {
         ctx.screen.clear();
 
         // Header
-        const header = "ZiggyStarSpider - Chat";
+        const header = "SpiderApp - Chat";
         const header_style = tui.Style{
             .fg = tui.Color.cyan,
             .attrs = .{ .bold = true },

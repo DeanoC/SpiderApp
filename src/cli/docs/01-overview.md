@@ -1,10 +1,10 @@
-# ZiggyStarSpider CLI
+# SpiderApp CLI
 
 ## Usage
 
 ```text
-ziggystarspider <noun> <verb> [args] [options]
-ziggystarspider --help
+spider <noun> <verb> [args] [options]
+spider --help
 ```
 
 ## Noun-Verb Commands
@@ -76,7 +76,7 @@ Interactive mode entry exists, but the REPL is not implemented yet.
 Current behavior:
 
 ```
-ziggystarspider --url ws://100.101.192.123:18790
+spider --url ws://100.101.192.123:18790
 
 Interactive mode not yet implemented.
 Use command mode for now.

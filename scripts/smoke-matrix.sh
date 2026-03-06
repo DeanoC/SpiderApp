@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Distributed workspace CLI/GUI smoke matrix for ZiggyStarSpider.
+# Distributed workspace CLI/GUI smoke matrix for SpiderApp.
 # Covers connect, project, node, workspace, filesystem, and chat flows.
 
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ZSS_BIN="${ZSS_BIN:-$ROOT_DIR/zig-out/bin/zss}"
+ZSS_BIN="${ZSS_BIN:-$ROOT_DIR/zig-out/bin/spider}"
 SPIDERWEB_URL="${SPIDERWEB_URL:-ws://127.0.0.1:18790}"
-SMOKE_PROJECT_NAME="${SMOKE_PROJECT_NAME:-zss-smoke-$(date +%s)}"
+SMOKE_PROJECT_NAME="${SMOKE_PROJECT_NAME:-spider-smoke-$(date +%s)}"
 SMOKE_CHAT_PROMPT="${SMOKE_CHAT_PROMPT:-smoke test: summarize active project mounts in one sentence}"
 SMOKE_SKIP_BUILD="${SMOKE_SKIP_BUILD:-0}"
 SMOKE_SKIP_GUI_BUILD="${SMOKE_SKIP_GUI_BUILD:-0}"
@@ -19,7 +19,7 @@ log() {
 }
 
 run_cli() {
-    log "zss $*"
+    log "spider $*"
     "$ZSS_BIN" --url "$SPIDERWEB_URL" "$@"
 }
 

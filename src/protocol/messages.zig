@@ -1,7 +1,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 
-// Protocol message definitions for ZiggyStarSpider (ZSS)
+// Protocol message definitions for SpiderApp (ZSS)
 // All messages are JSON-encoded for WebSocket transport
 //
 // Message format:

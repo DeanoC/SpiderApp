@@ -10,12 +10,15 @@ jobs:
   build-and-test:
     uses: DeanoC/Spiderweb/.github/workflows/ziggy-shared-ci.yml@main
     with:
+      build_command: |
+        git submodule update --init --recursive
+        zig build
       verify_script: |
         if grep -qE '\.path = "\.\./Ziggy' build.zig.zon; then
           echo "Local path Ziggy dependencies are not allowed in CI"
           exit 1
         fi
-        grep -q 'ziggy_spider_protocol' build.zig.zon
+        grep -q 'spider_protocol' build.zig.zon
         grep -q '\.hash =' build.zig.zon
 
   gui-terminal-smoke:
@@ -24,6 +27,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Setup Zig
         uses: mlugg/setup-zig@v2

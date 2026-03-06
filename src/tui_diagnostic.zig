@@ -252,7 +252,7 @@ pub fn main() !void {
     
     std.debug.print("\n", .{});
     std.debug.print("╔══════════════════════════════════════════════════════════════╗\n", .{});
-    std.debug.print("║     ZiggyStarSpider TUI Diagnostic Tool                      ║\n", .{});
+    std.debug.print("║     SpiderApp TUI Diagnostic Tool                      ║\n", .{});
     std.debug.print("║     Testing components for hang issues                       ║\n", .{});
     std.debug.print("╚══════════════════════════════════════════════════════════════╝\n", .{});
     std.debug.print("\n", .{});

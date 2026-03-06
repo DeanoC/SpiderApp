@@ -39,7 +39,7 @@ pub const ConnectScreen = struct {
         ctx.screen.clear();
 
         // Title
-        const title = "ZiggyStarSpider TUI";
+        const title = "SpiderApp TUI";
         const title_style = tui.Style{
             .fg = tui.Color.cyan,
             .attrs = .{ .bold = true },

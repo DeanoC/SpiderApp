@@ -257,7 +257,7 @@ const windows_provider = if (builtin.os.tag == .windows) struct {
     pub fn save(allocator: std.mem.Allocator, target: []const u8, secret: []const u8) !void {
         const target_w = try std.unicode.utf8ToUtf16LeAllocZ(allocator, target);
         defer allocator.free(target_w);
-        const username_w = try std.unicode.utf8ToUtf16LeAllocZ(allocator, "zss");
+        const username_w = try std.unicode.utf8ToUtf16LeAllocZ(allocator, "spider");
         defer allocator.free(username_w);
 
         var credential = CREDENTIALW{

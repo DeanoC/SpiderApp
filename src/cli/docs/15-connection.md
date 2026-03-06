@@ -12,8 +12,8 @@ Connection uses unified-v2 control negotiation:
 
 **Examples:**
 ```bash
-ziggystarspider connect
-ziggystarspider connect --url ws://100.101.192.123:18790
+spider connect
+spider connect --url ws://100.101.192.123:18790
 ```
 
 ## disconnect
@@ -22,7 +22,7 @@ Disconnect from Spiderweb server.
 
 **Examples:**
 ```bash
-ziggystarspider disconnect
+spider disconnect
 ```
 
 ## status
@@ -31,7 +31,7 @@ Show connection status.
 
 **Examples:**
 ```bash
-ziggystarspider status
+spider status
 ```
 
 **Output:**

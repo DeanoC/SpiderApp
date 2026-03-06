@@ -1,6 +1,6 @@
-# TUI Testing Framework for ZiggyStarSpider
+# TUI Testing Framework for SpiderApp
 
-A headless testing framework for programmatically testing the ZiggyStarSpider TUI application.
+A headless testing framework for programmatically testing the SpiderApp TUI application.
 
 ## Overview
 
@@ -23,7 +23,7 @@ zig build test-tui
 
 ```bash
 zig build build-tui-test
-./zig-out/bin/zss-tui-test
+./zig-out/bin/spider-tui-test
 ```
 
 ## Architecture
@@ -97,7 +97,7 @@ High-level orchestration:
 var harness = try TestHarness.init(allocator, 80, 24);
 defer harness.deinit();
 
-try harness.expectText("ZiggyStarSpider TUI");
+try harness.expectText("SpiderApp TUI");
 try harness.snapshot("initial_state");
 ```
 
@@ -241,7 +241,7 @@ Output:
 Terminal (80x24):
 Cursor: (10, 5)
 +--------------------------------------------------------------------------------+
-|ZiggyStarSpider TUI                                                             |
+|SpiderApp TUI                                                             |
 |                                                                                |
 |                    Connect to Spiderweb Server                                  |
 ...
@@ -321,4 +321,4 @@ fi
 
 ## License
 
-Same as ZiggyStarSpider project.
+Same as SpiderApp project.

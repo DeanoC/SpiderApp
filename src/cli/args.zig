@@ -2,7 +2,7 @@ const std = @import("std");
 const logger = @import("ziggy-core").utils.logger;
 const build_options = @import("build_options");
 
-// CLI argument parsing for ZiggyStarSpider
+// CLI argument parsing for SpiderApp
 // Uses simple iteration like ZSC - no ArrayList complexity for basic parsing
 
 const default_server_url = "ws://127.0.0.1:18790";
@@ -159,9 +159,9 @@ pub fn printHelpForNoun(noun: Noun) void {
 pub fn printVersion() void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
     if (std.mem.eql(u8, git_revision, "unknown")) {
-        stdout.print("ZiggyStarSpider v{s}\n", .{app_version}) catch {};
+        stdout.print("SpiderApp v{s}\n", .{app_version}) catch {};
     } else {
-        stdout.print("ZiggyStarSpider v{s} ({s})\n", .{ app_version, git_revision }) catch {};
+        stdout.print("SpiderApp v{s} ({s})\n", .{ app_version, git_revision }) catch {};
     }
 }
 

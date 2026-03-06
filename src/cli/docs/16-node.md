@@ -8,7 +8,7 @@ List known nodes.
 
 **Examples:**
 ```bash
-ziggystarspider node list
+spider node list
 ```
 
 ## node info <node_id>
@@ -20,7 +20,7 @@ Show details for one node.
 
 **Examples:**
 ```bash
-ziggystarspider node info node-1
+spider node info node-1
 ```
 
 ## node join-request <node_name> [fs_url] [--os <os>] [--arch <arch>] [--runtime-kind <kind>]
@@ -29,7 +29,7 @@ Submit a pending join request for manual approval.
 
 **Examples:**
 ```bash
-ziggystarspider node join-request desktop-west ws://10.0.0.8:18891/v2/fs --os linux --arch amd64 --runtime-kind native
+spider node join-request desktop-west ws://10.0.0.8:18891/v2/fs --os linux --arch amd64 --runtime-kind native
 ```
 
 ## node pending
@@ -40,7 +40,7 @@ If an operator token is configured (via `--operator-token` or local config), it 
 
 **Examples:**
 ```bash
-ziggystarspider node pending
+spider node pending
 ```
 
 ## node approve <request_id> [--lease-ttl-ms <ms>]
@@ -51,7 +51,7 @@ If an operator token is configured (via `--operator-token` or local config), it 
 
 **Examples:**
 ```bash
-ziggystarspider node approve pending-join-1 --lease-ttl-ms 900000
+spider node approve pending-join-1 --lease-ttl-ms 900000
 ```
 
 ## node deny <request_id>
@@ -62,7 +62,7 @@ If an operator token is configured (via `--operator-token` or local config), it 
 
 **Examples:**
 ```bash
-ziggystarspider node deny pending-join-1
+spider node deny pending-join-1
 ```
 
 ## node service-get <node_id>
@@ -71,7 +71,7 @@ Show the node service catalog (platform, labels, and services).
 
 **Examples:**
 ```bash
-ziggystarspider node service-get node-1
+spider node service-get node-1
 ```
 
 ## node service-upsert <node_id> <node_secret> [options]
@@ -88,7 +88,7 @@ Update node service catalog metadata.
 
 **Examples:**
 ```bash
-ziggystarspider node service-upsert node-1 secret-abc --label site=hq --label tier=edge --services-json '[{"service_id":"camera","kind":"camera","state":"online","endpoints":["/nodes/node-1/camera"],"capabilities":{"still":true}}]'
+spider node service-upsert node-1 secret-abc --label site=hq --label tier=edge --services-json '[{"service_id":"camera","kind":"camera","state":"online","endpoints":["/nodes/node-1/camera"],"capabilities":{"still":true}}]'
 ```
 
 ## node service-runtime <node_id> <service_id> <action> [payload]
@@ -112,11 +112,11 @@ Interact with a service runtime namespace via control files resolved from the no
 
 **Examples:**
 ```bash
-ziggystarspider node service-runtime node-2 camera-main health
-ziggystarspider node service-runtime node-2 camera-main template
-ziggystarspider node service-runtime node-2 camera-main config-set '{"supervision":{"cooldown_ms":5000}}'
-ziggystarspider node service-runtime node-2 camera-main invoke '{"op":"capture"}'
-ziggystarspider node service-runtime node-2 camera-main restart
+spider node service-runtime node-2 camera-main health
+spider node service-runtime node-2 camera-main template
+spider node service-runtime node-2 camera-main config-set '{"supervision":{"cooldown_ms":5000}}'
+spider node service-runtime node-2 camera-main invoke '{"op":"capture"}'
+spider node service-runtime node-2 camera-main restart
 ```
 
 ## node watch [node_id] [--replay-limit <n>]
@@ -129,8 +129,8 @@ events first before live streaming. Default is `25` and maximum is `10000`.
 
 **Examples:**
 ```bash
-ziggystarspider node watch
-ziggystarspider node watch node-2
-ziggystarspider node watch --replay-limit 100
-ziggystarspider node watch node-2 --replay-limit=250
+spider node watch
+spider node watch node-2
+spider node watch --replay-limit 100
+spider node watch node-2 --replay-limit=250
 ```

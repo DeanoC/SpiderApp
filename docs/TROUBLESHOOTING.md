@@ -1,4 +1,4 @@
-# ZiggyStarSpider Troubleshooting
+# SpiderApp Troubleshooting
 
 ## Auth Failures
 
@@ -11,8 +11,8 @@ Checks:
 - verify project token used by `project use` / `project activate`
 - confirm selected project token in local config matches server token
 - inspect auth role tokens:
-  - `zss auth status`
-  - `zss auth status --reveal` (full values)
+  - `spider auth status`
+  - `spider auth status --reveal` (full values)
 
 Actions:
 - rotate/reissue token server-side, then update local token
@@ -28,7 +28,7 @@ Symptoms:
 - project/agent switch from GUI Settings fails while chat work is still running
 
 Checks:
-- confirm in-flight chat work (`zss chat resume`)
+- confirm in-flight chat work (`spider chat resume`)
 - wait for queued/running jobs to complete for the target/current agent
 
 Actions:
@@ -43,8 +43,8 @@ Symptoms:
 - drift increases after node drop
 
 Checks:
-- `zss node list`
-- `zss --verbose workspace status` (drift + reconcile diagnostics)
+- `spider node list`
+- `spider --verbose workspace status` (drift + reconcile diagnostics)
 
 Actions:
 - rejoin nodes to Spiderweb
@@ -73,7 +73,7 @@ Symptoms:
 - `queue_depth` or `failed_ops_total` keeps growing
 
 Checks:
-- `zss --verbose workspace status`
+- `spider --verbose workspace status`
 - inspect reconcile `failed_ops` and `last_error`
 
 Actions:
@@ -90,8 +90,8 @@ Symptoms:
 Checks:
 - reconnect GUI/CLI session
 - inspect queued jobs:
-  - `zss chat resume`
-  - `zss chat resume <job-id>`
+  - `spider chat resume`
+  - `spider chat resume <job-id>`
 
 Actions:
 - allow automatic resume after reconnect

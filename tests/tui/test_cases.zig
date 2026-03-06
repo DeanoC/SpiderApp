@@ -1,4 +1,4 @@
-//! TUI Test Cases for ZiggyStarSpider
+//! TUI Test Cases for SpiderApp
 //! 
 //! These tests verify the behavior of the TUI application including:
 //! - Connection screen rendering
@@ -57,7 +57,7 @@ const MockConnectScreen = struct {
     pub fn render(self: *MockConnectScreen, terminal: anytype) void {
         // Title
         terminal.moveCursor(30, 2);
-        terminal.putString("ZiggyStarSpider TUI");
+        terminal.putString("SpiderApp TUI");
         
         // Subtitle
         terminal.moveCursor(28, 4);
@@ -141,7 +141,7 @@ const MockChatScreen = struct {
     pub fn render(self: *MockChatScreen, terminal: anytype) void {
         // Header
         terminal.moveCursor(2, 0);
-        terminal.putString("ZiggyStarSpider - Chat");
+        terminal.putString("SpiderApp - Chat");
         
         // Status
         const status = if (self.connected) "● Connected" else "● Disconnected";
@@ -189,7 +189,7 @@ test "Connection screen renders correctly" {
     connect_screen.render(harness.getTerminal());
     
     // Verify title is displayed
-    try harness.expectText("ZiggyStarSpider TUI");
+    try harness.expectText("SpiderApp TUI");
     
     // Verify subtitle
     try harness.expectText("Connect to Spiderweb Server");
@@ -305,7 +305,7 @@ test "Chat screen renders header" {
     chat_screen.render(harness.getTerminal());
     
     // Verify header
-    try harness.expectText("ZiggyStarSpider - Chat");
+    try harness.expectText("SpiderApp - Chat");
     
     // Verify status
     try harness.expectText("● Disconnected");
@@ -465,7 +465,7 @@ test "Virtual terminal text search" {
     connect_screen.render(harness.getTerminal());
     
     // Search for text
-    const pos = harness.getTerminal().findText("ZiggyStarSpider");
+    const pos = harness.getTerminal().findText("SpiderApp");
     try std.testing.expect(pos != null);
     try std.testing.expectEqual(@as(u16, 30), pos.?.x);
     try std.testing.expectEqual(@as(u16, 2), pos.?.y);
@@ -506,7 +506,7 @@ test "Screen assertions - row content" {
     // Check specific row content using terminal's row accessor
     const row_text = try harness.getTerminal().getRowString(2, std.testing.allocator);
     defer std.testing.allocator.free(row_text);
-    try std.testing.expect(std.mem.containsAtLeast(u8, row_text, 1, "ZiggyStarSpider TUI"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, row_text, 1, "SpiderApp TUI"));
 }
 
 test "Multiple messages in chat" {
