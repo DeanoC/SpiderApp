@@ -1081,9 +1081,11 @@ const App = struct {
         settings_panel.project_id.clearRetainingCapacity();
         if (config.selectedProject()) |value| {
             settings_panel.project_id.appendSlice(allocator, value) catch {};
-            if (config.getProjectToken(value)) |project_token| {
-                settings_panel.project_token.clearRetainingCapacity();
-                settings_panel.project_token.appendSlice(allocator, project_token) catch {};
+            if (!isSystemProjectId(value)) {
+                if (config.getProjectToken(value)) |project_token| {
+                    settings_panel.project_token.clearRetainingCapacity();
+                    settings_panel.project_token.appendSlice(allocator, project_token) catch {};
+                }
             }
         }
         if (config.getRoleToken(.admin).len > 0) {
@@ -5010,8 +5012,10 @@ const App = struct {
         try self.settings_panel.project_id.appendSlice(self.allocator, project_id);
         self.project_selector_open = false;
         self.settings_panel.project_token.clearRetainingCapacity();
-        if (self.config.getProjectToken(project_id)) |token| {
-            try self.settings_panel.project_token.appendSlice(self.allocator, token);
+        if (!isSystemProjectId(project_id)) {
+            if (self.config.getProjectToken(project_id)) |token| {
+                try self.settings_panel.project_token.appendSlice(self.allocator, token);
+            }
         }
         self.session_attach_state = .unknown;
         try self.syncSettingsToConfig();
@@ -5027,10 +5031,7 @@ const App = struct {
         errdefer workspace_types.deinitNodeList(self.allocator, &nodes);
         const selected_project_id = self.selectedProjectId();
         const selected_project_token = if (selected_project_id) |project_id|
-            if (self.settings_panel.project_token.items.len > 0)
-                self.settings_panel.project_token.items
-            else
-                self.config.getProjectToken(project_id)
+            self.selectedProjectToken(project_id)
         else
             null;
 
@@ -5084,12 +5085,7 @@ const App = struct {
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
         const project_id = self.selectedProjectId() orelse return error.MissingField;
 
-        const token = if (self.settings_panel.project_token.items.len > 0)
-            self.settings_panel.project_token.items
-        else if (self.config.getProjectToken(project_id)) |value|
-            value
-        else
-            null;
+        const token = self.selectedProjectToken(project_id);
 
         var status = try control_plane.activateProject(
             self.allocator,
@@ -6007,9 +6003,11 @@ const App = struct {
             .{ .variant = .primary, .disabled = self.connection_state != .connected or self.selectedProjectId() == null },
         )) {
             self.openSelectedProjectFromLauncher() catch |err| {
-                const msg = std.fmt.allocPrint(self.allocator, "Failed to open project: {s}", .{@errorName(err)}) catch null;
-                defer if (msg) |value| self.allocator.free(value);
-                if (msg) |value| self.setLauncherNotice(value);
+                const msg = self.formatControlOpError("Failed to open project", err);
+                if (msg) |value| {
+                    defer self.allocator.free(value);
+                    self.setLauncherNotice(value);
+                }
             };
         }
 
@@ -6025,9 +6023,11 @@ const App = struct {
             .{ .variant = .secondary, .disabled = self.connection_state != .connected or self.settings_panel.project_create_name.items.len == 0 },
         )) {
             self.createProjectFromPanel() catch |err| {
-                const msg = std.fmt.allocPrint(self.allocator, "Project create failed: {s}", .{@errorName(err)}) catch null;
-                defer if (msg) |value| self.allocator.free(value);
-                if (msg) |value| self.setLauncherNotice(value);
+                const msg = self.formatControlOpError("Project create failed", err);
+                if (msg) |value| {
+                    defer self.allocator.free(value);
+                    self.setLauncherNotice(value);
+                }
             };
         }
 
@@ -12531,6 +12531,7 @@ const App = struct {
 
     fn selectedProjectToken(self: *App, project_id: []const u8) ?[]const u8 {
         if (project_id.len == 0) return null;
+        if (isSystemProjectId(project_id)) return null;
         if (self.settings_panel.project_token.items.len > 0) return self.settings_panel.project_token.items;
         return self.config.getProjectToken(project_id);
     }
@@ -12587,6 +12588,7 @@ const App = struct {
 
     fn projectTokenForSessionProject(self: *App, project_id: ?[]const u8) ?[]const u8 {
         const pid = project_id orelse return null;
+        if (isSystemProjectId(pid)) return null;
         if (self.settings_panel.project_id.items.len > 0 and
             std.mem.eql(u8, self.settings_panel.project_id.items, pid) and
             self.settings_panel.project_token.items.len > 0)
@@ -13011,14 +13013,46 @@ const App = struct {
         );
         defer self.allocator.free(payload_json);
 
-        const response_payload = try control_plane.requestControlPayloadJsonWithTimeout(
+        const response_payload = control_plane.requestControlPayloadJsonWithTimeout(
             self.allocator,
             client,
             &self.message_counter,
             "control.session_attach",
             payload_json,
             CONTROL_SESSION_ATTACH_TIMEOUT_MS,
-        );
+        ) catch |err| blk: {
+            const has_project_token = normalizeProjectToken(project_token) != null;
+            if (err == error.RemoteError and
+                isSystemProjectId(project_id) and
+                has_project_token)
+            {
+                const remote = control_plane.lastRemoteError() orelse "";
+                const token_rejected = std.mem.indexOf(u8, remote, "project_token") != null;
+                const invalid_payload = std.mem.indexOf(u8, remote, "invalid_payload") != null;
+                if (token_rejected or invalid_payload) {
+                    std.log.warn(
+                        "Session attach for system project failed with token ({s}); retrying without project_token",
+                        .{remote},
+                    );
+                    const retry_payload_json = try self.buildSessionAttachPayload(
+                        session_key,
+                        resolved_agent,
+                        project_id,
+                        null,
+                    );
+                    defer self.allocator.free(retry_payload_json);
+                    break :blk try control_plane.requestControlPayloadJsonWithTimeout(
+                        self.allocator,
+                        client,
+                        &self.message_counter,
+                        "control.session_attach",
+                        retry_payload_json,
+                        CONTROL_SESSION_ATTACH_TIMEOUT_MS,
+                    );
+                }
+            }
+            return err;
+        };
         defer self.allocator.free(response_payload);
 
         self.invalidateFsrpcAttachment();
@@ -13152,6 +13186,13 @@ const App = struct {
                 } else {
                     try self.settings_panel.default_session.appendSlice(self.allocator, "main");
                 }
+            }
+            const raw_attach_session = self.settings_panel.default_session.items;
+            const attach_session_owned = try sanitizeSessionKey(self.allocator, raw_attach_session);
+            defer self.allocator.free(attach_session_owned);
+            if (!std.mem.eql(u8, attach_session_owned, raw_attach_session)) {
+                self.settings_panel.default_session.clearRetainingCapacity();
+                try self.settings_panel.default_session.appendSlice(self.allocator, attach_session_owned);
             }
             const attach_session = self.settings_panel.default_session.items;
             try self.ensureSessionExists(attach_session, attach_session);

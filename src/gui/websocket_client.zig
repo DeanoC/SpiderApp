@@ -398,22 +398,18 @@ pub const WebSocketClient = struct {
         errdefer self.allocator.destroy(waiter);
 
         self.waiters_mutex.lock();
+        var lock_held = true;
+        errdefer if (lock_held) self.waiters_mutex.unlock();
         if (self.acheron_waiters.contains(tag)) {
-            self.waiters_mutex.unlock();
             waiter.deinit(self.allocator);
             self.allocator.destroy(waiter);
             return error.Busy;
         }
         try self.acheron_waiters.put(self.allocator, tag, waiter);
         self.waiters_mutex.unlock();
-        errdefer self.removeAcheronWaiter(tag, waiter);
-
-        const result = self.waitForPendingFrame(waiter, timeout_ms) catch |err| {
-            self.removeAcheronWaiter(tag, waiter);
-            return err;
-        };
-        self.removeAcheronWaiter(tag, waiter);
-        return result;
+        lock_held = false;
+        defer self.removeAcheronWaiter(tag, waiter);
+        return try self.waitForPendingFrame(waiter, timeout_ms);
     }
 
     pub fn awaitControlFrame(self: *WebSocketClient, request_id: []const u8, timeout_ms: u32) !?[]u8 {
@@ -427,22 +423,18 @@ pub const WebSocketClient = struct {
         errdefer self.allocator.destroy(waiter);
 
         self.waiters_mutex.lock();
+        var lock_held = true;
+        errdefer if (lock_held) self.waiters_mutex.unlock();
         if (self.control_waiters.contains(request_id)) {
-            self.waiters_mutex.unlock();
             waiter.deinit(self.allocator);
             self.allocator.destroy(waiter);
             return error.Busy;
         }
         try self.control_waiters.put(self.allocator, key, waiter);
         self.waiters_mutex.unlock();
-        errdefer self.removeControlWaiter(request_id, waiter);
-
-        const result = self.waitForPendingFrame(waiter, timeout_ms) catch |err| {
-            self.removeControlWaiter(request_id, waiter);
-            return err;
-        };
-        self.removeControlWaiter(request_id, waiter);
-        return result;
+        lock_held = false;
+        defer self.removeControlWaiter(request_id, waiter);
+        return try self.waitForPendingFrame(waiter, timeout_ms);
     }
 
     /// Non-blocking check for messages. Returns null if none available.
