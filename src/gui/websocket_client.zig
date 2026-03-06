@@ -267,7 +267,11 @@ pub const WebSocketClient = struct {
 
         while (!self.should_stop.load(.acquire)) {
             if (self.client) |*client| {
-                const msg = client.read() catch |err| switch (err) {
+                const msg = blk: {
+                    self.send_mutex.lock();
+                    defer self.send_mutex.unlock();
+                    break :blk client.read();
+                } catch |err| switch (err) {
                     error.WouldBlock => {
                         std.Thread.sleep(1 * std.time.ns_per_ms);
                         continue;
@@ -306,7 +310,15 @@ pub const WebSocketClient = struct {
                         self.inbound_queues.push(copy);
                     },
                     .ping => {
-                        client.writePong(@constCast(msg.data)) catch {};
+                        self.send_mutex.lock();
+                        defer self.send_mutex.unlock();
+                        if (self.connection_alive.load(.acquire) and !self.should_stop.load(.acquire)) {
+                            client.writePong(@constCast(msg.data)) catch |err| {
+                                std.log.warn("[WS] Pong write failed: {s}", .{@errorName(err)});
+                                self.connection_alive.store(false, .release);
+                                self.failAllWaiters();
+                            };
+                        }
                     },
                     .close => {
                         self.logVerbose("[WS] Got close frame", .{});
@@ -331,27 +343,35 @@ pub const WebSocketClient = struct {
         self.connection_alive.store(false, .release);
         self.failAllWaiters();
 
-        // Close connection
+        // Serialize close/deinit against send() to avoid socket-handle races.
+        self.send_mutex.lock();
         if (self.client) |*client| {
             client.close(.{}) catch {};
+        }
+        self.send_mutex.unlock();
 
-            // Wait for read thread to finish
-            if (self.read_thread) |thread| {
-                thread.join();
-                self.read_thread = null;
-            }
+        // Wait for read thread to finish after close wakes the read loop.
+        if (self.read_thread) |thread| {
+            thread.join();
+            self.read_thread = null;
+        }
 
+        self.send_mutex.lock();
+        defer self.send_mutex.unlock();
+        if (self.client) |*client| {
             client.deinit();
             self.client = null;
         }
     }
 
     pub fn send(self: *WebSocketClient, payload: []const u8) !void {
-        if (self.client == null) return error.NotConnected;
-        if (!self.connection_alive.load(.acquire)) return error.ConnectionClosed;
-        self.logVerbose("[WS] Sending {d} bytes", .{payload.len});
         self.send_mutex.lock();
         defer self.send_mutex.unlock();
+        if (self.client == null) return error.NotConnected;
+        if (!self.connection_alive.load(.acquire) or self.should_stop.load(.acquire)) {
+            return error.ConnectionClosed;
+        }
+        self.logVerbose("[WS] Sending {d} bytes", .{payload.len});
         if (self.client) |*client| {
             client.write(@constCast(payload)) catch |err| {
                 std.log.err("[WS] Send failed: {s}", .{@errorName(err)});
@@ -398,22 +418,18 @@ pub const WebSocketClient = struct {
         errdefer self.allocator.destroy(waiter);
 
         self.waiters_mutex.lock();
+        var lock_held = true;
+        errdefer if (lock_held) self.waiters_mutex.unlock();
         if (self.acheron_waiters.contains(tag)) {
-            self.waiters_mutex.unlock();
             waiter.deinit(self.allocator);
             self.allocator.destroy(waiter);
             return error.Busy;
         }
         try self.acheron_waiters.put(self.allocator, tag, waiter);
         self.waiters_mutex.unlock();
-        errdefer self.removeAcheronWaiter(tag, waiter);
-
-        const result = self.waitForPendingFrame(waiter, timeout_ms) catch |err| {
-            self.removeAcheronWaiter(tag, waiter);
-            return err;
-        };
-        self.removeAcheronWaiter(tag, waiter);
-        return result;
+        lock_held = false;
+        defer self.removeAcheronWaiter(tag, waiter);
+        return try self.waitForPendingFrame(waiter, timeout_ms);
     }
 
     pub fn awaitControlFrame(self: *WebSocketClient, request_id: []const u8, timeout_ms: u32) !?[]u8 {
@@ -427,22 +443,18 @@ pub const WebSocketClient = struct {
         errdefer self.allocator.destroy(waiter);
 
         self.waiters_mutex.lock();
+        var lock_held = true;
+        errdefer if (lock_held) self.waiters_mutex.unlock();
         if (self.control_waiters.contains(request_id)) {
-            self.waiters_mutex.unlock();
             waiter.deinit(self.allocator);
             self.allocator.destroy(waiter);
             return error.Busy;
         }
         try self.control_waiters.put(self.allocator, key, waiter);
         self.waiters_mutex.unlock();
-        errdefer self.removeControlWaiter(request_id, waiter);
-
-        const result = self.waitForPendingFrame(waiter, timeout_ms) catch |err| {
-            self.removeControlWaiter(request_id, waiter);
-            return err;
-        };
-        self.removeControlWaiter(request_id, waiter);
-        return result;
+        lock_held = false;
+        defer self.removeControlWaiter(request_id, waiter);
+        return try self.waitForPendingFrame(waiter, timeout_ms);
     }
 
     /// Non-blocking check for messages. Returns null if none available.
@@ -484,7 +496,11 @@ pub const WebSocketClient = struct {
         if (!self.connection_alive.load(.acquire)) return null;
 
         if (self.client) |*client| {
-            const msg = client.read() catch |err| switch (err) {
+            const msg = blk: {
+                self.send_mutex.lock();
+                defer self.send_mutex.unlock();
+                break :blk client.read();
+            } catch |err| switch (err) {
                 error.WouldBlock => return null,
                 error.InvalidMessageType => {
                     std.log.warn("[WS] ignoring unsupported frame type", .{});
@@ -513,7 +529,15 @@ pub const WebSocketClient = struct {
                     };
                 },
                 .ping => {
-                    client.writePong(@constCast(msg.data)) catch {};
+                    self.send_mutex.lock();
+                    defer self.send_mutex.unlock();
+                    if (self.connection_alive.load(.acquire) and !self.should_stop.load(.acquire)) {
+                        client.writePong(@constCast(msg.data)) catch |err| {
+                            std.log.warn("[WS] Pong write failed: {s}", .{@errorName(err)});
+                            self.connection_alive.store(false, .release);
+                            self.failAllWaiters();
+                        };
+                    }
                     return null;
                 },
                 .close => {

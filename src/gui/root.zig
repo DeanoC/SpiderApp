@@ -400,6 +400,60 @@ fn isUserScopedAgentId(agent_id: []const u8) bool {
     return std.mem.eql(u8, agent_id, "user") or std.mem.eql(u8, agent_id, "user-isolated");
 }
 
+fn isValidSessionKeyForAttach(value: []const u8) bool {
+    if (value.len == 0 or value.len > 128) return false;
+    for (value) |char| {
+        if (std.ascii.isAlphanumeric(char)) continue;
+        if (char == '-' or char == '_' or char == '.' or char == ':') continue;
+        return false;
+    }
+    return true;
+}
+
+fn isValidAgentIdForAttach(value: []const u8) bool {
+    if (value.len == 0 or value.len > 128) return false;
+    if (std.mem.eql(u8, value, ".")) return false;
+    for (value) |char| {
+        if (std.ascii.isAlphanumeric(char)) continue;
+        if (char == '_' or char == '-') continue;
+        return false;
+    }
+    return true;
+}
+
+fn isValidProjectIdForAttach(value: []const u8) bool {
+    if (value.len == 0 or value.len > 128) return false;
+    if (std.mem.eql(u8, value, ".") or std.mem.eql(u8, value, "..")) return false;
+    for (value) |char| {
+        if (std.ascii.isAlphanumeric(char)) continue;
+        if (char == '_' or char == '-' or char == '.') continue;
+        return false;
+    }
+    return true;
+}
+
+fn sanitizeSessionKey(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    if (trimmed.len == 0) return allocator.dupe(u8, "main");
+
+    var out = std.ArrayListUnmanaged(u8){};
+    errdefer out.deinit(allocator);
+
+    for (trimmed) |char| {
+        if (out.items.len >= 128) break;
+        if (std.ascii.isAlphanumeric(char) or char == '-' or char == '_' or char == '.' or char == ':') {
+            try out.append(allocator, char);
+        } else {
+            try out.append(allocator, '-');
+        }
+    }
+
+    if (out.items.len == 0) {
+        try out.appendSlice(allocator, "main");
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 const system_project_id = "system";
 const system_agent_id = "mother";
 
@@ -1027,9 +1081,11 @@ const App = struct {
         settings_panel.project_id.clearRetainingCapacity();
         if (config.selectedProject()) |value| {
             settings_panel.project_id.appendSlice(allocator, value) catch {};
-            if (config.getProjectToken(value)) |project_token| {
-                settings_panel.project_token.clearRetainingCapacity();
-                settings_panel.project_token.appendSlice(allocator, project_token) catch {};
+            if (!isSystemProjectId(value)) {
+                if (config.getProjectToken(value)) |project_token| {
+                    settings_panel.project_token.clearRetainingCapacity();
+                    settings_panel.project_token.appendSlice(allocator, project_token) catch {};
+                }
             }
         }
         if (config.getRoleToken(.admin).len > 0) {
@@ -4951,8 +5007,10 @@ const App = struct {
         try self.settings_panel.project_id.appendSlice(self.allocator, project_id);
         self.project_selector_open = false;
         self.settings_panel.project_token.clearRetainingCapacity();
-        if (self.config.getProjectToken(project_id)) |token| {
-            try self.settings_panel.project_token.appendSlice(self.allocator, token);
+        if (!isSystemProjectId(project_id)) {
+            if (self.config.getProjectToken(project_id)) |token| {
+                try self.settings_panel.project_token.appendSlice(self.allocator, token);
+            }
         }
         self.session_attach_state = .unknown;
         try self.syncSettingsToConfig();
@@ -4968,10 +5026,7 @@ const App = struct {
         errdefer workspace_types.deinitNodeList(self.allocator, &nodes);
         const selected_project_id = self.selectedProjectId();
         const selected_project_token = if (selected_project_id) |project_id|
-            if (self.settings_panel.project_token.items.len > 0)
-                self.settings_panel.project_token.items
-            else
-                self.config.getProjectToken(project_id)
+            self.selectedProjectToken(project_id)
         else
             null;
 
@@ -5025,12 +5080,7 @@ const App = struct {
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
         const project_id = self.selectedProjectId() orelse return error.MissingField;
 
-        const token = if (self.settings_panel.project_token.items.len > 0)
-            self.settings_panel.project_token.items
-        else if (self.config.getProjectToken(project_id)) |value|
-            value
-        else
-            null;
+        const token = self.selectedProjectToken(project_id);
 
         var status = try control_plane.activateProject(
             self.allocator,
@@ -5948,9 +5998,11 @@ const App = struct {
             .{ .variant = .primary, .disabled = self.connection_state != .connected or self.selectedProjectId() == null },
         )) {
             self.openSelectedProjectFromLauncher() catch |err| {
-                const msg = std.fmt.allocPrint(self.allocator, "Failed to open project: {s}", .{@errorName(err)}) catch null;
-                defer if (msg) |value| self.allocator.free(value);
-                if (msg) |value| self.setLauncherNotice(value);
+                const msg = self.formatControlOpError("Failed to open project", err);
+                if (msg) |value| {
+                    defer self.allocator.free(value);
+                    self.setLauncherNotice(value);
+                }
             };
         }
 
@@ -5966,9 +6018,11 @@ const App = struct {
             .{ .variant = .secondary, .disabled = self.connection_state != .connected or self.settings_panel.project_create_name.items.len == 0 },
         )) {
             self.createProjectFromPanel() catch |err| {
-                const msg = std.fmt.allocPrint(self.allocator, "Project create failed: {s}", .{@errorName(err)}) catch null;
-                defer if (msg) |value| self.allocator.free(value);
-                if (msg) |value| self.setLauncherNotice(value);
+                const msg = self.formatControlOpError("Project create failed", err);
+                if (msg) |value| {
+                    defer self.allocator.free(value);
+                    self.setLauncherNotice(value);
+                }
             };
         }
 
@@ -12472,13 +12526,19 @@ const App = struct {
 
     fn selectedProjectToken(self: *App, project_id: []const u8) ?[]const u8 {
         if (project_id.len == 0) return null;
+        if (isSystemProjectId(project_id)) return null;
         if (self.settings_panel.project_token.items.len > 0) return self.settings_panel.project_token.items;
         return self.config.getProjectToken(project_id);
     }
 
     fn selectedAgentId(self: *App) ?[]const u8 {
-        if (self.settings_panel.default_agent.items.len > 0) return self.settings_panel.default_agent.items;
-        return self.config.selectedAgent();
+        if (self.settings_panel.default_agent.items.len > 0) {
+            if (isValidAgentIdForAttach(self.settings_panel.default_agent.items)) return self.settings_panel.default_agent.items;
+            return null;
+        }
+        const configured = self.config.selectedAgent() orelse return null;
+        if (!isValidAgentIdForAttach(configured)) return null;
+        return configured;
     }
 
     fn sessionHistoryAgentFilter(self: *App) ?[]const u8 {
@@ -12523,6 +12583,7 @@ const App = struct {
 
     fn projectTokenForSessionProject(self: *App, project_id: ?[]const u8) ?[]const u8 {
         const pid = project_id orelse return null;
+        if (isSystemProjectId(pid)) return null;
         if (self.settings_panel.project_id.items.len > 0 and
             std.mem.eql(u8, self.settings_panel.project_id.items, pid) and
             self.settings_panel.project_token.items.len > 0)
@@ -12837,6 +12898,9 @@ const App = struct {
         const project = project_id orelse return error.ProjectIdRequired;
         const trimmed_project = std.mem.trim(u8, project, " \t\r\n");
         if (trimmed_project.len == 0) return error.ProjectIdRequired;
+        if (!isValidSessionKeyForAttach(session_key)) return error.InvalidSessionKey;
+        if (!isValidAgentIdForAttach(agent_id)) return error.InvalidAgentId;
+        if (!isValidProjectIdForAttach(trimmed_project)) return error.InvalidProjectId;
         const normalized_project_token = normalizeProjectToken(project_token);
 
         const escaped_session = try jsonEscape(self.allocator, session_key);
@@ -12944,14 +13008,46 @@ const App = struct {
         );
         defer self.allocator.free(payload_json);
 
-        const response_payload = try control_plane.requestControlPayloadJsonWithTimeout(
+        const response_payload = control_plane.requestControlPayloadJsonWithTimeout(
             self.allocator,
             client,
             &self.message_counter,
             "control.session_attach",
             payload_json,
             CONTROL_SESSION_ATTACH_TIMEOUT_MS,
-        );
+        ) catch |err| blk: {
+            const has_project_token = normalizeProjectToken(project_token) != null;
+            if (err == error.RemoteError and
+                isSystemProjectId(project_id) and
+                has_project_token)
+            {
+                const remote = control_plane.lastRemoteError() orelse "";
+                const token_rejected = std.mem.indexOf(u8, remote, "project_token") != null;
+                const invalid_payload = std.mem.indexOf(u8, remote, "invalid_payload") != null;
+                if (token_rejected or invalid_payload) {
+                    std.log.warn(
+                        "Session attach for system project failed with token ({s}); retrying without project_token",
+                        .{remote},
+                    );
+                    const retry_payload_json = try self.buildSessionAttachPayload(
+                        session_key,
+                        resolved_agent,
+                        project_id,
+                        null,
+                    );
+                    defer self.allocator.free(retry_payload_json);
+                    break :blk try control_plane.requestControlPayloadJsonWithTimeout(
+                        self.allocator,
+                        client,
+                        &self.message_counter,
+                        "control.session_attach",
+                        retry_payload_json,
+                        CONTROL_SESSION_ATTACH_TIMEOUT_MS,
+                    );
+                }
+            }
+            return err;
+        };
         defer self.allocator.free(response_payload);
 
         self.invalidateFsrpcAttachment();
@@ -13085,6 +13181,13 @@ const App = struct {
                 } else {
                     try self.settings_panel.default_session.appendSlice(self.allocator, "main");
                 }
+            }
+            const raw_attach_session = self.settings_panel.default_session.items;
+            const attach_session_owned = try sanitizeSessionKey(self.allocator, raw_attach_session);
+            defer self.allocator.free(attach_session_owned);
+            if (!std.mem.eql(u8, attach_session_owned, raw_attach_session)) {
+                self.settings_panel.default_session.clearRetainingCapacity();
+                try self.settings_panel.default_session.appendSlice(self.allocator, attach_session_owned);
             }
             const attach_session = self.settings_panel.default_session.items;
             try self.ensureSessionExists(attach_session, attach_session);
@@ -14605,11 +14708,17 @@ const App = struct {
     fn currentSessionOrDefault(self: *App) ![]const u8 {
         self.sanitizeCurrentSessionSelection();
 
-        if (self.current_session_key) |current| return current;
+        if (self.current_session_key) |current| {
+            if (isValidSessionKeyForAttach(current)) return current;
+            try self.ensureSessionExists("main", "Main");
+            return self.current_session_key.?;
+        }
         if (self.chat_sessions.items.len > 0) {
             const fallback = self.chat_sessions.items[0].key;
-            try self.setCurrentSessionKey(fallback);
-            return fallback;
+            if (isValidSessionKeyForAttach(fallback)) {
+                try self.setCurrentSessionKey(fallback);
+                return fallback;
+            }
         }
         const fallback = "main";
         try self.ensureSessionExists(fallback, fallback);
@@ -16218,12 +16327,14 @@ const App = struct {
 
         if (action.new_chat_session_key) |new_key| {
             defer self.allocator.free(new_key);
+            const sanitized_key = sanitizeSessionKey(self.allocator, new_key) catch return;
+            defer self.allocator.free(sanitized_key);
 
-            if (self.setCurrentSessionByKey(new_key)) {
+            if (self.setCurrentSessionByKey(sanitized_key)) {
                 return;
             }
-            self.addSession(new_key, new_key) catch {};
-            _ = self.setCurrentSessionByKey(new_key);
+            self.addSession(sanitized_key, new_key) catch {};
+            _ = self.setCurrentSessionByKey(sanitized_key);
         }
     }
 
