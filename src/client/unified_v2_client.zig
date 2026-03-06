@@ -249,6 +249,62 @@ fn awaitControlReply(
     expected_type: []const u8,
     timeout_ms: i64,
 ) !JsonEnvelope {
+    const client_type = @TypeOf(client.*);
+    if (comptime @hasDecl(client_type, "awaitControlFrame")) {
+        if (try client.awaitControlFrame(request_id, @intCast(@max(timeout_ms, 0)))) |raw| {
+            const parsed = std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch {
+                allocator.free(raw);
+                return error.InvalidResponse;
+            };
+            errdefer {
+                parsed.deinit();
+                allocator.free(raw);
+            }
+
+            if (parsed.value != .object) return error.InvalidResponse;
+            const obj = parsed.value.object;
+            if (matchesControlReply(obj, request_id, expected_type)) {
+                clearLastRemoteError();
+                return .{ .raw = raw, .parsed = parsed };
+            }
+            if (matchesControlReplyType(obj, request_id, "control.error")) {
+                const message = controlErrorMessageFromRoot(obj);
+                const code = controlErrorCodeFromRoot(obj);
+                if (message != null and code != null) {
+                    var detail_buf: [MAX_REMOTE_ERROR_LEN]u8 = undefined;
+                    const detail = std.fmt.bufPrint(&detail_buf, "{s} [{s}]", .{ message.?, code.? }) catch message.?;
+                    setLastRemoteError(detail);
+                } else if (message) |value| {
+                    setLastRemoteError(value);
+                } else if (code) |value| {
+                    setLastRemoteError(value);
+                } else {
+                    setLastRemoteError("remote control error");
+                }
+                return error.RemoteError;
+            }
+            if (matchesLegacyBootstrapError(obj, request_id)) {
+                const legacy_message = legacyErrorMessageFromRoot(obj);
+                const legacy_code = legacyErrorCodeFromRoot(obj);
+                if (legacy_message != null and legacy_code != null) {
+                    var detail_buf: [MAX_REMOTE_ERROR_LEN]u8 = undefined;
+                    const detail = std.fmt.bufPrint(&detail_buf, "{s} [{s}]", .{ legacy_message.?, legacy_code.? }) catch legacy_message.?;
+                    setLastRemoteError(detail);
+                } else if (legacy_message) |value| {
+                    setLastRemoteError(value);
+                } else if (legacy_code) |value| {
+                    setLastRemoteError(value);
+                } else {
+                    setLastRemoteError("remote error");
+                }
+                return error.RemoteError;
+            }
+
+            return error.InvalidResponse;
+        }
+        return error.Timeout;
+    }
+
     const started = std.time.milliTimestamp();
     while (std.time.milliTimestamp() - started < timeout_ms) {
         if (try readClientFrameWithTimeout(client, 250)) |raw| {

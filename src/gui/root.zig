@@ -25,7 +25,6 @@ const client_state = zui.client.state;
 const client_agents = zui.client.agent_registry;
 const font_system = zui.ui.font_system;
 const protocol_messages = @import("protocol_messages.zig");
-const fs_worker_mod = @import("filesystem_worker.zig");
 const terminal_render_backend = @import("terminal_render_backend.zig");
 
 const workspace = zui.ui.workspace;
@@ -68,6 +67,8 @@ const MAX_DEBUG_EVENTS: usize = 500;
 const FSRPC_DEFAULT_TIMEOUT_MS: u32 = 15_000;
 const FSRPC_CHAT_WRITE_TIMEOUT_MS: u32 = 180_000;
 const FSRPC_CLUNK_TIMEOUT_MS: u32 = 1_000;
+const FSRPC_READ_CHUNK_BYTES: u32 = 128 * 1024;
+const FSRPC_READ_MAX_TOTAL_BYTES: usize = 8 * 1024 * 1024;
 const CONTROL_CONNECT_TIMEOUT_MS: i64 = 2_500;
 const CONTROL_SESSION_ATTACH_TIMEOUT_MS: i64 = 8_000;
 const CONTROL_SESSION_STATUS_TIMEOUT_MS: i64 = 2_000;
@@ -78,11 +79,11 @@ const MIN_MAIN_WINDOW_WIDTH: c_int = 1100;
 const MIN_MAIN_WINDOW_HEIGHT: c_int = 720;
 const WS_MAX_MESSAGES_PER_FRAME: u32 = 32;
 const WS_MAX_POLL_BUDGET_NS: i128 = 2 * std.time.ns_per_ms;
-const FS_WORKER_MAX_RESULTS_PER_FRAME: u32 = 64;
-const FS_WORKER_MAX_POLL_BUDGET_NS: i128 = 2 * std.time.ns_per_ms;
 const FILESYSTEM_DIR_CACHE_TTL_MS: i64 = 5_000;
 const DEBUG_STREAM_SNAPSHOT_RETRY_MS: i64 = 2_000;
 const DEBUG_STREAM_PATH = "/debug/stream.log";
+const NODE_SERVICE_EVENTS_PATH = "/global/services/node-service-events.ndjson";
+const NODE_SERVICE_SNAPSHOT_RETRY_MS: i64 = 2_000;
 const DEBUG_EVENT_DEDUPE_WINDOW: usize = 4096;
 const DEBUG_SYNTAX_COLOR_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
 const DEBUG_SYNTAX_COLOR_MAX_LINE_BYTES: usize = 768;
@@ -172,6 +173,30 @@ const FilesystemEntryKind = enum {
     file,
 };
 
+const FilesystemRequestKind = enum {
+    list_dir,
+    read_file,
+    resolve_kind,
+};
+
+const FilesystemRequestResult = struct {
+    id: u64,
+    kind: FilesystemRequestKind,
+    path: []u8,
+    listing: ?[]u8 = null,
+    content: ?[]u8 = null,
+    is_dir: ?bool = null,
+    error_text: ?[]u8 = null,
+
+    fn deinit(self: *FilesystemRequestResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+        if (self.listing) |value| allocator.free(value);
+        if (self.content) |value| allocator.free(value);
+        if (self.error_text) |value| allocator.free(value);
+        self.* = undefined;
+    }
+};
+
 const FilesystemEntry = struct {
     name: []u8,
     path: []u8,
@@ -215,7 +240,7 @@ const FilesystemDirCacheEntry = struct {
 
 const FilesystemActiveRequest = struct {
     id: u64,
-    kind: fs_worker_mod.RequestKind,
+    kind: FilesystemRequestKind,
     open_after_resolve: bool = false,
     is_background: bool = false,
     started_at_ms: i64 = 0,
@@ -714,6 +739,8 @@ const App = struct {
     debug_stream_snapshot_retry_at_ms: i64 = 0,
     debug_stream_snapshot: ?[]u8 = null,
     node_service_watch_enabled: bool = false,
+    node_service_snapshot_pending: bool = false,
+    node_service_snapshot_retry_at_ms: i64 = 0,
     node_service_watch_filter: std.ArrayList(u8) = .empty,
     node_service_watch_replay_limit: std.ArrayList(u8) = .empty,
     debug_search_filter: std.ArrayList(u8) = .empty,
@@ -776,7 +803,6 @@ const App = struct {
     project_selector_open: bool = false,
     filesystem_panel_id: ?workspace.PanelId = null,
     terminal_panel_id: ?workspace.PanelId = null,
-    filesystem_worker: ?fs_worker_mod.FilesystemWorker = null,
     filesystem_path: std.ArrayList(u8) = .empty,
     filesystem_entries: std.ArrayListUnmanaged(FilesystemEntry) = .{},
     filesystem_preview_path: ?[]u8 = null,
@@ -788,6 +814,7 @@ const App = struct {
     filesystem_last_request_duration_ms: f32 = 0.0,
     filesystem_dir_cache: std.StringHashMapUnmanaged(FilesystemDirCacheEntry) = .{},
     fsrpc_last_remote_error: ?[]u8 = null,
+    fsrpc_ready: bool = false,
     contract_services: std.ArrayListUnmanaged(ContractServiceEntry) = .{},
     contract_service_selected_index: usize = 0,
     contract_invoke_payload: std.ArrayList(u8) = .empty,
@@ -1324,6 +1351,10 @@ const App = struct {
             self.pollDebugStream();
             const debug_elapsed_ns = std.time.nanoTimestamp() - debug_started_ns;
 
+            const node_service_started_ns = std.time.nanoTimestamp();
+            self.pollNodeServiceSnapshot();
+            const node_service_elapsed_ns = std.time.nanoTimestamp() - node_service_started_ns;
+
             const terminal_started_ns = std.time.nanoTimestamp();
             self.pollTerminalSession();
             const terminal_elapsed_ns = std.time.nanoTimestamp() - terminal_started_ns;
@@ -1331,7 +1362,7 @@ const App = struct {
                 _ = self.tryResumePendingSendJob() catch {};
             }
             const frame_elapsed_ns = std.time.nanoTimestamp() - frame_started_ns;
-            self.recordPerfSample(frame_elapsed_ns, ws_elapsed_ns, fs_elapsed_ns, debug_elapsed_ns, terminal_elapsed_ns, frame_draw_ns);
+            self.recordPerfSample(frame_elapsed_ns, ws_elapsed_ns, fs_elapsed_ns, debug_elapsed_ns + node_service_elapsed_ns, terminal_elapsed_ns, frame_draw_ns);
             try self.pollPerfAutomation();
             self.frame_clock.endFrame();
         }
@@ -3449,23 +3480,12 @@ const App = struct {
     }
 
     fn pollFilesystemWorker(self: *App) void {
-        const worker = if (self.filesystem_worker) |*value| value else return;
-        const started_ns = std.time.nanoTimestamp();
-        var processed: u32 = 0;
-        while (processed < FS_WORKER_MAX_RESULTS_PER_FRAME) : (processed += 1) {
-            if (processed > 0 and std.time.nanoTimestamp() - started_ns >= FS_WORKER_MAX_POLL_BUDGET_NS) {
-                break;
-            }
-            var result = worker.tryPopResult() orelse break;
-            defer result.deinit(self.allocator);
-            self.handleFilesystemWorkerResult(&result);
-        }
+        _ = self;
     }
 
     fn pollDebugStream(self: *App) void {
         if (!self.debug_stream_enabled) return;
         if (self.connection_state != .connected) return;
-        if (self.filesystem_worker == null) return;
         if (self.filesystem_active_request != null) return;
         if (!self.debug_stream_snapshot_pending) return;
 
@@ -3480,7 +3500,25 @@ const App = struct {
             self.debug_stream_snapshot_retry_at_ms = now + DEBUG_STREAM_SNAPSHOT_RETRY_MS;
             return;
         };
-        self.debug_stream_snapshot_pending = false;
+    }
+
+    fn pollNodeServiceSnapshot(self: *App) void {
+        if (!self.node_service_watch_enabled) return;
+        if (self.connection_state != .connected) return;
+        if (self.filesystem_active_request != null) return;
+        if (!self.node_service_snapshot_pending) return;
+
+        const now = std.time.milliTimestamp();
+        if (now < self.node_service_snapshot_retry_at_ms) return;
+
+        self.submitFilesystemRequestWithMode(.read_file, NODE_SERVICE_EVENTS_PATH, false, true) catch |err| {
+            if (err != error.Busy and err != error.NotConnected) {
+                std.log.debug("node service snapshot poll skipped: {s}", .{@errorName(err)});
+            }
+            self.node_service_snapshot_pending = true;
+            self.node_service_snapshot_retry_at_ms = now + NODE_SERVICE_SNAPSHOT_RETRY_MS;
+            return;
+        };
     }
 
     fn requestDebugStreamSnapshot(self: *App, immediate: bool) void {
@@ -3492,7 +3530,16 @@ const App = struct {
         }
     }
 
-    fn handleFilesystemWorkerResult(self: *App, result: *const fs_worker_mod.Result) void {
+    fn requestNodeServiceSnapshot(self: *App, immediate: bool) void {
+        self.node_service_snapshot_pending = true;
+        if (immediate) {
+            self.node_service_snapshot_retry_at_ms = 0;
+        } else if (self.node_service_snapshot_retry_at_ms == 0) {
+            self.node_service_snapshot_retry_at_ms = std.time.milliTimestamp() + NODE_SERVICE_SNAPSHOT_RETRY_MS;
+        }
+    }
+
+    fn handleFilesystemWorkerResult(self: *App, result: *const FilesystemRequestResult) void {
         const active = self.filesystem_active_request orelse return;
         if (active.id != result.id) return;
         const request_finished_ms = std.time.milliTimestamp();
@@ -3526,6 +3573,32 @@ const App = struct {
             return;
         }
 
+        const is_node_service_snapshot = std.mem.eql(u8, result.path, NODE_SERVICE_EVENTS_PATH);
+        if (is_node_service_snapshot) {
+            if (result.error_text) |_| {
+                if (self.node_service_watch_enabled) {
+                    self.node_service_snapshot_pending = true;
+                    self.node_service_snapshot_retry_at_ms = std.time.milliTimestamp() + NODE_SERVICE_SNAPSHOT_RETRY_MS;
+                }
+                return;
+            }
+            const content = result.content orelse {
+                if (self.node_service_watch_enabled) {
+                    self.node_service_snapshot_pending = true;
+                    self.node_service_snapshot_retry_at_ms = std.time.milliTimestamp() + NODE_SERVICE_SNAPSHOT_RETRY_MS;
+                }
+                return;
+            };
+            self.ingestNodeServiceSnapshotLines(content) catch |err| {
+                std.log.warn("node service snapshot merge failed: {s}", .{@errorName(err)});
+            };
+            if (self.node_service_watch_enabled) {
+                self.node_service_snapshot_pending = true;
+                self.node_service_snapshot_retry_at_ms = std.time.milliTimestamp() + NODE_SERVICE_SNAPSHOT_RETRY_MS;
+            }
+            return;
+        }
+
         if (result.error_text) |err_text| {
             self.setFsrpcRemoteError(err_text);
             self.setFilesystemError(err_text);
@@ -3538,7 +3611,7 @@ const App = struct {
         switch (result.kind) {
             .list_dir => {
                 const listing = result.listing orelse {
-                    self.setFilesystemError("filesystem worker returned no directory listing");
+                    self.setFilesystemError("filesystem request returned no directory listing");
                     return;
                 };
                 self.putFilesystemDirCache(result.path, listing) catch {};
@@ -3550,7 +3623,7 @@ const App = struct {
             },
             .read_file => {
                 const content = result.content orelse {
-                    self.setFilesystemError("filesystem worker returned no file content");
+                    self.setFilesystemError("filesystem request returned no file content");
                     return;
                 };
                 self.applyFilesystemPreview(result.path, content) catch |err| {
@@ -3561,7 +3634,7 @@ const App = struct {
             },
             .resolve_kind => {
                 const is_dir = result.is_dir orelse {
-                    self.setFilesystemError("filesystem worker returned no path-kind result");
+                    self.setFilesystemError("filesystem request returned no path-kind result");
                     return;
                 };
                 const resolved_kind: FilesystemEntryKind = if (is_dir) .directory else .file;
@@ -4367,41 +4440,38 @@ const App = struct {
         project_id: ?[]const u8,
         project_token: ?[]const u8,
     ) !void {
+        _ = url;
+        _ = token;
+        _ = session_key;
+        _ = agent_id;
+        _ = project_id;
+        _ = project_token;
         self.stopFilesystemWorker();
-        self.filesystem_worker = try fs_worker_mod.FilesystemWorker.init(
-            self.allocator,
-            url,
-            token,
-            session_key,
-            agent_id,
-            project_id,
-            project_token,
-        );
-        errdefer {
-            if (self.filesystem_worker) |*worker| {
-                worker.deinit();
-                self.filesystem_worker = null;
-            }
-        }
-        if (self.filesystem_worker) |*worker| {
-            try worker.start();
-        }
+        self.filesystem_busy = false;
+        self.filesystem_active_request = null;
+        self.clearFilesystemError();
+    }
+
+    fn stopFilesystemWorker(self: *App) void {
         self.filesystem_busy = false;
         self.filesystem_active_request = null;
     }
 
-    fn stopFilesystemWorker(self: *App) void {
-        if (self.filesystem_worker) |*worker| {
-            worker.deinit();
-            self.filesystem_worker = null;
-        }
-        self.filesystem_busy = false;
-        self.filesystem_active_request = null;
+    fn resetFsrpcConnectionState(self: *App) void {
+        self.fsrpc_ready = false;
+        self.next_fsrpc_tag = 1;
+        self.next_fsrpc_fid = 2;
+        self.clearFsrpcRemoteError();
+    }
+
+    fn invalidateFsrpcAttachment(self: *App) void {
+        self.fsrpc_ready = false;
+        self.clearFsrpcRemoteError();
     }
 
     fn submitFilesystemRequest(
         self: *App,
-        kind: fs_worker_mod.RequestKind,
+        kind: FilesystemRequestKind,
         path: []const u8,
         open_after_resolve: bool,
     ) !void {
@@ -4410,18 +4480,17 @@ const App = struct {
 
     fn submitFilesystemRequestWithMode(
         self: *App,
-        kind: fs_worker_mod.RequestKind,
+        kind: FilesystemRequestKind,
         path: []const u8,
         open_after_resolve: bool,
         is_background: bool,
     ) !void {
         if (self.filesystem_active_request != null) return error.Busy;
-        const worker = if (self.filesystem_worker) |*value| value else return error.NotConnected;
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
         const request_id = self.filesystem_next_request_id;
         self.filesystem_next_request_id +%= 1;
         if (self.filesystem_next_request_id == 0) self.filesystem_next_request_id = 1;
 
-        try worker.submit(request_id, kind, path);
         self.filesystem_active_request = .{
             .id = request_id,
             .kind = kind,
@@ -4430,6 +4499,123 @@ const App = struct {
             .started_at_ms = std.time.milliTimestamp(),
         };
         if (!is_background) self.filesystem_busy = true;
+
+        var request_completed = false;
+        errdefer {
+            if (!request_completed) {
+                self.filesystem_active_request = null;
+                if (!is_background) self.filesystem_busy = false;
+            }
+        }
+
+        var result = try self.performFilesystemRequestSync(request_id, kind, path, client);
+        defer result.deinit(self.allocator);
+        self.handleFilesystemWorkerResult(&result);
+        request_completed = true;
+    }
+
+    fn performFilesystemRequestSync(
+        self: *App,
+        request_id: u64,
+        kind: FilesystemRequestKind,
+        path: []const u8,
+        client: *ws_client_mod.WebSocketClient,
+    ) !FilesystemRequestResult {
+        const path_copy = try self.allocator.dupe(u8, path);
+        errdefer self.allocator.free(path_copy);
+
+        self.clearFsrpcRemoteError();
+        const result = switch (kind) {
+            .list_dir => blk: {
+                const listing = self.readFilesystemDirectoryGui(client, path) catch |err| {
+                    break :blk try self.buildFilesystemRequestErrorResult(request_id, kind, path_copy, err);
+                };
+                break :blk FilesystemRequestResult{
+                    .id = request_id,
+                    .kind = kind,
+                    .path = path_copy,
+                    .listing = listing,
+                };
+            },
+            .read_file => blk: {
+                const content = self.readFilesystemFileGui(client, path) catch |err| {
+                    break :blk try self.buildFilesystemRequestErrorResult(request_id, kind, path_copy, err);
+                };
+                break :blk FilesystemRequestResult{
+                    .id = request_id,
+                    .kind = kind,
+                    .path = path_copy,
+                    .content = content,
+                };
+            },
+            .resolve_kind => blk: {
+                const is_dir = self.resolveFilesystemPathIsDirGui(client, path) catch |err| {
+                    break :blk try self.buildFilesystemRequestErrorResult(request_id, kind, path_copy, err);
+                };
+                break :blk FilesystemRequestResult{
+                    .id = request_id,
+                    .kind = kind,
+                    .path = path_copy,
+                    .is_dir = is_dir,
+                };
+            },
+        };
+        return result;
+    }
+
+    fn buildFilesystemRequestErrorResult(
+        self: *App,
+        request_id: u64,
+        kind: FilesystemRequestKind,
+        path: []u8,
+        err: anyerror,
+    ) !FilesystemRequestResult {
+        const operation = switch (kind) {
+            .list_dir => "list directory",
+            .read_file => "read file",
+            .resolve_kind => "resolve path kind",
+        };
+        const detail = self.formatFilesystemOpError(operation, err) orelse try self.allocator.dupe(u8, @errorName(err));
+        return .{
+            .id = request_id,
+            .kind = kind,
+            .path = path,
+            .error_text = detail,
+        };
+    }
+
+    fn readFilesystemDirectoryGui(
+        self: *App,
+        client: *ws_client_mod.WebSocketClient,
+        path: []const u8,
+    ) ![]u8 {
+        try self.fsrpcBootstrapGui(client);
+        const fid = try self.fsrpcWalkPathGui(client, path);
+        defer self.fsrpcClunkBestEffort(client, fid);
+        const is_dir = try self.fsrpcFidIsDirGui(client, fid);
+        if (!is_dir) return error.NotDir;
+        try self.fsrpcOpenGui(client, fid, "r");
+        return self.fsrpcReadAllTextGui(client, fid);
+    }
+
+    fn readFilesystemFileGui(
+        self: *App,
+        client: *ws_client_mod.WebSocketClient,
+        path: []const u8,
+    ) ![]u8 {
+        try self.fsrpcBootstrapGui(client);
+        return self.readFsPathTextGui(client, path);
+    }
+
+    fn resolveFilesystemPathIsDirGui(
+        self: *App,
+        client: *ws_client_mod.WebSocketClient,
+        path: []const u8,
+    ) !bool {
+        try self.fsrpcBootstrapGui(client);
+        const fid = try self.fsrpcWalkPathGui(client, path);
+        defer self.fsrpcClunkBestEffort(client, fid);
+        return self.fsrpcFidIsDirGui(client, fid);
     }
 
     fn applyFilesystemListing(self: *App, path: []const u8, listing: []const u8) !void {
@@ -9859,9 +10045,9 @@ const App = struct {
         y += @as(f32, @floatFromInt(spark_rows)) * spark_row_h + layout.row_gap * 0.2;
 
         const node_watch_status = if (self.node_service_watch_enabled)
-            "Node service events: watching"
+            "Node service events: polling worldfs snapshot"
         else
-            "Node service events: inactive";
+            "Node service events: paused";
         self.drawLabel(
             rect.min[0] + pad,
             y,
@@ -9897,7 +10083,7 @@ const App = struct {
                 rect.min[0] + pad,
                 y,
                 content_width,
-                "User watch stream is filtered to mounted nodes allowed by project observe policy.",
+                "User node service history is filtered to mounted nodes allowed by project observe policy.",
                 self.theme.colors.text_secondary,
             );
             y += line_height;
@@ -9981,7 +10167,7 @@ const App = struct {
         );
         if (self.drawButtonWidget(
             apply_watch_rect,
-            "Apply Node Watch",
+            "Refresh Node Feed",
             .{ .variant = .secondary, .disabled = self.ws_client == null },
         )) {
             self.subscribeNodeServiceEventsFromUi() catch |err| {
@@ -9997,7 +10183,7 @@ const App = struct {
         );
         if (self.drawButtonWidget(
             stop_watch_rect,
-            "Stop Node Watch",
+            "Pause Node Feed",
             .{ .variant = .secondary, .disabled = self.ws_client == null or !self.node_service_watch_enabled },
         )) {
             self.unsubscribeNodeServiceEventsFromUi() catch |err| {
@@ -12372,6 +12558,9 @@ const App = struct {
             CONTROL_SESSION_ATTACH_TIMEOUT_MS,
         );
         defer self.allocator.free(response_payload);
+        self.invalidateFsrpcAttachment();
+        if (self.debug_stream_enabled) self.requestDebugStreamSnapshot(true);
+        if (self.node_service_watch_enabled) self.requestNodeServiceSnapshot(true);
     }
 
     fn loadSessionHistoryFromServer(self: *App, show_feedback: bool) !void {
@@ -12505,8 +12694,11 @@ const App = struct {
             effective_project_id,
             effective_project_token,
         ) catch |worker_err| {
-            std.log.warn("Failed to rebind filesystem worker for restored session: {s}", .{@errorName(worker_err)});
+            std.log.warn("Failed to rebind filesystem transport for restored session: {s}", .{@errorName(worker_err)});
         };
+        self.requestDebugStreamSnapshot(true);
+        self.node_service_watch_enabled = true;
+        self.requestNodeServiceSnapshot(true);
 
         try self.loadSessionHistoryFromServer(false);
         if (restore_warning) |warning| {
@@ -12716,9 +12908,12 @@ const App = struct {
             return;
         }
         if (std.mem.eql(u8, status.state, "warming")) {
-            self.session_attach_state = .warming;
-            self.setConnectionState(.connected, "Connected (sandbox warming...)");
-            self.setWorkspaceError("Sandbox runtime is warming. Retry filesystem/chat in a moment.");
+            // "warming" is a legacy backend state; do not gate chat/filesystem on it.
+            self.session_attach_state = .unknown;
+            if (self.connection_state == .connected) {
+                self.setConnectionState(.connected, "Connected");
+            }
+            self.clearWorkspaceError();
             return;
         }
         if (std.mem.eql(u8, status.state, "error")) {
@@ -12770,6 +12965,9 @@ const App = struct {
         );
         defer self.allocator.free(response_payload);
 
+        self.invalidateFsrpcAttachment();
+        if (self.debug_stream_enabled) self.requestDebugStreamSnapshot(true);
+        if (self.node_service_watch_enabled) self.requestNodeServiceSnapshot(true);
         try self.setDefaultAgentInSettings(resolved_agent);
     }
 
@@ -12798,6 +12996,7 @@ const App = struct {
         self.clearFilesystemDirCache();
         self.clearContractServices();
         self.clearTerminalState();
+        self.resetFsrpcConnectionState();
         if (self.ws_client) |*existing| {
             while (existing.tryReceive()) |msg| self.allocator.free(msg);
             existing.deinit();
@@ -12807,6 +13006,8 @@ const App = struct {
         self.debug_stream_snapshot_pending = false;
         self.debug_stream_snapshot_retry_at_ms = 0;
         self.node_service_watch_enabled = false;
+        self.node_service_snapshot_pending = false;
+        self.node_service_snapshot_retry_at_ms = 0;
         self.clearDebugStreamSnapshot();
 
         const effective_url = self.settings_panel.server_url.items;
@@ -13016,8 +13217,6 @@ const App = struct {
                     self.setDefaultAgentInSettings(agent_id) catch {};
                 }
             }
-
-            self.subscribeNodeServiceEvents(client);
         }
 
         if (worker_attach_project_id != null) {
@@ -13029,17 +13228,17 @@ const App = struct {
                 worker_attach_project_id,
                 worker_attach_project_token,
             ) catch |err| {
-                std.log.warn("Failed to start filesystem worker: {s}", .{@errorName(err)});
+                std.log.warn("Failed to ready filesystem transport: {s}", .{@errorName(err)});
                 const warning = std.fmt.allocPrint(
                     self.allocator,
-                    "Filesystem worker unavailable: {s}",
+                    "Filesystem transport unavailable: {s}",
                     .{@errorName(err)},
                 ) catch null;
                 defer if (warning) |value| self.allocator.free(value);
                 if (warning) |value| self.setFilesystemError(value);
             };
         } else {
-            self.setFilesystemError("Filesystem worker unavailable until a project is selected and attached.");
+            self.setFilesystemError("Filesystem transport unavailable until a project is selected and attached.");
         }
 
         self.setConnectionState(.connected, "Connected");
@@ -13047,6 +13246,8 @@ const App = struct {
             self.setLauncherNotice("Connected. Select a project to open workspace.");
         }
         self.requestDebugStreamSnapshot(true);
+        self.node_service_watch_enabled = true;
+        self.requestNodeServiceSnapshot(true);
         self.settings_panel.focused_field = .none;
         if (self.ws_client) |*client| {
             const session_key_for_status = if (self.settings_panel.default_session.items.len > 0)
@@ -13443,7 +13644,10 @@ const App = struct {
         self.debug_stream_snapshot_pending = false;
         self.debug_stream_snapshot_retry_at_ms = 0;
         self.node_service_watch_enabled = false;
+        self.node_service_snapshot_pending = false;
+        self.node_service_snapshot_retry_at_ms = 0;
         self.session_attach_state = .unknown;
+        self.resetFsrpcConnectionState();
         self.clearDebugStreamSnapshot();
         self.clearWorkspaceData();
         self.clearFilesystemData();
@@ -13466,47 +13670,10 @@ const App = struct {
         return @min(parsed, 10_000);
     }
 
-    fn buildNodeServiceWatchPayload(self: *App) ![]u8 {
-        const replay_limit = self.parseNodeServiceWatchReplayLimit();
-        const node_filter_trimmed = std.mem.trim(u8, self.node_service_watch_filter.items, " \t\r\n");
-        if (node_filter_trimmed.len == 0) {
-            return std.fmt.allocPrint(
-                self.allocator,
-                "{{\"replay_limit\":{d}}}",
-                .{replay_limit},
-            );
-        }
-        const escaped_node = try jsonEscape(self.allocator, node_filter_trimmed);
-        defer self.allocator.free(escaped_node);
-        return std.fmt.allocPrint(
-            self.allocator,
-            "{{\"node_id\":\"{s}\",\"replay_limit\":{d}}}",
-            .{ escaped_node, replay_limit },
-        );
-    }
-
     fn subscribeNodeServiceEvents(self: *App, client: *ws_client_mod.WebSocketClient) void {
-        const payload_json = self.buildNodeServiceWatchPayload() catch |err| {
-            self.node_service_watch_enabled = false;
-            std.log.warn("Failed to build node service watch payload: {s}", .{@errorName(err)});
-            return;
-        };
-        defer self.allocator.free(payload_json);
-
-        const ack_payload = control_plane.requestControlPayloadJsonWithTimeout(
-            self.allocator,
-            client,
-            &self.message_counter,
-            "control.node_service_watch",
-            payload_json,
-            CONTROL_CONNECT_TIMEOUT_MS,
-        ) catch |err| {
-            self.node_service_watch_enabled = false;
-            std.log.warn("Failed to subscribe node service event stream: {s}", .{@errorName(err)});
-            return;
-        };
-        defer self.allocator.free(ack_payload);
+        _ = client;
         self.node_service_watch_enabled = true;
+        self.requestNodeServiceSnapshot(true);
     }
 
     fn subscribeNodeServiceEventsFromUi(self: *App) !void {
@@ -13516,16 +13683,16 @@ const App = struct {
             return error.NotConnected;
         self.subscribeNodeServiceEvents(client);
         if (self.node_service_watch_enabled) {
-            try self.appendMessage("system", "Node service watch updated", null);
+            try self.appendMessage("system", "Node service feed refreshed", null);
             return;
         }
-        const remote = control_plane.lastRemoteError() orelse "Node service watch request failed";
+        const remote = control_plane.lastRemoteError() orelse "Node service snapshot request failed";
         const hint = self.nodeWatchHintForRemote(remote);
         defer if (hint) |value| self.allocator.free(value);
         const message = if (hint) |value|
-            std.fmt.allocPrint(self.allocator, "Node watch failed: {s} {s}", .{ remote, value }) catch null
+            std.fmt.allocPrint(self.allocator, "Node service feed failed: {s} {s}", .{ remote, value }) catch null
         else
-            std.fmt.allocPrint(self.allocator, "Node watch failed: {s}", .{remote}) catch null;
+            std.fmt.allocPrint(self.allocator, "Node service feed failed: {s}", .{remote}) catch null;
         defer if (message) |value| self.allocator.free(value);
         try self.appendMessage("system", message orelse remote, null);
         return error.ControlRequestFailed;
@@ -13536,17 +13703,11 @@ const App = struct {
             value
         else
             return error.NotConnected;
-        const ack_payload = try control_plane.requestControlPayloadJsonWithTimeout(
-            self.allocator,
-            client,
-            &self.message_counter,
-            "control.node_service_unwatch",
-            null,
-            CONTROL_CONNECT_TIMEOUT_MS,
-        );
-        defer self.allocator.free(ack_payload);
+        _ = client;
         self.node_service_watch_enabled = false;
-        try self.appendMessage("system", "Node service watch disabled", null);
+        self.node_service_snapshot_pending = false;
+        self.node_service_snapshot_retry_at_ms = 0;
+        try self.appendMessage("system", "Node service feed paused", null);
     }
 
     fn sendChatMessageText(self: *App, text: []const u8) !void {
@@ -13572,7 +13733,7 @@ const App = struct {
         var attach_project_id = self.preferredAttachProjectId();
         var attach_project_token = self.projectTokenForSessionProject(attach_project_id);
         var attached_during_send = false;
-        if (self.session_attach_state == .unknown or self.session_attach_state == .err) {
+        if (self.session_attach_state == .unknown or self.session_attach_state == .err or self.session_attach_state == .warming) {
             self.attachSessionBinding(client, session_key) catch |err| {
                 if (err == error.ProjectIdRequired) {
                     const msg = "Session attach requires an explicit project. Select a project in Settings.";
@@ -13655,14 +13816,6 @@ const App = struct {
             };
             attached_during_send = true;
             self.refreshSessionAttachStatusOnce(client, session_key);
-        } else if (self.session_attach_state == .warming) {
-            // Avoid re-attaching while warmup is in-flight; that re-arms backend warmup and can
-            // keep the session in warming forever when the user retries quickly.
-            self.refreshSessionAttachStatusOnce(client, session_key);
-        }
-        if (self.session_attach_state == .warming) {
-            try self.appendMessage("system", "Sandbox runtime is warming. Retry in a moment.", null);
-            return error.RuntimeWarming;
         }
         if (self.session_attach_state == .err) {
             const detail = self.workspace_last_error orelse "Sandbox runtime is unavailable for this session.";
@@ -13670,36 +13823,8 @@ const App = struct {
             return error.RemoteError;
         }
 
-        if (attached_during_send and self.filesystem_worker == null and attach_project_id != null) {
-            var late_worker_agent = self.selectedAgentId();
-            var fetched_late_worker_agent: ?[]u8 = null;
-            defer if (fetched_late_worker_agent) |value| self.allocator.free(value);
-            if (late_worker_agent == null) {
-                fetched_late_worker_agent = self.fetchDefaultAgentFromServer(client, session_key) catch null;
-                if (fetched_late_worker_agent) |agent_id| {
-                    late_worker_agent = agent_id;
-                    self.setDefaultAgentInSettings(agent_id) catch {};
-                }
-            }
-            if (self.startFilesystemWorker(
-                client.url_buf,
-                client.token_buf,
-                session_key,
-                late_worker_agent,
-                attach_project_id,
-                attach_project_token,
-            )) |_| {
-                self.clearFilesystemError();
-            } else |worker_err| {
-                std.log.warn("Failed to start filesystem worker after late attach: {s}", .{@errorName(worker_err)});
-                const warning = std.fmt.allocPrint(
-                    self.allocator,
-                    "Filesystem worker unavailable: {s}",
-                    .{@errorName(worker_err)},
-                ) catch null;
-                defer if (warning) |value| self.allocator.free(value);
-                if (warning) |value| self.setFilesystemError(value);
-            }
+        if (attached_during_send and attach_project_id != null) {
+            self.clearFilesystemError();
         }
 
         const user_msg_id = try self.nextMessageId("msg");
@@ -13749,6 +13874,9 @@ const App = struct {
     }
 
     fn nextFsrpcTag(self: *App) u32 {
+        if (self.ws_client) |*client| {
+            return client.nextAcheronTag();
+        }
         const tag = self.next_fsrpc_tag;
         self.next_fsrpc_tag +%= 1;
         if (self.next_fsrpc_tag == 0) self.next_fsrpc_tag = 1;
@@ -13756,6 +13884,9 @@ const App = struct {
     }
 
     fn nextFsrpcFid(self: *App) u32 {
+        if (self.ws_client) |*client| {
+            return client.nextAcheronFid();
+        }
         const fid = self.next_fsrpc_fid;
         self.next_fsrpc_fid +%= 1;
         if (self.next_fsrpc_fid == 0 or self.next_fsrpc_fid == 1) self.next_fsrpc_fid = 2;
@@ -13770,45 +13901,18 @@ const App = struct {
         timeout_ms: u32,
     ) !FsrpcEnvelope {
         try client.send(request_json);
-
-        const started = std.time.milliTimestamp();
-        while (std.time.milliTimestamp() - started < timeout_ms) {
-            if (client.receive(500)) |raw| {
-                const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, raw, .{}) catch {
-                    self.allocator.free(raw);
-                    continue;
-                };
-
-                var matched = false;
-                if (parsed.value == .object) {
-                    const obj = parsed.value.object;
-                    if (obj.get("channel")) |channel| {
-                        if (channel == .string and std.mem.eql(u8, channel.string, "acheron")) {
-                            if (obj.get("tag")) |raw_tag| {
-                                if (raw_tag == .integer and raw_tag.integer >= 0 and @as(u32, @intCast(raw_tag.integer)) == tag) {
-                                    matched = true;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if (matched) {
-                    return .{
-                        .raw = raw,
-                        .parsed = parsed,
-                    };
-                }
-
-                parsed.deinit();
-                self.handleIncomingMessage(raw) catch |err| {
-                    std.log.warn("[GUI] dropped out-of-band frame while awaiting fsrpc tag={d}: {s}", .{ tag, @errorName(err) });
-                };
-                self.allocator.free(raw);
-            }
+        const raw = try client.awaitAcheronFrame(tag, timeout_ms) orelse return error.Timeout;
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, raw, .{}) catch {
+            self.allocator.free(raw);
+            return error.InvalidResponse;
+        };
+        if (!client.isAlive()) {
+            self.fsrpc_ready = false;
         }
-
-        return error.Timeout;
+        return .{
+            .raw = raw,
+            .parsed = parsed,
+        };
     }
 
     fn ensureFsrpcOk(self: *App, envelope: *FsrpcEnvelope) !void {
@@ -13868,9 +13972,12 @@ const App = struct {
             self.setFsrpcRemoteError("remote fsrpc error");
         }
         if (runtime_warming) {
-            self.session_attach_state = .warming;
-            self.setConnectionState(.connected, "Connected (sandbox warming...)");
-            return error.RuntimeWarming;
+            self.session_attach_state = .unknown;
+            if (self.connection_state == .connected) {
+                self.setConnectionState(.connected, "Connected");
+            }
+            self.setFsrpcRemoteError("sandbox runtime unavailable");
+            return error.RemoteError;
         }
         return error.RemoteError;
     }
@@ -13883,6 +13990,8 @@ const App = struct {
     }
 
     fn fsrpcBootstrapGui(self: *App, client: *ws_client_mod.WebSocketClient) !void {
+        if (self.fsrpc_ready) return;
+
         try control_plane.ensureUnifiedV2Connection(
             self.allocator,
             client,
@@ -13910,6 +14019,7 @@ const App = struct {
         var attach = try self.sendAndAwaitFsrpc(client, attach_req, attach_tag, FSRPC_DEFAULT_TIMEOUT_MS);
         defer attach.deinit(self.allocator);
         try self.ensureFsrpcOk(&attach);
+        self.fsrpc_ready = true;
     }
 
     fn fsrpcClunkBestEffort(self: *App, client: *ws_client_mod.WebSocketClient, fid: u32) void {
@@ -14154,27 +14264,40 @@ const App = struct {
     }
 
     fn fsrpcReadAllTextGui(self: *App, client: *ws_client_mod.WebSocketClient, fid: u32) ![]u8 {
-        const tag = self.nextFsrpcTag();
-        const req = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_read\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"count\":1048576}}",
-            .{ tag, fid },
-        );
-        defer self.allocator.free(req);
+        var out = std.ArrayListUnmanaged(u8){};
+        errdefer out.deinit(self.allocator);
 
-        var response = try self.sendAndAwaitFsrpc(client, req, tag, FSRPC_DEFAULT_TIMEOUT_MS);
-        defer response.deinit(self.allocator);
-        try self.ensureFsrpcOk(&response);
+        var offset: u64 = 0;
+        while (true) {
+            const tag = self.nextFsrpcTag();
+            const req = try std.fmt.allocPrint(
+                self.allocator,
+                "{{\"channel\":\"acheron\",\"type\":\"acheron.t_read\",\"tag\":{d},\"fid\":{d},\"offset\":{d},\"count\":{d}}}",
+                .{ tag, fid, offset, FSRPC_READ_CHUNK_BYTES },
+            );
+            defer self.allocator.free(req);
 
-        const payload = try self.getFsrpcPayloadObject(response.parsed.value.object);
-        const data_b64 = payload.get("data_b64") orelse return error.InvalidResponse;
-        if (data_b64 != .string) return error.InvalidResponse;
+            var response = try self.sendAndAwaitFsrpc(client, req, tag, FSRPC_DEFAULT_TIMEOUT_MS);
+            defer response.deinit(self.allocator);
+            try self.ensureFsrpcOk(&response);
 
-        const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(data_b64.string) catch return error.InvalidResponse;
-        const decoded = try self.allocator.alloc(u8, decoded_len);
-        errdefer self.allocator.free(decoded);
-        _ = std.base64.standard.Decoder.decode(decoded, data_b64.string) catch return error.InvalidResponse;
-        return decoded;
+            const payload = try self.getFsrpcPayloadObject(response.parsed.value.object);
+            const data_b64 = payload.get("data_b64") orelse return error.InvalidResponse;
+            if (data_b64 != .string) return error.InvalidResponse;
+
+            const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(data_b64.string) catch return error.InvalidResponse;
+            const decoded = try self.allocator.alloc(u8, decoded_len);
+            defer self.allocator.free(decoded);
+            _ = std.base64.standard.Decoder.decode(decoded, data_b64.string) catch return error.InvalidResponse;
+
+            if (decoded.len == 0) break;
+            if (out.items.len + decoded.len > FSRPC_READ_MAX_TOTAL_BYTES) return error.ResponseTooLarge;
+            try out.appendSlice(self.allocator, decoded);
+            offset += @as(u64, @intCast(decoded.len));
+            if (decoded.len < @as(usize, FSRPC_READ_CHUNK_BYTES)) break;
+        }
+
+        return out.toOwnedSlice(self.allocator);
     }
 
     fn fsrpcFidIsDirGui(self: *App, client: *ws_client_mod.WebSocketClient, fid: u32) !bool {
@@ -15021,6 +15144,9 @@ const App = struct {
         const timestamp = if (root.get("timestamp")) |value| switch (value) {
             .integer => value.integer,
             else => std.time.milliTimestamp(),
+        } else if (root.get("timestamp_ms")) |value| switch (value) {
+            .integer => value.integer,
+            else => std.time.milliTimestamp(),
         } else std.time.milliTimestamp();
 
         const payload_value = root.get("payload") orelse {
@@ -15220,12 +15346,6 @@ const App = struct {
                     try self.allocator.dupe(u8, err_message);
                 defer self.allocator.free(detail);
                 try self.appendMessage("system", detail, null);
-            },
-            .debug_event => {
-                try self.handleDebugEventMessage(root);
-            },
-            .node_service_event => {
-                try self.handleNodeServiceEventMessage(root);
             },
             else => {
                 if (self.connection_state == .connected) {
@@ -15587,6 +15707,52 @@ const App = struct {
         const type_value = root.get("type") orelse return;
         if (type_value != .string or !std.mem.eql(u8, type_value.string, "debug.event")) return;
         try self.handleDebugEventMessage(root);
+    }
+
+    fn ingestNodeServiceSnapshotLines(self: *App, chunk: []const u8) !void {
+        var matching_lines: std.ArrayListUnmanaged([]const u8) = .{};
+        defer matching_lines.deinit(self.allocator);
+
+        const node_filter = std.mem.trim(u8, self.node_service_watch_filter.items, " \t\r\n");
+        var iter = std.mem.splitScalar(u8, chunk, '\n');
+        while (iter.next()) |raw_line| {
+            const line = std.mem.trim(u8, raw_line, " \t\r\n");
+            if (line.len == 0) continue;
+            if (!try self.nodeServiceSnapshotLineMatchesFilter(line, node_filter)) continue;
+            try matching_lines.append(self.allocator, line);
+        }
+
+        const replay_limit = self.parseNodeServiceWatchReplayLimit();
+        const start_index = if (replay_limit > 0 and matching_lines.items.len > replay_limit)
+            matching_lines.items.len - replay_limit
+        else
+            0;
+        for (matching_lines.items[start_index..]) |line| {
+            try self.ingestNodeServiceSnapshotLine(line);
+        }
+    }
+
+    fn nodeServiceSnapshotLineMatchesFilter(
+        self: *App,
+        line: []const u8,
+        node_filter: []const u8,
+    ) !bool {
+        if (node_filter.len == 0) return true;
+
+        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, line, .{}) catch return false;
+        defer parsed.deinit();
+        if (parsed.value != .object) return false;
+        const root = parsed.value.object;
+        const node_id_value = root.get("node_id") orelse return false;
+        if (node_id_value != .string) return false;
+        return std.mem.eql(u8, node_id_value.string, node_filter);
+    }
+
+    fn ingestNodeServiceSnapshotLine(self: *App, line: []const u8) !void {
+        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, line, .{}) catch return;
+        defer parsed.deinit();
+        if (parsed.value != .object) return;
+        try self.handleNodeServiceEventMessage(parsed.value.object);
     }
 
     fn clearNodeServiceReloadDiagnostics(self: *App) void {

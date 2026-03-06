@@ -14,6 +14,7 @@ SpiderApp exposes a project-oriented view of a distributed Spiderweb:
 ## Build
 
 ```bash
+git submodule update --init --recursive
 zig build
 zig build test
 ```
