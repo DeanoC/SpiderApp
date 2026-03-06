@@ -20,6 +20,11 @@ var g_fsrpc_tag: u32 = 1;
 var g_fsrpc_fid: u32 = 2;
 const fsrpc_default_timeout_ms: i64 = 15_000;
 const fsrpc_chat_write_timeout_ms: i64 = 180_000;
+const session_status_timeout_ms: i64 = 5_000;
+const session_warming_wait_timeout_ms: i64 = 30_000;
+const session_warming_poll_interval_ms: u64 = 250;
+const system_project_id = "system";
+const system_agent_id = "mother";
 
 pub fn run(allocator: std.mem.Allocator) !void {
     defer cleanupGlobalClient();
@@ -433,6 +438,193 @@ fn resolveProjectSelection(options: args.Options, cfg: *const Config) ?[]const u
     return cfg.selectedProject();
 }
 
+fn effectiveRole(options: args.Options, cfg: *const Config) Config.TokenRole {
+    if (options.role) |role| {
+        return if (role == .admin) .admin else .user;
+    }
+    return cfg.active_role;
+}
+
+fn resolveSessionKey(cfg: *const Config) []const u8 {
+    if (cfg.default_session) |session_key| {
+        if (session_key.len > 0) return session_key;
+    }
+    return "main";
+}
+
+fn isUserScopedAgentId(agent_id: []const u8) bool {
+    return std.mem.eql(u8, agent_id, "user") or std.mem.eql(u8, agent_id, "user-isolated");
+}
+
+fn isSystemProjectId(project_id: []const u8) bool {
+    return std.mem.eql(u8, project_id, system_project_id);
+}
+
+fn isSystemAgentId(agent_id: []const u8) bool {
+    return std.mem.eql(u8, agent_id, system_agent_id);
+}
+
+fn fetchDefaultAgentFromSessionList(
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+    preferred_session_key: []const u8,
+) ![]u8 {
+    var sessions = try control_plane.listSessions(allocator, client, &g_control_request_counter);
+    defer sessions.deinit(allocator);
+
+    var preferred_agent: ?[]const u8 = null;
+    var active_agent: ?[]const u8 = null;
+    var fallback_agent: ?[]const u8 = null;
+
+    for (sessions.sessions.items) |session| {
+        if (fallback_agent == null) fallback_agent = session.agent_id;
+        if (std.mem.eql(u8, session.session_key, preferred_session_key)) {
+            preferred_agent = session.agent_id;
+        }
+        if (std.mem.eql(u8, session.session_key, sessions.active_session)) {
+            active_agent = session.agent_id;
+        }
+    }
+
+    const selected = preferred_agent orelse active_agent orelse fallback_agent orelse return error.InvalidResponse;
+    return allocator.dupe(u8, selected);
+}
+
+fn fetchFirstNonSystemAgent(
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+) ![]u8 {
+    var agents = try control_plane.listAgents(allocator, client, &g_control_request_counter);
+    defer workspace_types.deinitAgentList(allocator, &agents);
+
+    var fallback_non_system: ?[]const u8 = null;
+    for (agents.items) |agent| {
+        if (isSystemAgentId(agent.id)) continue;
+        if (agent.is_default) return allocator.dupe(u8, agent.id);
+        if (fallback_non_system == null) fallback_non_system = agent.id;
+    }
+
+    if (fallback_non_system) |agent_id| return allocator.dupe(u8, agent_id);
+    return error.NoProjectCompatibleAgent;
+}
+
+fn resolveAttachAgentForProject(
+    allocator: std.mem.Allocator,
+    options: args.Options,
+    cfg: *const Config,
+    client: *WebSocketClient,
+    preferred_session_key: []const u8,
+    project_id: []const u8,
+) ![]u8 {
+    const role = effectiveRole(options, cfg);
+    if (role == .user and isSystemProjectId(project_id)) {
+        return error.UserRoleCannotAttachSystemProject;
+    }
+    var resolved_agent = if (cfg.selectedAgent()) |selected_agent| blk: {
+        if (selected_agent.len == 0) break :blk try fetchDefaultAgentFromSessionList(allocator, client, preferred_session_key);
+        break :blk try allocator.dupe(u8, selected_agent);
+    } else try fetchDefaultAgentFromSessionList(allocator, client, preferred_session_key);
+    errdefer allocator.free(resolved_agent);
+
+    if (role == .admin and isUserScopedAgentId(resolved_agent)) {
+        allocator.free(resolved_agent);
+        resolved_agent = try fetchDefaultAgentFromSessionList(allocator, client, preferred_session_key);
+    }
+
+    if (isSystemProjectId(project_id)) {
+        if (!isSystemAgentId(resolved_agent)) {
+            allocator.free(resolved_agent);
+            resolved_agent = try allocator.dupe(u8, system_agent_id);
+        }
+        return resolved_agent;
+    }
+
+    if (isSystemAgentId(resolved_agent)) {
+        allocator.free(resolved_agent);
+        resolved_agent = try fetchFirstNonSystemAgent(allocator, client);
+    }
+
+    return resolved_agent;
+}
+
+fn sessionStatusMatchesTarget(
+    status: *const workspace_types.SessionAttachStatus,
+    agent_id: []const u8,
+    project_id: []const u8,
+) bool {
+    if (!std.mem.eql(u8, status.agent_id, agent_id)) return false;
+    const attached_project_id = status.project_id orelse return false;
+    return std.mem.eql(u8, attached_project_id, project_id);
+}
+
+fn waitForSessionReady(
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+    session_key: []const u8,
+    agent_id: []const u8,
+    project_id: []const u8,
+) !void {
+    const start_ms = std.time.milliTimestamp();
+    var printed_warming = false;
+
+    while (true) {
+        var status = control_plane.sessionStatusWithTimeout(
+            allocator,
+            client,
+            &g_control_request_counter,
+            session_key,
+            session_status_timeout_ms,
+        ) catch |err| {
+            if (err == error.RemoteError) {
+                if (control_plane.lastRemoteError()) |remote| {
+                    logger.err("session status failed while waiting for ready: {s}", .{remote});
+                }
+            }
+            return err;
+        };
+        defer status.deinit(allocator);
+
+        if (!sessionStatusMatchesTarget(&status, agent_id, project_id)) {
+            logger.err(
+                "session binding changed while waiting: expected {s}@{s}, got {s}@{s}",
+                .{ agent_id, project_id, status.agent_id, status.project_id orelse "(none)" },
+            );
+            return error.SessionAttachMismatch;
+        }
+
+        if (std.mem.eql(u8, status.state, "ready")) return;
+
+        if (std.mem.eql(u8, status.state, "error")) {
+            const code = status.error_code orelse "runtime_unavailable";
+            const message = status.error_message orelse "runtime unavailable";
+            logger.err("session attach error: {s} [{s}]", .{ message, code });
+            return error.RemoteError;
+        }
+
+        if (std.mem.eql(u8, status.state, "warming")) {
+            if (!printed_warming) {
+                printed_warming = true;
+                logger.info(
+                    "Session runtime warming for {s}@{s}; waiting up to {d}ms...",
+                    .{ agent_id, project_id, session_warming_wait_timeout_ms },
+                );
+            }
+        } else {
+            logger.info("Session attach pending state={s}; waiting...", .{status.state});
+        }
+
+        if (std.time.milliTimestamp() - start_ms >= session_warming_wait_timeout_ms) {
+            logger.err(
+                "Session runtime did not become ready within {d}ms",
+                .{session_warming_wait_timeout_ms},
+            );
+            return error.RuntimeWarming;
+        }
+
+        std.Thread.sleep(session_warming_poll_interval_ms * std.time.ns_per_ms);
+    }
+}
+
 fn printWorkspaceStatus(stdout: anytype, status: *const workspace_types.WorkspaceStatus, verbose: bool) !void {
     try stdout.print("Agent: {s}\n", .{status.agent_id});
     if (status.project_id) |project_id| {
@@ -507,17 +699,107 @@ fn maybeApplyProjectContext(
     try ensureUnifiedV2Control(allocator, client);
 
     const token = if (options.project_token) |value| value else cfg.getProjectToken(project_id);
-    var activated = try control_plane.activateProject(
+    const session_key = resolveSessionKey(&cfg);
+    const attach_agent = resolveAttachAgentForProject(
+        allocator,
+        options,
+        &cfg,
+        client,
+        session_key,
+        project_id,
+    ) catch |err| {
+        if (err == error.UserRoleCannotAttachSystemProject) {
+            logger.err("user role cannot attach to the system project; choose a non-system project", .{});
+        } else if (err == error.NoProjectCompatibleAgent) {
+            logger.err("no non-system agent is available for project {s}", .{project_id});
+        }
+        return err;
+    };
+    defer allocator.free(attach_agent);
+
+    var attach_state: []const u8 = "ready";
+    var active_agent: []const u8 = attach_agent;
+    var did_attach = true;
+
+    var existing_status = control_plane.sessionStatusWithTimeout(
         allocator,
         client,
         &g_control_request_counter,
-        project_id,
-        token,
-    );
-    defer activated.deinit(allocator);
+        session_key,
+        session_status_timeout_ms,
+    ) catch null;
+    defer if (existing_status) |*value| value.deinit(allocator);
+
+    if (existing_status) |*status| {
+        if (sessionStatusMatchesTarget(status, attach_agent, project_id)) {
+            did_attach = false;
+            active_agent = status.agent_id;
+            attach_state = status.state;
+            if (std.mem.eql(u8, status.state, "warming")) {
+                try waitForSessionReady(
+                    allocator,
+                    client,
+                    session_key,
+                    status.agent_id,
+                    project_id,
+                );
+                attach_state = "ready";
+            } else if (std.mem.eql(u8, status.state, "error")) {
+                // Re-attach below to attempt self-heal from stale error state.
+                did_attach = true;
+            } else if (!std.mem.eql(u8, status.state, "ready")) {
+                // Unknown/non-ready state: fall through to explicit attach.
+                did_attach = true;
+            }
+        }
+    }
+
+    if (did_attach) {
+        var attached = control_plane.sessionAttach(
+            allocator,
+            client,
+            &g_control_request_counter,
+            session_key,
+            attach_agent,
+            project_id,
+            token,
+        ) catch |err| {
+            if (err == error.RemoteError) {
+                if (control_plane.lastRemoteError()) |remote| {
+                    logger.err("session attach failed: {s}", .{remote});
+                }
+            }
+            return err;
+        };
+        defer attached.deinit(allocator);
+
+        active_agent = attached.agent_id;
+        attach_state = attached.state;
+
+        if (std.mem.eql(u8, attached.state, "warming")) {
+            try waitForSessionReady(
+                allocator,
+                client,
+                session_key,
+                attached.agent_id,
+                project_id,
+            );
+            attach_state = "ready";
+        } else if (std.mem.eql(u8, attached.state, "error")) {
+            const code = attached.error_code orelse "runtime_unavailable";
+            const message = attached.error_message orelse "runtime unavailable";
+            logger.err("session attach error: {s} [{s}]", .{ message, code });
+            return error.RemoteError;
+        }
+    }
+
+    cfg.setDefaultSession(session_key) catch {};
+    cfg.setDefaultAgent(active_agent) catch {};
+    cfg.save() catch {};
+
     logger.info(
-        "Project context active: {s} ({d} mount(s))",
-        .{ project_id, activated.mounts.items.len },
+        "Project context active: project={s} session={s} agent={s} state={s}",
+        .{ project_id, session_key, active_agent, attach_state },
     );
 }
 
@@ -1299,12 +1581,34 @@ fn executeSessionRestore(allocator: std.mem.Allocator, options: args.Options, cm
         .{ session.session_key, session.agent_id, session.project_id orelse "(none)" },
     );
 
+    const attach_agent = if (isSystemProjectId(attach_project_id))
+        try allocator.dupe(u8, system_agent_id)
+    else if (isSystemAgentId(session.agent_id))
+        resolveAttachAgentForProject(
+            allocator,
+            options,
+            &cfg,
+            client,
+            session.session_key,
+            attach_project_id,
+        ) catch |err| {
+            if (err == error.UserRoleCannotAttachSystemProject) {
+                logger.err("user role cannot attach to the system project; choose a non-system project", .{});
+            } else if (err == error.NoProjectCompatibleAgent) {
+                logger.err("no non-system agent is available for project {s}", .{attach_project_id});
+            }
+            return err;
+        }
+    else
+        try allocator.dupe(u8, session.agent_id);
+    defer allocator.free(attach_agent);
+
     var status = try control_plane.sessionAttach(
         allocator,
         client,
         &g_control_request_counter,
         session.session_key,
-        session.agent_id,
+        attach_agent,
         attach_project_id,
         project_token,
     );
