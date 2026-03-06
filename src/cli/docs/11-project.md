@@ -8,7 +8,7 @@ List all projects.
 
 **Examples:**
 ```bash
-ziggystarspider project list
+spider project list
 ```
 
 **Output (example):**
@@ -28,9 +28,9 @@ Select a project and optionally activate it.
 
 **Examples:**
 ```bash
-ziggystarspider project use proj-1
-ziggystarspider project use proj-1 proj-abc123
-ziggystarspider --project-token proj-abc123 project use proj-1
+spider project use proj-1
+spider project use proj-1 proj-abc123
+spider --project-token proj-abc123 project use proj-1
 ```
 
 ## project create <name> [vision]
@@ -43,9 +43,9 @@ Create a new project and persist it as the selected project in local config.
 
 **Examples:**
 ```bash
-ziggystarspider project create "Distributed Workspace"
-ziggystarspider project create "Distributed Workspace" "unified node mounts"
-ziggystarspider --operator-token op-secret project create "Secure Project"
+spider project create "Distributed Workspace"
+spider project create "Distributed Workspace" "unified node mounts"
+spider --operator-token op-secret project create "Secure Project"
 ```
 
 ## project info <project_id>
@@ -54,7 +54,7 @@ Show information about a project.
 
 **Examples:**
 ```bash
-ziggystarspider project info proj-1
+spider project info proj-1
 ```
 
 **Output (example):**
@@ -76,8 +76,8 @@ Create/update and activate a project with desired mounts in one command.
 
 **Examples:**
 ```bash
-ziggystarspider project up "Distributed Workspace"
-ziggystarspider project up "Distributed Workspace" --mount /workspace=node-1:work
+spider project up "Distributed Workspace"
+spider project up "Distributed Workspace" --mount /workspace=node-1:work
 ```
 
 ## project doctor
@@ -86,6 +86,6 @@ Run readiness checks for nodes, project selection, and active mounts.
 
 **Examples:**
 ```bash
-ziggystarspider project doctor
-ziggystarspider --project proj-1 project doctor
+spider project doctor
+spider --project proj-1 project doctor
 ```

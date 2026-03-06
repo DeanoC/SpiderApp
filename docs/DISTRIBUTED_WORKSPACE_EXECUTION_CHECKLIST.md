@@ -3,7 +3,7 @@
 This checklist breaks delivery into small PR slices across:
 
 - `ZiggySpiderweb` (server/control/reconciler/FUSE topology source)
-- `ZiggyStarSpider` (CLI + GUI operator/client experience)
+- `SpiderApp` (CLI + GUI operator/client experience)
 
 Status legend:
 
@@ -25,7 +25,7 @@ Status legend:
 - Include reconciliation state fields (`reconcile_state`, `last_reconcile_ms`, `last_error`).
 - Add tests for payload schema.
 
-### [x] PR-C1 (ZiggyStarSpider): parse + render desired/actual/drift
+### [x] PR-C1 (SpiderApp): parse + render desired/actual/drift
 - Extend `src/client/workspace_types.zig` and parsers.
 - CLI `workspace status` prints drift summary.
 - GUI settings summary shows drift count and first errors.
@@ -52,7 +52,7 @@ Status legend:
 - Add `control.reconcile_status` (optional) for operator introspection.
 - Include queue depth, failed ops, last success time.
 
-### [x] PR-C2 (ZiggyStarSpider): diagnostics UX
+### [x] PR-C2 (SpiderApp): diagnostics UX
 - CLI `workspace status --verbose` includes reconcile diagnostics.
 - GUI debug panel tags reconcile errors distinctly.
 
@@ -63,21 +63,21 @@ Status legend:
 - Input: project + desired mounts + optional activation.
 - Output: created/updated topology + activation result.
 
-### [x] PR-C3 (ZiggyStarSpider CLI): `project up` and `project doctor`
+### [x] PR-C3 (SpiderApp CLI): `project up` and `project doctor`
 - `project up`: guided non-interactive bootstrap.
 - `project doctor`: readiness checks with actionable failures.
 
-### [x] PR-C4 (ZiggyStarSpider GUI): onboarding wizard
+### [x] PR-C4 (SpiderApp GUI): onboarding wizard
 - 4-step flow: connect -> project -> mounts -> activate.
 - Inline validation and retry actions.
 
 ## Phase 5: Filesystem UX
 
-### [x] PR-C5 (ZiggyStarSpider CLI): true `fs tree`
+### [x] PR-C5 (SpiderApp CLI): true `fs tree`
 - Recursive walk output (depth-limited).
 - Optional filters (`--max-depth`, `--files-only`, `--dirs-only`).
 
-### [x] PR-C6 (ZiggyStarSpider GUI): filesystem browser panel
+### [x] PR-C6 (SpiderApp GUI): filesystem browser panel
 - Project-root browser with node/mount badges.
 - Open/read text file preview and refresh.
 
@@ -87,7 +87,7 @@ Status legend:
 - Store job metadata + states (`queued/running/done/failed`).
 - TTL + retention policy.
 
-### [x] PR-C7 (ZiggyStarSpider): reconnect/resume job state
+### [x] PR-C7 (SpiderApp): reconnect/resume job state
 - Rehydrate pending sends after reconnect.
 - Surface resumed results in active chat session.
 
@@ -101,7 +101,7 @@ Status legend:
 - Require/pass correlation IDs on control mutations and Acheron capability jobs.
 - Include IDs in error payloads and metrics labels.
 
-### [x] PR-C8 (ZiggyStarSpider): correlation visibility
+### [x] PR-C8 (SpiderApp): correlation visibility
 - Show request/job correlation IDs in CLI verbose output.
 - GUI debug panel includes correlation badges.
 
@@ -111,7 +111,7 @@ Status legend:
 - Expand `test-env` scenarios for drift, failover, reconnect, and bootstrap.
 - Add CI entrypoint for the matrix.
 
-### [x] PR-C9 (ZiggyStarSpider): CLI/GUI smoke matrix
+### [x] PR-C9 (SpiderApp): CLI/GUI smoke matrix
 - Add scripted smoke checks for connect/project/node/workspace/fs/chat.
 
 ### [x] PR-C10 (Docs): runbook + troubleshooting

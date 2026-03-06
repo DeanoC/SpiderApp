@@ -1,8 +1,8 @@
-# ZiggyStarSpider Architecture
+# SpiderApp Architecture
 
 ## Scope
 
-ZiggyStarSpider is the user-facing client (CLI + GUI) for Spiderweb distributed workspace control and FS-RPC access.
+SpiderApp is the user-facing client (CLI + GUI) for Spiderweb distributed workspace control and FS-RPC access.
 
 Primary goals:
 

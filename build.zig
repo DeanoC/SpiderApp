@@ -31,7 +31,6 @@ fn addGuiArtifact(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     build_options_module: *std.Build.Module,
-    use_local_ui_deps: bool,
 ) ?GuiArtifact {
     const os_tag = target.result.os.tag;
     const desktop_target = os_tag == .linux or os_tag == .windows or os_tag == .macos;
@@ -41,17 +40,10 @@ fn addGuiArtifact(
         .target = target,
         .optimize = optimize,
     });
-    const ziggy_ui = if (use_local_ui_deps)
-        b.lazyDependency("ziggy_ui_local", .{
-            .target = target,
-            .optimize = optimize,
-            .@"use-local-panels" = true,
-        }) orelse @panic("use-local-ui-deps requested but ziggy_ui_local dependency is unavailable")
-    else
-        b.dependency("ziggy_ui", .{
-            .target = target,
-            .optimize = optimize,
-        });
+    const ziggy_ui = b.dependency("ziggy_ui", .{
+        .target = target,
+        .optimize = optimize,
+    });
     const zgpu = ziggy_ui.builder.dependency("zgpu", .{
         .target = target,
         .optimize = optimize,
@@ -99,7 +91,7 @@ fn addGuiArtifact(
     gui_module.addIncludePath(ziggy_ui_src);
 
     const gui_exe = b.addExecutable(.{
-        .name = "zss-gui",
+        .name = "spider-gui",
         .root_module = gui_module,
     });
 
@@ -174,11 +166,6 @@ pub fn build(b: *std.Build) void {
         "terminal-backend",
         "GUI terminal renderer backend: plain | ghostty-vt (dynamic/fallback)",
     ) orelse "plain";
-    const use_local_ui_deps = b.option(
-        bool,
-        "use-local-ui-deps",
-        "Use ../ziggy-ui path dependency (and its local panel option) instead of pinned remote",
-    ) orelse false;
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "app_version", "0.1.0");
     build_options.addOption([]const u8, "git_revision", git_revision);
@@ -194,23 +181,16 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const ziggy_spider_protocol = b.dependency("ziggy_spider_protocol", .{
+    const spider_protocol = b.dependency("spider_protocol", .{
         .target = target,
         .optimize = optimize,
     });
-    const ziggy_spider_protocol_module = ziggy_spider_protocol.module("ziggy-spider-protocol");
+    const spider_protocol_module = spider_protocol.module("ziggy-spider-protocol");
 
-    const ziggy_ui = if (use_local_ui_deps)
-        b.lazyDependency("ziggy_ui_local", .{
-            .target = target,
-            .optimize = optimize,
-            .@"use-local-panels" = true,
-        }) orelse @panic("use-local-ui-deps requested but ziggy_ui_local dependency is unavailable")
-    else
-        b.dependency("ziggy_ui", .{
-            .target = target,
-            .optimize = optimize,
-        });
+    const ziggy_ui = b.dependency("ziggy_ui", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     const zgpu = ziggy_ui.builder.dependency("zgpu", .{
         .target = target,
@@ -245,11 +225,11 @@ pub fn build(b: *std.Build) void {
     });
     cli_module.addImport("websocket", websocket.module("websocket"));
     cli_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
-    cli_module.addImport("ziggy-spider-protocol", ziggy_spider_protocol_module);
+    cli_module.addImport("spider-protocol", spider_protocol_module);
     cli_module.addImport("build_options", build_options_module);
 
     const cli_exe = b.addExecutable(.{
-        .name = "zss",
+        .name = "spider",
         .root_module = cli_module,
     });
 
@@ -273,7 +253,7 @@ pub fn build(b: *std.Build) void {
     const gui_step = b.step("gui", "Build GUI executable for host target");
     const run_gui_step = b.step("run-gui", "Run the GUI app");
 
-    if (addGuiArtifact(b, target, optimize, build_options_module, use_local_ui_deps)) |host_gui| {
+    if (addGuiArtifact(b, target, optimize, build_options_module)) |host_gui| {
         gui_step.dependOn(&host_gui.install.step);
 
         const run_gui_cmd = b.addRunArtifact(host_gui.exe);
@@ -300,7 +280,7 @@ pub fn build(b: *std.Build) void {
         tui_module.addImport("tui", dep.module("tui"));
         tui_module.addImport("websocket", websocket.module("websocket"));
         tui_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
-        tui_module.addImport("ziggy-spider-protocol", ziggy_spider_protocol_module);
+        tui_module.addImport("spider-protocol", spider_protocol_module);
 
         // Add CLI and client modules for TUI
         const cli_args_module = b.createModule(.{
@@ -330,7 +310,7 @@ pub fn build(b: *std.Build) void {
         tui_module.addImport("websocket_client", websocket_client_module);
 
         const tui_exe = b.addExecutable(.{
-            .name = "zss-tui",
+            .name = "spider-tui",
             .root_module = tui_module,
         });
 
@@ -357,7 +337,7 @@ pub fn build(b: *std.Build) void {
     });
     test_module.addImport("websocket", websocket.module("websocket"));
     test_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
-    test_module.addImport("ziggy-spider-protocol", ziggy_spider_protocol_module);
+    test_module.addImport("spider-protocol", spider_protocol_module);
     test_module.addImport("build_options", build_options_module);
 
     const unit_tests = b.addTest(.{
@@ -434,7 +414,7 @@ pub fn build(b: *std.Build) void {
 
     // TUI test executable for debugging
     const tui_test_exe = b.addExecutable(.{
-        .name = "zss-tui-test",
+        .name = "spider-tui-test",
         .root_module = tui_test_module,
     });
     const install_tui_test = b.addInstallArtifact(tui_test_exe, .{});
@@ -529,7 +509,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const tui_diagnostic_exe = b.addExecutable(.{
-        .name = "zss-tui-diagnostic",
+        .name = "spider-tui-diagnostic",
         .root_module = tui_diagnostic_module,
     });
 

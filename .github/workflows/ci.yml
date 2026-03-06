@@ -15,7 +15,7 @@ jobs:
           echo "Local path Ziggy dependencies are not allowed in CI"
           exit 1
         fi
-        grep -q 'ziggy_spider_protocol' build.zig.zon
+        grep -q 'spider_protocol' build.zig.zon
         grep -q '\.hash =' build.zig.zon
 
   gui-terminal-smoke:

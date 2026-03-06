@@ -10,10 +10,10 @@ Show current admin/user tokens and backing storage path from Spiderweb.
 By default token values are masked.
 
 ```bash
-ziggystarspider auth status
-ziggystarspider --role admin auth status
-ziggystarspider auth status --reveal
-ziggystarspider --operator-token sw-admin-... auth status
+spider auth status
+spider --role admin auth status
+spider auth status --reveal
+spider --operator-token sw-admin-... auth status
 ```
 
 ## auth rotate <admin|user>
@@ -25,6 +25,6 @@ Rotate one token role.
 - Output is masked by default; add `--reveal` to print full token.
 
 ```bash
-ziggystarspider auth rotate admin
-ziggystarspider auth rotate user --reveal
+spider auth rotate admin
+spider auth rotate user --reveal
 ```

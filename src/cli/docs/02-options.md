@@ -9,8 +9,8 @@ Spiderweb server WebSocket URL.
 
 **Examples:**
 ```bash
-ziggystarspider --url ws://100.101.192.123:18790 chat send "Hello"
-ziggystarspider --url ws://localhost:18790 project list
+spider --url ws://100.101.192.123:18790 chat send "Hello"
+spider --url ws://localhost:18790 project list
 ```
 
 ### `--project <project_id>`
@@ -18,8 +18,8 @@ Set the current project for this session.
 
 **Examples:**
 ```bash
-ziggystarspider --project spiderweb goal list
-ziggystarspider --project mygame chat send "What's next?"
+spider --project spiderweb goal list
+spider --project mygame chat send "What's next?"
 ```
 
 ### `--project-token <token>`
@@ -29,8 +29,8 @@ If provided with `project use`, the token is also persisted in local config for 
 
 **Examples:**
 ```bash
-ziggystarspider --project proj-1 --project-token proj-abc workspace status
-ziggystarspider --project-token proj-abc project use proj-1
+spider --project proj-1 --project-token proj-abc workspace status
+spider --project-token proj-abc project use proj-1
 ```
 
 ### `--operator-token <token>`
@@ -45,8 +45,8 @@ If omitted, ZSS uses the locally saved active role.
 
 **Examples:**
 ```bash
-ziggystarspider --operator-token op-secret project create demo "Distributed workspace"
-ziggystarspider --operator-token op-secret project create "Game AI"
+spider --operator-token op-secret project create demo "Distributed workspace"
+spider --operator-token op-secret project create "Game AI"
 ```
 
 ## Mode Options
@@ -58,8 +58,8 @@ Note: the interactive REPL is not implemented yet; command mode is currently req
 
 **Examples:**
 ```bash
-ziggystarspider --interactive
-ziggystarspider --url ws://remote:18790 --interactive
+spider --interactive
+spider --url ws://remote:18790 --interactive
 ```
 
 ### `--verbose`
@@ -67,8 +67,8 @@ Enable verbose debug logging.
 
 **Examples:**
 ```bash
-ziggystarspider --verbose chat send "Test"
-ziggystarspider --verbose --interactive
+spider --verbose chat send "Test"
+spider --verbose --interactive
 ```
 
 ## Information Options
