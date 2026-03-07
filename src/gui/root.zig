@@ -475,6 +475,13 @@ fn terminalFocusFieldFromExternal(field: TerminalPanel.FocusField) SettingsFocus
     };
 }
 
+fn isTerminalPanelFocusField(field: SettingsFocusField) bool {
+    return switch (field) {
+        .terminal_command_input => true,
+        else => false,
+    };
+}
+
 fn projectFocusFieldToExternal(field: SettingsFocusField) ProjectPanel.FocusField {
     return switch (field) {
         .project_token => .project_token,
@@ -8315,7 +8322,10 @@ const App = struct {
             },
             &panel_state,
         );
-        self.settings_panel.focused_field = terminalFocusFieldFromExternal(panel_state.focused_field);
+        const mapped_focus = terminalFocusFieldFromExternal(panel_state.focused_field);
+        if (mapped_focus != .none or isTerminalPanelFocusField(self.settings_panel.focused_field)) {
+            self.settings_panel.focused_field = mapped_focus;
+        }
         if (action) |value| self.performTerminalPanelAction(value);
     }
 
