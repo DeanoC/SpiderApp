@@ -8295,6 +8295,8 @@ const App = struct {
         var panel_state = TerminalPanel.State{
             .focused_field = terminalFocusFieldToExternal(self.settings_panel.focused_field),
         };
+        var owned_view = self.terminalPanelViewOwned();
+        defer owned_view.deinit(self.allocator);
         const action = TerminalPanel.draw(
             host,
             Rect{ .min = rect.min, .max = rect.max },
@@ -8305,7 +8307,7 @@ const App = struct {
                 .error_text = zcolors.rgba(220, 80, 80, 255),
             },
             self.terminalPanelModel(),
-            self.terminalPanelView(),
+            owned_view.view,
             .{
                 .mouse_x = self.mouse_x,
                 .mouse_y = self.mouse_y,
@@ -9551,7 +9553,19 @@ const App = struct {
         };
     }
 
-    fn terminalPanelView(self: *App) panels_bridge.TerminalPanelView {
+    const OwnedTerminalPanelView = struct {
+        view: panels_bridge.TerminalPanelView,
+        backend_line: ?[]u8 = null,
+        session_line: ?[]u8 = null,
+
+        fn deinit(self: *OwnedTerminalPanelView, allocator: std.mem.Allocator) void {
+            if (self.backend_line) |value| allocator.free(value);
+            if (self.session_line) |value| allocator.free(value);
+            self.* = undefined;
+        }
+    };
+
+    fn terminalPanelViewOwned(self: *App) OwnedTerminalPanelView {
         const backend_line = std.fmt.allocPrint(
             self.allocator,
             "Backend: {s} (selected: {s}, build default: {s})",
@@ -9561,21 +9575,23 @@ const App = struct {
                 TERMINAL_BACKEND_KIND,
             },
         ) catch null;
-        defer if (backend_line) |value| self.allocator.free(value);
         const session_line = if (self.terminal_session_id) |id|
             std.fmt.allocPrint(self.allocator, "Session: {s}", .{id}) catch null
         else
             self.allocator.dupe(u8, "Session: (not started)") catch null;
-        defer if (session_line) |value| self.allocator.free(value);
         return .{
-            .title = "Terminal",
-            .backend_line = backend_line orelse "Backend: unknown",
-            .backend_detail = self.terminal_backend.statusDetail(),
-            .session_line = session_line orelse "Session: (unknown)",
-            .status_text = self.terminal_status,
-            .error_text = self.terminal_error,
-            .input_text = self.terminal_input.items,
-            .start_label = if (self.terminal_session_id == null) "Start" else "Restart",
+            .view = .{
+                .title = "Terminal",
+                .backend_line = backend_line orelse "Backend: unknown",
+                .backend_detail = self.terminal_backend.statusDetail(),
+                .session_line = session_line orelse "Session: (unknown)",
+                .status_text = self.terminal_status,
+                .error_text = self.terminal_error,
+                .input_text = self.terminal_input.items,
+                .start_label = if (self.terminal_session_id == null) "Start" else "Restart",
+            },
+            .backend_line = backend_line,
+            .session_line = session_line,
         };
     }
 
