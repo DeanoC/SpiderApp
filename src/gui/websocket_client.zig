@@ -276,15 +276,6 @@ pub const WebSocketClient = struct {
                         std.Thread.sleep(1 * std.time.ns_per_ms);
                         continue;
                     },
-                    error.InvalidMessageType => {
-                        // The websocket client may close the underlying stream on parse errors.
-                        // Treat unsupported frame types as fatal to avoid later sends on a
-                        // no-longer-valid socket handle.
-                        std.log.warn("[WS] unsupported frame type; closing websocket", .{});
-                        self.connection_alive.store(false, .release);
-                        self.failAllWaiters();
-                        break;
-                    },
                     error.Closed, error.ConnectionResetByPeer => {
                         std.log.info("[WS] Connection closed", .{});
                         self.connection_alive.store(false, .release);
@@ -516,12 +507,6 @@ pub const WebSocketClient = struct {
                 break :blk client.read();
             } catch |err| switch (err) {
                 error.WouldBlock => return null,
-                error.InvalidMessageType => {
-                    std.log.warn("[WS] unsupported frame type; closing websocket", .{});
-                    self.connection_alive.store(false, .release);
-                    self.failAllWaiters();
-                    return null;
-                },
                 error.Closed, error.ConnectionResetByPeer => {
                     std.log.info("[WS] Connection closed", .{});
                     self.connection_alive.store(false, .release);
