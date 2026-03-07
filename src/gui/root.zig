@@ -12586,7 +12586,7 @@ const App = struct {
         if (self.ws_client == null) return error.NotConnected;
         const project_id = self.selectedProjectId() orelse return error.ProjectIdRequired;
         if (project_id.len == 0) return error.ProjectIdRequired;
-        try self.refreshWorkspaceData();
+        try self.activateSelectedProject();
         const profile_id = self.config.selectedProfileId();
         self.saveActiveWorkspaceLayout();
         if (self.active_profile_id) |existing| self.allocator.free(existing);
