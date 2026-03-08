@@ -13220,6 +13220,9 @@ const App = struct {
             }
         }
 
+        if (had_pending_send) {
+            self.pending_send_resume_notified = true;
+        }
         if (had_pending_send and try self.tryResumePendingSendJob()) {
             try self.appendMessage("system", "Reconnected to Spiderweb and resumed pending job.", null);
         } else if (had_pending_send) {
