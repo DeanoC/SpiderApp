@@ -10561,6 +10561,11 @@ const App = struct {
             model,
             view.view,
             .{
+                .mouse_x = self.mouse_x,
+                .mouse_y = self.mouse_y,
+                .mouse_released = self.mouse_released,
+            },
+            .{
                 .text_primary = self.theme.colors.text_primary,
                 .text_secondary = self.theme.colors.text_secondary,
                 .primary = self.theme.colors.primary,
