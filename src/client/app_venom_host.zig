@@ -1,4 +1,5 @@
 const std = @import("std");
+const ws = @import("websocket");
 const control_plane = @import("control_plane.zig");
 const shared_node = @import("spiderweb_node");
 const fs_protocol = @import("spiderweb_fs").fs_protocol;
@@ -34,8 +35,8 @@ pub fn buildControlRoutedFsUrl(
     defer parsed.deinit(allocator);
     return std.fmt.allocPrint(
         allocator,
-        "ws://{s}:{d}/v2/fs/node/{s}",
-        .{ parsed.host, parsed.port, node_id },
+        "{s}://{s}:{d}/v2/fs/node/{s}",
+        .{ if (parsed.tls) "wss" else "ws", parsed.host, parsed.port, node_id },
     );
 }
 
@@ -400,31 +401,45 @@ pub const AppVenomHost = struct {
         const parsed = try parseWsUrlWithDefaultPath(self.allocator, self.control_url, "/");
         defer parsed.deinit(self.allocator);
 
-        var stream = try std.net.tcpConnectToHost(self.allocator, parsed.host, parsed.port);
-        defer stream.close();
+        var client = try ws.Client.init(self.allocator, .{
+            .host = parsed.host,
+            .port = parsed.port,
+            .tls = parsed.tls,
+            .max_size = tunnel_max_frame_bytes,
+            .buffer_size = 64 * 1024,
+        });
+        defer client.deinit();
 
-        try performClientHandshake(
-            self.allocator,
-            &stream,
-            parsed.host,
-            parsed.port,
-            "/v2/node",
-            if (self.auth_token.len > 0) self.auth_token else null,
-        );
-        try negotiateNodeTunnelHello(self.allocator, &stream, self.node_id, self.node_secret);
+        var headers_buf: [512]u8 = undefined;
+        const headers = if (self.auth_token.len > 0)
+            try std.fmt.bufPrint(&headers_buf, "Authorization: Bearer {s}\r\n", .{self.auth_token})
+        else
+            null;
+        try client.handshake("/v2/node", .{
+            .timeout_ms = 10_000,
+            .headers = headers,
+        });
+        try client.readTimeout(1);
+        try negotiateNodeTunnelHello(self.allocator, &client, self.node_id, self.node_secret);
 
         while (!self.shouldStop()) {
-            const readable = waitReadable(&stream, tunnel_poll_timeout_ms) catch |err| switch (err) {
-                error.ConnectionClosed => return,
+            const maybe_message = client.read() catch |err| switch (err) {
+                error.WouldBlock => {
+                    std.Thread.sleep(@as(u64, @intCast(tunnel_poll_timeout_ms)) * std.time.ns_per_ms);
+                    continue;
+                },
+                error.Closed, error.ConnectionResetByPeer => return,
                 else => return err,
             };
-            if (!readable) continue;
+            const message = maybe_message orelse {
+                std.Thread.sleep(@as(u64, @intCast(tunnel_poll_timeout_ms)) * std.time.ns_per_ms);
+                continue;
+            };
+            defer client.done(message);
 
-            var frame = try readServerFrame(self.allocator, &stream, tunnel_max_frame_bytes);
-            defer frame.deinit(self.allocator);
-            switch (frame.opcode) {
-                0x1 => {
-                    var handled = self.service.handleRequestJsonWithEvents(frame.payload) catch |handle_err| blk: {
+            switch (message.type) {
+                .text => {
+                    var handled = self.service.handleRequestJsonWithEvents(message.data) catch |handle_err| blk: {
                         const fallback = try unified.buildFsrpcFsError(
                             self.allocator,
                             null,
@@ -441,17 +456,16 @@ pub const AppVenomHost = struct {
                     for (handled.events) |event| {
                         const event_json = try shared_node.fs_node_service.buildInvalidationEventJson(self.allocator, event);
                         defer self.allocator.free(event_json);
-                        try writeClientTextFrameMasked(self.allocator, &stream, event_json);
+                        try client.write(@constCast(event_json));
                     }
-                    try writeClientTextFrameMasked(self.allocator, &stream, handled.response_json);
+                    try client.write(@constCast(handled.response_json));
                 },
-                0x8 => {
-                    _ = writeClientFrameMasked(self.allocator, &stream, frame.payload, 0x8) catch {};
+                .close => {
+                    client.close(.{}) catch {};
                     return;
                 },
-                0x9 => try writeClientPongFrameMasked(self.allocator, &stream, frame.payload),
-                0xA => {},
-                else => {},
+                .ping => try client.writePong(@constCast(message.data)),
+                .pong, .binary => {},
             }
         }
     }
@@ -517,20 +531,11 @@ const ParsedUrl = struct {
     host: []u8,
     port: u16,
     path: []u8,
+    tls: bool,
 
     fn deinit(self: ParsedUrl, allocator: std.mem.Allocator) void {
         allocator.free(self.host);
         allocator.free(self.path);
-    }
-};
-
-const WsFrame = struct {
-    opcode: u8,
-    payload: []u8,
-
-    fn deinit(self: *WsFrame, allocator: std.mem.Allocator) void {
-        allocator.free(self.payload);
-        self.* = undefined;
     }
 };
 
@@ -580,9 +585,11 @@ fn parseWsUrlWithDefaultPath(
 
     var remaining: []const u8 = undefined;
     var default_port: u16 = 18790;
+    var tls = false;
     if (std.mem.startsWith(u8, url, wss_prefix)) {
         remaining = url[wss_prefix.len..];
         default_port = 443;
+        tls = true;
     } else if (std.mem.startsWith(u8, url, ws_prefix)) {
         remaining = url[ws_prefix.len..];
     } else {
@@ -608,72 +615,12 @@ fn parseWsUrlWithDefaultPath(
     else
         default_port;
 
-    return .{ .host = host, .port = port, .path = path };
-}
-
-fn performClientHandshake(
-    allocator: std.mem.Allocator,
-    stream: *std.net.Stream,
-    host: []const u8,
-    port: u16,
-    path: []const u8,
-    auth_token: ?[]const u8,
-) !void {
-    var nonce: [16]u8 = undefined;
-    std.crypto.random.bytes(&nonce);
-
-    var encoded_nonce: [std.base64.standard.Encoder.calcSize(nonce.len)]u8 = undefined;
-    const key = std.base64.standard.Encoder.encode(&encoded_nonce, &nonce);
-    const auth_line = if (auth_token) |token|
-        try std.fmt.allocPrint(allocator, "Authorization: Bearer {s}\r\n", .{token})
-    else
-        try allocator.dupe(u8, "");
-    defer allocator.free(auth_line);
-
-    const request = try std.fmt.allocPrint(
-        allocator,
-        "GET {s} HTTP/1.1\r\n" ++
-            "Host: {s}:{d}\r\n" ++
-            "Upgrade: websocket\r\n" ++
-            "Connection: Upgrade\r\n" ++
-            "Sec-WebSocket-Version: 13\r\n" ++
-            "Sec-WebSocket-Key: {s}\r\n" ++
-            "{s}\r\n",
-        .{ path, host, port, key, auth_line },
-    );
-    defer allocator.free(request);
-
-    try stream.writeAll(request);
-    const response = try readHttpResponse(allocator, stream, 8 * 1024);
-    defer allocator.free(response);
-    if (std.mem.indexOf(u8, response, " 101 ") == null and std.mem.indexOf(u8, response, " 101\r\n") == null) {
-        return error.HandshakeRejected;
-    }
-}
-
-fn readHttpResponse(
-    allocator: std.mem.Allocator,
-    stream: *std.net.Stream,
-    max_bytes: usize,
-) ![]u8 {
-    var out = std.ArrayListUnmanaged(u8){};
-    errdefer out.deinit(allocator);
-
-    var chunk: [512]u8 = undefined;
-    while (out.items.len < max_bytes) {
-        const n = try stream.read(&chunk);
-        if (n == 0) return error.ConnectionClosed;
-        try out.appendSlice(allocator, chunk[0..n]);
-        if (std.mem.indexOf(u8, out.items, "\r\n\r\n") != null) {
-            return out.toOwnedSlice(allocator);
-        }
-    }
-    return error.ResponseTooLarge;
+    return .{ .host = host, .port = port, .path = path, .tls = tls };
 }
 
 fn negotiateNodeTunnelHello(
     allocator: std.mem.Allocator,
-    stream: *std.net.Stream,
+    client: *ws.Client,
     node_id: []const u8,
     node_secret: []const u8,
 ) !void {
@@ -688,20 +635,25 @@ fn negotiateNodeTunnelHello(
     );
     defer allocator.free(hello_request);
 
-    try writeClientTextFrameMasked(allocator, stream, hello_request);
+    try client.write(@constCast(hello_request));
     const deadline_ms = std.time.milliTimestamp() + @as(i64, control_reply_timeout_ms);
     while (true) {
         const now_ms = std.time.milliTimestamp();
         if (now_ms >= deadline_ms) return error.ControlRequestTimeout;
         const remaining_i64 = deadline_ms - now_ms;
-        const remaining_ms: i32 = @intCast(@min(remaining_i64, @as(i64, std.math.maxInt(i32))));
-        if (!try waitReadable(stream, remaining_ms)) return error.ControlRequestTimeout;
+        const timeout_ms: u32 = @intCast(@min(remaining_i64, @as(i64, std.math.maxInt(u32))));
+        try client.readTimeout(timeout_ms);
+        const maybe_message = client.read() catch |err| switch (err) {
+            error.WouldBlock => return error.ControlRequestTimeout,
+            error.Closed, error.ConnectionResetByPeer => return error.ConnectionClosed,
+            else => return err,
+        };
+        const message = maybe_message orelse return error.ControlRequestTimeout;
+        defer client.done(message);
 
-        var frame = try readServerFrame(allocator, stream, tunnel_max_frame_bytes);
-        defer frame.deinit(allocator);
-        switch (frame.opcode) {
-            0x1 => {
-                var parsed = try unified.parseMessage(allocator, frame.payload);
+        switch (message.type) {
+            .text => {
+                var parsed = try unified.parseMessage(allocator, message.data);
                 defer parsed.deinit(allocator);
                 if (parsed.channel != .acheron) continue;
                 if (parsed.tag == null or parsed.tag.? != 1) continue;
@@ -709,118 +661,10 @@ fn negotiateNodeTunnelHello(
                 if (msg_type == .fs_r_hello) return;
                 if (msg_type == .fs_err) return error.ControlRequestFailed;
             },
-            0x8 => return error.ConnectionClosed,
-            0x9 => try writeClientPongFrameMasked(allocator, stream, frame.payload),
-            0xA => {},
-            else => return error.InvalidFrameOpcode,
+            .close => return error.ConnectionClosed,
+            .ping => try client.writePong(@constCast(message.data)),
+            .pong, .binary => {},
         }
-    }
-}
-
-fn waitReadable(stream: *std.net.Stream, timeout_ms: i32) !bool {
-    var fds = [_]std.posix.pollfd{
-        .{
-            .fd = stream.handle,
-            .events = std.posix.POLL.IN,
-            .revents = 0,
-        },
-    };
-    const ready = try std.posix.poll(&fds, timeout_ms);
-    if (ready == 0) return false;
-    if ((fds[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL)) != 0) {
-        return error.ConnectionClosed;
-    }
-    return (fds[0].revents & std.posix.POLL.IN) != 0;
-}
-
-fn readServerFrame(
-    allocator: std.mem.Allocator,
-    stream: *std.net.Stream,
-    max_payload_bytes: usize,
-) !WsFrame {
-    var header: [2]u8 = undefined;
-    try readExact(stream, &header);
-    const fin = (header[0] & 0x80) != 0;
-    if (!fin) return error.UnsupportedFragmentation;
-    const opcode = header[0] & 0x0F;
-    const masked = (header[1] & 0x80) != 0;
-    if (masked) return error.UnexpectedMaskedFrame;
-
-    var payload_len: usize = header[1] & 0x7F;
-    if (payload_len == 126) {
-        var ext: [2]u8 = undefined;
-        try readExact(stream, &ext);
-        payload_len = std.mem.readInt(u16, &ext, .big);
-    } else if (payload_len == 127) {
-        var ext: [8]u8 = undefined;
-        try readExact(stream, &ext);
-        payload_len = @intCast(std.mem.readInt(u64, &ext, .big));
-    }
-    if (payload_len > max_payload_bytes) return error.FrameTooLarge;
-
-    const payload = try allocator.alloc(u8, payload_len);
-    errdefer allocator.free(payload);
-    if (payload_len > 0) try readExact(stream, payload);
-    return .{ .opcode = opcode, .payload = payload };
-}
-
-fn writeClientTextFrameMasked(
-    allocator: std.mem.Allocator,
-    stream: *std.net.Stream,
-    payload: []const u8,
-) !void {
-    try writeClientFrameMasked(allocator, stream, payload, 0x1);
-}
-
-fn writeClientPongFrameMasked(
-    allocator: std.mem.Allocator,
-    stream: *std.net.Stream,
-    payload: []const u8,
-) !void {
-    try writeClientFrameMasked(allocator, stream, payload, 0xA);
-}
-
-fn writeClientFrameMasked(
-    allocator: std.mem.Allocator,
-    stream: *std.net.Stream,
-    payload: []const u8,
-    opcode: u8,
-) !void {
-    var header: [14]u8 = undefined;
-    var header_len: usize = 2;
-    header[0] = 0x80 | opcode;
-
-    if (payload.len < 126) {
-        header[1] = 0x80 | @as(u8, @intCast(payload.len));
-    } else if (payload.len <= std.math.maxInt(u16)) {
-        header[1] = 0x80 | 126;
-        std.mem.writeInt(u16, header[2..4], @intCast(payload.len), .big);
-        header_len = 4;
-    } else {
-        header[1] = 0x80 | 127;
-        std.mem.writeInt(u64, header[2..10], payload.len, .big);
-        header_len = 10;
-    }
-
-    var mask_key: [4]u8 = undefined;
-    std.crypto.random.bytes(&mask_key);
-    @memcpy(header[header_len .. header_len + 4], &mask_key);
-    header_len += 4;
-
-    const masked = try allocator.alloc(u8, payload.len);
-    defer allocator.free(masked);
-    for (payload, 0..) |byte, idx| masked[idx] = byte ^ mask_key[idx % 4];
-
-    try stream.writeAll(header[0..header_len]);
-    if (masked.len > 0) try stream.writeAll(masked);
-}
-
-fn readExact(stream: *std.net.Stream, out: []u8) !void {
-    var offset: usize = 0;
-    while (offset < out.len) {
-        const n = try stream.read(out[offset..]);
-        if (n == 0) return error.EndOfStream;
-        offset += n;
     }
 }
 

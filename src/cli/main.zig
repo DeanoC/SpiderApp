@@ -243,7 +243,14 @@ fn ensureAppLocalNodeBootstrap(allocator: std.mem.Allocator, client: *WebSocketC
     defer allocator.free(node_name);
     const active_token = g_client_token_owned orelse "";
     var bootstrap_token = active_token;
+    var bootstrap_client = client;
     var used_admin_fallback = false;
+    var admin_client_storage: ?WebSocketClient = null;
+    defer {
+        if (admin_client_storage) |*admin_client| {
+            admin_client.deinit();
+        }
+    }
 
     var ensured = control_plane.ensureNode(
         allocator,
@@ -257,15 +264,15 @@ fn ensureAppLocalNodeBootstrap(allocator: std.mem.Allocator, client: *WebSocketC
         if (admin_token.len == 0) return primary_err;
         if (std.mem.eql(u8, active_token, admin_token)) return primary_err;
         const ws_url = g_client_url_owned orelse return primary_err;
-        var admin_client = WebSocketClient.init(allocator, ws_url, admin_token);
-        defer admin_client.deinit();
-        try admin_client.connect();
-        try control_plane.ensureUnifiedV2Connection(allocator, &admin_client, &g_control_request_counter);
+        admin_client_storage = WebSocketClient.init(allocator, ws_url, admin_token);
+        try admin_client_storage.?.connect();
+        try control_plane.ensureUnifiedV2Connection(allocator, &admin_client_storage.?, &g_control_request_counter);
         bootstrap_token = admin_token;
+        bootstrap_client = &admin_client_storage.?;
         used_admin_fallback = true;
         break :blk try control_plane.ensureNode(
             allocator,
-            &admin_client,
+            &admin_client_storage.?,
             &g_control_request_counter,
             node_name,
             null,
@@ -276,7 +283,7 @@ fn ensureAppLocalNodeBootstrap(allocator: std.mem.Allocator, client: *WebSocketC
 
     startAppLocalVenomHost(
         allocator,
-        client,
+        bootstrap_client,
         bootstrap_token,
         ensured,
         app_local_node_lease_ttl_ms,
@@ -285,18 +292,18 @@ fn ensureAppLocalNodeBootstrap(allocator: std.mem.Allocator, client: *WebSocketC
         if (admin_token.len == 0) return start_err;
         if (used_admin_fallback or std.mem.eql(u8, bootstrap_token, admin_token)) return start_err;
         const ws_url = g_client_url_owned orelse return start_err;
-        var admin_client = WebSocketClient.init(allocator, ws_url, admin_token);
-        defer admin_client.deinit();
-        try admin_client.connect();
-        try control_plane.ensureUnifiedV2Connection(allocator, &admin_client, &g_control_request_counter);
+        admin_client_storage = WebSocketClient.init(allocator, ws_url, admin_token);
+        try admin_client_storage.?.connect();
+        try control_plane.ensureUnifiedV2Connection(allocator, &admin_client_storage.?, &g_control_request_counter);
         try startAppLocalVenomHost(
             allocator,
-            &admin_client,
+            &admin_client_storage.?,
             admin_token,
             ensured,
             app_local_node_lease_ttl_ms,
         );
         bootstrap_token = admin_token;
+        bootstrap_client = &admin_client_storage.?;
         used_admin_fallback = true;
     };
 
