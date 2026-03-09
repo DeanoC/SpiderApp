@@ -94,6 +94,9 @@ const PERF_SAMPLE_INTERVAL_MS: i64 = 1_000;
 const PERF_HISTORY_CAPACITY: usize = 600;
 const PERF_SPARKLINE_MAX_COLUMNS: usize = 24;
 const PERF_AUTOMATION_DEFAULT_DURATION_MS: i64 = 12_000;
+const MISSION_REFRESH_INTERVAL_MS: i64 = 5_000;
+const MISSION_PREVIEW_EVENT_COUNT: usize = 4;
+const MISSION_PREVIEW_ARTIFACT_COUNT: usize = 4;
 const TERMINAL_OUTPUT_MAX_BYTES: usize = 512 * 1024;
 const TERMINAL_READ_POLL_INTERVAL_MS: i64 = 120;
 const TERMINAL_READ_TIMEOUT_MS: u32 = 1;
@@ -164,6 +167,130 @@ const ConnectSetupHint = struct {
         if (self.message) |value| allocator.free(value);
         if (self.project_id) |value| allocator.free(value);
         if (self.project_vision) |value| allocator.free(value);
+        self.* = undefined;
+    }
+};
+
+const MissionActorView = struct {
+    actor_type: []u8,
+    actor_id: []u8,
+
+    fn deinit(self: *MissionActorView, allocator: std.mem.Allocator) void {
+        allocator.free(self.actor_type);
+        allocator.free(self.actor_id);
+        self.* = undefined;
+    }
+};
+
+const MissionArtifactView = struct {
+    kind: []u8,
+    path: ?[]u8 = null,
+    summary: ?[]u8 = null,
+    created_at_ms: i64 = 0,
+
+    fn deinit(self: *MissionArtifactView, allocator: std.mem.Allocator) void {
+        allocator.free(self.kind);
+        if (self.path) |value| allocator.free(value);
+        if (self.summary) |value| allocator.free(value);
+        self.* = undefined;
+    }
+};
+
+const MissionEventView = struct {
+    seq: u64,
+    event_type: []u8,
+    payload_json: []u8,
+    created_at_ms: i64,
+
+    fn deinit(self: *MissionEventView, allocator: std.mem.Allocator) void {
+        allocator.free(self.event_type);
+        allocator.free(self.payload_json);
+        self.* = undefined;
+    }
+};
+
+const MissionApprovalView = struct {
+    approval_id: []u8,
+    action_kind: []u8,
+    message: []u8,
+    payload_json: ?[]u8 = null,
+    requested_at_ms: i64 = 0,
+    requested_by: MissionActorView,
+    resolved_at_ms: i64 = 0,
+    resolved_by: ?MissionActorView = null,
+    resolution_note: ?[]u8 = null,
+    resolution: ?[]u8 = null,
+
+    fn deinit(self: *MissionApprovalView, allocator: std.mem.Allocator) void {
+        allocator.free(self.approval_id);
+        allocator.free(self.action_kind);
+        allocator.free(self.message);
+        if (self.payload_json) |value| allocator.free(value);
+        self.requested_by.deinit(allocator);
+        if (self.resolved_by) |*value| value.deinit(allocator);
+        if (self.resolution_note) |value| allocator.free(value);
+        if (self.resolution) |value| allocator.free(value);
+        self.* = undefined;
+    }
+};
+
+const MissionAgentPackView = struct {
+    agent_id: []u8,
+    persona_pack: ?[]u8 = null,
+
+    fn deinit(self: *MissionAgentPackView, allocator: std.mem.Allocator) void {
+        allocator.free(self.agent_id);
+        if (self.persona_pack) |value| allocator.free(value);
+        self.* = undefined;
+    }
+};
+
+const MissionRecordView = struct {
+    mission_id: []u8,
+    use_case: []u8,
+    title: ?[]u8 = null,
+    stage: []u8,
+    state: []u8,
+    agent_id: ?[]u8 = null,
+    persona_pack: ?[]u8 = null,
+    project_id: ?[]u8 = null,
+    run_id: ?[]u8 = null,
+    workspace_root: ?[]u8 = null,
+    worktree_name: ?[]u8 = null,
+    created_by: MissionActorView,
+    created_at_ms: i64 = 0,
+    updated_at_ms: i64 = 0,
+    last_heartbeat_ms: i64 = 0,
+    checkpoint_seq: u64 = 0,
+    recovery_count: u64 = 0,
+    recovery_reason: ?[]u8 = null,
+    blocked_reason: ?[]u8 = null,
+    summary: ?[]u8 = null,
+    pending_approval: ?MissionApprovalView = null,
+    artifacts: std.ArrayListUnmanaged(MissionArtifactView) = .{},
+    events: std.ArrayListUnmanaged(MissionEventView) = .{},
+
+    fn deinit(self: *MissionRecordView, allocator: std.mem.Allocator) void {
+        allocator.free(self.mission_id);
+        allocator.free(self.use_case);
+        if (self.title) |value| allocator.free(value);
+        allocator.free(self.stage);
+        allocator.free(self.state);
+        if (self.agent_id) |value| allocator.free(value);
+        if (self.persona_pack) |value| allocator.free(value);
+        if (self.project_id) |value| allocator.free(value);
+        if (self.run_id) |value| allocator.free(value);
+        if (self.workspace_root) |value| allocator.free(value);
+        if (self.worktree_name) |value| allocator.free(value);
+        self.created_by.deinit(allocator);
+        if (self.recovery_reason) |value| allocator.free(value);
+        if (self.blocked_reason) |value| allocator.free(value);
+        if (self.summary) |value| allocator.free(value);
+        if (self.pending_approval) |*value| value.deinit(allocator);
+        for (self.artifacts.items) |*item| item.deinit(allocator);
+        self.artifacts.deinit(allocator);
+        for (self.events.items) |*item| item.deinit(allocator);
+        self.events.deinit(allocator);
         self.* = undefined;
     }
 };
@@ -1022,6 +1149,10 @@ const App = struct {
     workspace_state: ?workspace_types.WorkspaceStatus = null,
     workspace_last_error: ?[]u8 = null,
     workspace_last_refresh_ms: i64 = 0,
+    mission_records: std.ArrayListUnmanaged(MissionRecordView) = .{},
+    mission_selected_id: ?[]u8 = null,
+    mission_last_error: ?[]u8 = null,
+    mission_last_refresh_ms: i64 = 0,
     project_panel_id: ?workspace.PanelId = null,
     project_selector_open: bool = false,
     filesystem_panel_id: ?workspace.PanelId = null,
@@ -4565,6 +4696,41 @@ const App = struct {
             self.workspace_last_error = null;
         }
         self.workspace_last_refresh_ms = 0;
+        self.clearMissionDashboardData();
+    }
+
+    fn clearMissionDashboardData(self: *App) void {
+        for (self.mission_records.items) |*mission| mission.deinit(self.allocator);
+        self.mission_records.deinit(self.allocator);
+        self.mission_records = .{};
+        if (self.mission_selected_id) |value| {
+            self.allocator.free(value);
+            self.mission_selected_id = null;
+        }
+        if (self.mission_last_error) |value| {
+            self.allocator.free(value);
+            self.mission_last_error = null;
+        }
+        self.mission_last_refresh_ms = 0;
+        self.client_context.clearWorkboardItems();
+        self.client_context.clearApprovals();
+        self.client_context.clearPendingWorkboardRequest();
+        self.client_context.clearPendingApprovalResolveRequest();
+    }
+
+    fn setMissionDashboardError(self: *App, message: []const u8) void {
+        if (self.mission_last_error) |value| {
+            self.allocator.free(value);
+            self.mission_last_error = null;
+        }
+        self.mission_last_error = self.allocator.dupe(u8, message) catch null;
+    }
+
+    fn clearMissionDashboardError(self: *App) void {
+        if (self.mission_last_error) |value| {
+            self.allocator.free(value);
+            self.mission_last_error = null;
+        }
     }
 
     fn clearFilesystemEntries(self: *App) void {
@@ -5600,6 +5766,377 @@ const App = struct {
         } else {
             self.clearWorkspaceError();
         }
+
+        self.refreshMissionDashboardData() catch |err| {
+            if (self.formatMissionDashboardOpError("Refresh missions", err)) |message| {
+                defer self.allocator.free(message);
+                self.setMissionDashboardError(message);
+            } else {
+                self.setMissionDashboardError("Refresh missions failed");
+            }
+        };
+    }
+
+    fn refreshMissionDashboardData(self: *App) !void {
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        try self.fsrpcBootstrapGui(client);
+
+        const request_id = try std.fmt.allocPrint(self.allocator, "missions-{d}", .{std.time.milliTimestamp()});
+        self.client_context.setPendingWorkboardRequest(request_id);
+        defer self.client_context.clearPendingWorkboardRequest();
+
+        var agent_packs = self.loadMissionAgentPacks(client) catch std.ArrayListUnmanaged(MissionAgentPackView){};
+        defer deinitMissionAgentPackList(self.allocator, &agent_packs);
+
+        try self.writeFsPathTextGui(client, "/agents/self/missions/control/list.json", "{}");
+        const result_json = try self.readFsPathTextGui(client, "/agents/self/missions/result.json");
+        defer self.allocator.free(result_json);
+        if (try missionResultErrorMessage(self.allocator, result_json)) |message| {
+            defer self.allocator.free(message);
+            self.setMissionDashboardError(message);
+            return error.RemoteError;
+        }
+
+        var missions = try self.parseMissionListResult(result_json, agent_packs.items);
+        errdefer deinitMissionRecordList(self.allocator, &missions);
+
+        const workboard_items = try self.buildMissionWorkboardItemsOwned(missions.items);
+        errdefer deinitWorkboardItemOwnedSlice(self.allocator, workboard_items);
+
+        var approvals = try self.buildMissionApprovalsOwned(missions.items);
+        self.client_context.clearApprovals();
+        var approval_index: usize = 0;
+        errdefer {
+            while (approval_index < approvals.items.len) : (approval_index += 1) {
+                freeOwnedExecApproval(self.allocator, &approvals.items[approval_index]);
+            }
+            approvals.deinit(self.allocator);
+        }
+        while (approval_index < approvals.items.len) : (approval_index += 1) {
+            try self.client_context.upsertApprovalOwned(approvals.items[approval_index]);
+        }
+        approvals.items.len = 0;
+        approvals.deinit(self.allocator);
+
+        self.client_context.setWorkboardItemsOwned(workboard_items);
+        self.replaceMissionRecordsOwned(missions);
+        self.mission_last_refresh_ms = std.time.milliTimestamp();
+        self.clearMissionDashboardError();
+    }
+
+    fn requestMissionDashboardRefresh(self: *App, force: bool) void {
+        if (self.connection_state != .connected) return;
+        if (self.client_context.pending_workboard_request_id != null) return;
+        const now = std.time.milliTimestamp();
+        if (!force and self.mission_last_refresh_ms != 0 and now - self.mission_last_refresh_ms < MISSION_REFRESH_INTERVAL_MS) return;
+        self.refreshMissionDashboardData() catch |err| {
+            if (self.formatMissionDashboardOpError("Refresh missions", err)) |message| {
+                defer self.allocator.free(message);
+                self.setMissionDashboardError(message);
+            } else {
+                self.setMissionDashboardError("Refresh missions failed");
+            }
+        };
+    }
+
+    fn replaceMissionRecordsOwned(self: *App, missions: std.ArrayListUnmanaged(MissionRecordView)) void {
+        for (self.mission_records.items) |*mission| mission.deinit(self.allocator);
+        self.mission_records.deinit(self.allocator);
+        self.mission_records = missions;
+        self.syncMissionSelection();
+    }
+
+    fn syncMissionSelection(self: *App) void {
+        if (self.mission_selected_id) |selected_id| {
+            for (self.mission_records.items) |*mission| {
+                if (std.mem.eql(u8, mission.mission_id, selected_id)) return;
+            }
+            self.allocator.free(selected_id);
+            self.mission_selected_id = null;
+        }
+        if (self.mission_selected_id == null and self.mission_records.items.len > 0) {
+            self.mission_selected_id = self.allocator.dupe(u8, self.mission_records.items[0].mission_id) catch null;
+        }
+    }
+
+    fn selectedMission(self: *App) ?*MissionRecordView {
+        const selected_id = self.mission_selected_id orelse return if (self.mission_records.items.len > 0) &self.mission_records.items[0] else null;
+        for (self.mission_records.items) |*mission| {
+            if (std.mem.eql(u8, mission.mission_id, selected_id)) return mission;
+        }
+        return if (self.mission_records.items.len > 0) &self.mission_records.items[0] else null;
+    }
+
+    fn loadMissionAgentPacks(self: *App, client: *ws_client_mod.WebSocketClient) !std.ArrayListUnmanaged(MissionAgentPackView) {
+        try self.writeFsPathTextGui(client, "/agents/self/agents/control/list.json", "{}");
+        const result_json = try self.readFsPathTextGui(client, "/agents/self/agents/result.json");
+        defer self.allocator.free(result_json);
+
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, result_json, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return error.InvalidResponse;
+        const root = parsed.value.object;
+        if (root.get("ok")) |value| {
+            if (value == .bool and !value.bool) return error.RemoteError;
+        }
+        const result_val = root.get("result") orelse return error.InvalidResponse;
+        if (result_val != .object) return error.InvalidResponse;
+        const agents_val = result_val.object.get("agents") orelse return error.InvalidResponse;
+        if (agents_val != .array) return error.InvalidResponse;
+
+        var out = std.ArrayListUnmanaged(MissionAgentPackView){};
+        errdefer deinitMissionAgentPackList(self.allocator, &out);
+
+        for (agents_val.array.items) |item| {
+            if (item != .object) continue;
+            const obj = item.object;
+            const agent_id = try dupRequiredStringField(self.allocator, obj, "agent_id");
+            errdefer self.allocator.free(agent_id);
+            const persona_pack = try dupOptionalStringField(self.allocator, obj, "persona_pack");
+            errdefer if (persona_pack) |value| self.allocator.free(value);
+            try out.append(self.allocator, .{
+                .agent_id = agent_id,
+                .persona_pack = persona_pack,
+            });
+        }
+
+        return out;
+    }
+
+    fn parseMissionListResult(
+        self: *App,
+        result_json: []const u8,
+        agent_packs: []const MissionAgentPackView,
+    ) !std.ArrayListUnmanaged(MissionRecordView) {
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, result_json, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return error.InvalidResponse;
+        const root = parsed.value.object;
+        if (root.get("ok")) |value| {
+            if (value == .bool and !value.bool) return error.RemoteError;
+        }
+        const result_val = root.get("result") orelse return error.InvalidResponse;
+        if (result_val != .object) return error.InvalidResponse;
+        const missions_val = result_val.object.get("missions") orelse return error.InvalidResponse;
+        if (missions_val != .array) return error.InvalidResponse;
+
+        var out = std.ArrayListUnmanaged(MissionRecordView){};
+        errdefer deinitMissionRecordList(self.allocator, &out);
+
+        for (missions_val.array.items) |item| {
+            if (item != .object) continue;
+            try out.append(self.allocator, try self.parseMissionRecordView(item.object, agent_packs));
+        }
+
+        return out;
+    }
+
+    fn parseMissionRecordView(
+        self: *App,
+        obj: std.json.ObjectMap,
+        agent_packs: []const MissionAgentPackView,
+    ) !MissionRecordView {
+        var mission = MissionRecordView{
+            .mission_id = try dupRequiredStringField(self.allocator, obj, "mission_id"),
+            .use_case = try dupRequiredStringField(self.allocator, obj, "use_case"),
+            .title = try dupOptionalStringField(self.allocator, obj, "title"),
+            .stage = try dupRequiredStringField(self.allocator, obj, "stage"),
+            .state = try dupRequiredStringField(self.allocator, obj, "state"),
+            .agent_id = try dupOptionalStringField(self.allocator, obj, "agent_id"),
+            .project_id = try dupOptionalStringField(self.allocator, obj, "project_id"),
+            .run_id = try dupOptionalStringField(self.allocator, obj, "run_id"),
+            .workspace_root = try dupOptionalStringField(self.allocator, obj, "workspace_root"),
+            .worktree_name = try dupOptionalStringField(self.allocator, obj, "worktree_name"),
+            .created_by = try parseMissionActorView(self.allocator, obj.get("created_by") orelse return error.InvalidResponse),
+            .created_at_ms = try intFieldOrDefault(obj, "created_at_ms", 0),
+            .updated_at_ms = try intFieldOrDefault(obj, "updated_at_ms", 0),
+            .last_heartbeat_ms = try intFieldOrDefault(obj, "last_heartbeat_ms", 0),
+            .checkpoint_seq = try u64FieldOrDefault(obj, "checkpoint_seq", 0),
+            .recovery_count = try u64FieldOrDefault(obj, "recovery_count", 0),
+            .recovery_reason = try dupOptionalStringField(self.allocator, obj, "recovery_reason"),
+            .blocked_reason = try dupOptionalStringField(self.allocator, obj, "blocked_reason"),
+            .summary = try dupOptionalStringField(self.allocator, obj, "summary"),
+        };
+        errdefer mission.deinit(self.allocator);
+
+        if (mission.agent_id) |agent_id| {
+            if (lookupMissionPersonaPack(agent_packs, agent_id)) |persona_pack| {
+                mission.persona_pack = try self.allocator.dupe(u8, persona_pack);
+            }
+        }
+
+        if (obj.get("pending_approval")) |value| {
+            if (value == .object) {
+                mission.pending_approval = try parseMissionApprovalView(self.allocator, value);
+            }
+        }
+
+        if (obj.get("artifacts")) |value| {
+            if (value != .array) return error.InvalidResponse;
+            for (value.array.items) |artifact_val| {
+                if (artifact_val != .object) continue;
+                try mission.artifacts.append(self.allocator, try parseMissionArtifactView(self.allocator, artifact_val));
+            }
+        }
+
+        if (obj.get("events")) |value| {
+            if (value != .array) return error.InvalidResponse;
+            for (value.array.items) |event_val| {
+                if (event_val != .object) continue;
+                try mission.events.append(self.allocator, try parseMissionEventView(self.allocator, event_val));
+            }
+        }
+
+        return mission;
+    }
+
+    fn buildMissionWorkboardItemsOwned(self: *App, missions: []const MissionRecordView) ![]zui.protocol.types.WorkboardItem {
+        var out = try self.allocator.alloc(zui.protocol.types.WorkboardItem, missions.len);
+        errdefer deinitWorkboardItemOwnedSlice(self.allocator, out);
+
+        for (missions, 0..) |mission, index| {
+            const title_source = mission.title orelse mission.summary orelse mission.mission_id;
+            const owner_source = mission.agent_id orelse mission.created_by.actor_id;
+            out[index] = .{
+                .id = try self.allocator.dupe(u8, mission.mission_id),
+                .kind = try self.allocator.dupe(u8, mission.use_case),
+                .status = try self.allocator.dupe(u8, mission.state),
+                .title = try self.allocator.dupe(u8, title_source),
+                .summary = if (mission.summary) |value| try self.allocator.dupe(u8, value) else null,
+                .owner = try self.allocator.dupe(u8, owner_source),
+                .agent_id = if (mission.agent_id) |value| try self.allocator.dupe(u8, value) else null,
+                .parent_id = null,
+                .cron_key = null,
+                .created_at_ms = mission.created_at_ms,
+                .updated_at_ms = mission.updated_at_ms,
+                .due_at_ms = null,
+                .payload_json = if (mission.persona_pack) |value|
+                    try std.fmt.allocPrint(self.allocator, "{{\"mission_id\":\"{s}\",\"persona_pack\":\"{s}\"}}", .{ mission.mission_id, value })
+                else
+                    try std.fmt.allocPrint(self.allocator, "{{\"mission_id\":\"{s}\"}}", .{mission.mission_id}),
+            };
+        }
+        return out;
+    }
+
+    fn buildMissionApprovalsOwned(self: *App, missions: []const MissionRecordView) !std.ArrayListUnmanaged(zui.protocol.types.ExecApproval) {
+        var approvals = std.ArrayListUnmanaged(zui.protocol.types.ExecApproval){};
+        errdefer deinitExecApprovalList(self.allocator, &approvals);
+
+        for (missions) |mission| {
+            const approval = mission.pending_approval orelse continue;
+            var summary_buf: [256]u8 = undefined;
+            const title = mission.title orelse mission.summary orelse mission.mission_id;
+            const summary = std.fmt.bufPrint(
+                &summary_buf,
+                "{s}: {s}",
+                .{ title, approval.action_kind },
+            ) catch approval.action_kind;
+            const payload_json = if (approval.payload_json) |payload|
+                try std.fmt.allocPrint(
+                    self.allocator,
+                    "{{\"mission_id\":\"{s}\",\"action_kind\":\"{s}\",\"payload\":{s}}}",
+                    .{ mission.mission_id, approval.action_kind, payload },
+                )
+            else
+                try std.fmt.allocPrint(
+                    self.allocator,
+                    "{{\"mission_id\":\"{s}\",\"action_kind\":\"{s}\"}}",
+                    .{ mission.mission_id, approval.action_kind },
+                );
+
+            try approvals.append(self.allocator, .{
+                .id = try self.allocator.dupe(u8, approval.approval_id),
+                .payload_json = payload_json,
+                .summary = try self.allocator.dupe(u8, summary),
+                .requested_at_ms = approval.requested_at_ms,
+                .requested_by = try std.fmt.allocPrint(
+                    self.allocator,
+                    "{s}/{s}",
+                    .{ approval.requested_by.actor_type, approval.requested_by.actor_id },
+                ),
+                .resolved_at_ms = null,
+                .resolved_by = null,
+                .decision = null,
+                .can_resolve = true,
+            });
+        }
+
+        return approvals;
+    }
+
+    fn resolveMissionApproval(self: *App, action: zui.ui.operator_view.ExecApprovalResolveAction) !void {
+        const mission = self.findMissionForApprovalId(action.request_id) orelse return error.NotFound;
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        try self.fsrpcBootstrapGui(client);
+
+        const request_id = try std.fmt.allocPrint(self.allocator, "mission-approval-{d}", .{std.time.milliTimestamp()});
+        const approval_target = try self.allocator.dupe(u8, action.request_id);
+        const decision_label = switch (action.decision) {
+            .allow_once, .allow_always => "approve",
+            .deny => "deny",
+        };
+        const decision_copy = try self.allocator.dupe(u8, decision_label);
+        self.client_context.setPendingApprovalResolveRequest(request_id, approval_target, decision_copy);
+        defer self.client_context.clearPendingApprovalResolveRequest();
+
+        const control_name = switch (action.decision) {
+            .allow_once, .allow_always => "approve.json",
+            .deny => "reject.json",
+        };
+        const payload = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"mission_id\":\"{s}\"}}",
+            .{mission.mission_id},
+        );
+        defer self.allocator.free(payload);
+
+        const control_path = try std.fmt.allocPrint(self.allocator, "/agents/self/missions/control/{s}", .{control_name});
+        defer self.allocator.free(control_path);
+        try self.writeFsPathTextGui(client, control_path, payload);
+
+        const result_json = try self.readFsPathTextGui(client, "/agents/self/missions/result.json");
+        defer self.allocator.free(result_json);
+        if (try missionResultErrorMessage(self.allocator, result_json)) |message| {
+            defer self.allocator.free(message);
+            self.setMissionDashboardError(message);
+            return error.RemoteError;
+        }
+
+        try self.client_context.markApprovalResolvedOwned(
+            action.request_id,
+            switch (action.decision) {
+                .allow_once, .allow_always => "approve",
+                .deny => "deny",
+            },
+            "SpiderApp",
+            std.time.milliTimestamp(),
+        );
+        try self.refreshMissionDashboardData();
+    }
+
+    fn findMissionForApprovalId(self: *App, approval_id: []const u8) ?*MissionRecordView {
+        for (self.mission_records.items) |*mission| {
+            if (mission.pending_approval) |approval| {
+                if (std.mem.eql(u8, approval.approval_id, approval_id)) return mission;
+            }
+        }
+        return null;
+    }
+
+    fn formatMissionDashboardOpError(self: *App, operation: []const u8, err: anyerror) ?[]u8 {
+        if (self.mission_last_error) |message| {
+            return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, message }) catch null;
+        }
+        if (err == error.RemoteError) {
+            if (control_plane.lastRemoteError()) |remote| {
+                return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, remote }) catch null;
+            }
+        }
+        if (self.fsrpc_last_remote_error) |remote| {
+            return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, remote }) catch null;
+        }
+        return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, @errorName(err) }) catch null;
     }
 
     fn activateSelectedProject(self: *App) !void {
@@ -5622,6 +6159,7 @@ const App = struct {
         self.workspace_last_refresh_ms = std.time.milliTimestamp();
         self.clearWorkspaceError();
         self.session_attach_state = .unknown;
+        self.refreshMissionDashboardData() catch {};
 
         if (self.settings_panel.project_token.items.len == 0) {
             if (token) |value| {
@@ -7365,6 +7903,16 @@ const App = struct {
                 self.debug_panel_id = panel.id;
                 self.perf_frame_panel_ns.debug += std.time.nanoTimestamp() - started_ns;
             },
+            .Workboard => {
+                const started_ns = std.time.nanoTimestamp();
+                self.drawMissionWorkboardPanel(manager, panel, rect);
+                self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
+            },
+            .ApprovalsInbox => {
+                const started_ns = std.time.nanoTimestamp();
+                self.drawApprovalsInboxPanel(manager, panel, rect);
+                self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
+            },
             .ToolOutput => {
                 if (self.terminal_panel_id != null and self.terminal_panel_id.? == panel.id) {
                     const started_ns = std.time.nanoTimestamp();
@@ -8032,6 +8580,432 @@ const App = struct {
         if (action) |value| {
             self.performLauncherSettingsAction(&self.manager, value);
         }
+    }
+
+    fn drawApprovalsInboxPanel(self: *App, manager: *panel_manager.PanelManager, panel: *workspace.Panel, rect: UiRect) void {
+        self.requestMissionDashboardRefresh(false);
+
+        var action: panels_bridge.UiAction = .{};
+        var pending_attachment: ?panels_bridge.AttachmentOpen = null;
+        _ = panels_bridge.runtime.drawContentsWithHost(
+            self.allocator,
+            &self.client_context,
+            &self.config,
+            &self.agent_registry,
+            self.connection_state == .connected,
+            build_options.app_version,
+            panel,
+            rect,
+            &self.ui_inbox,
+            manager,
+            &action,
+            &pending_attachment,
+            null,
+            false,
+            null,
+        );
+        if (pending_attachment) |*value| value.deinit(self.allocator);
+
+        if (action.resolve_approval) |resolve| {
+            defer resolve.deinit(self.allocator);
+            self.resolveMissionApproval(resolve) catch |err| {
+                if (self.formatMissionDashboardOpError("Resolve mission approval", err)) |message| {
+                    defer self.allocator.free(message);
+                    self.setMissionDashboardError(message);
+                } else {
+                    self.setMissionDashboardError("Resolve mission approval failed");
+                }
+            };
+        }
+    }
+
+    fn drawMissionWorkboardPanel(self: *App, manager: *panel_manager.PanelManager, _: *workspace.Panel, rect: UiRect) void {
+        self.requestMissionDashboardRefresh(false);
+
+        const panel_rect = Rect{ .min = rect.min, .max = rect.max };
+        self.drawSurfacePanel(panel_rect);
+
+        const layout = self.panelLayoutMetrics();
+        const pad = layout.inset;
+        const inner_w = @max(1.0, panel_rect.width() - pad * 2.0);
+        const line_h = self.textLineHeight();
+        const button_h = layout.button_height;
+
+        const refresh_label = if (self.client_context.pending_workboard_request_id != null) "Refreshing..." else "Refresh";
+        const refresh_w = @max(96.0 * self.ui_scale, self.measureTextFast(refresh_label) + pad * 1.4);
+        const refresh_rect = Rect.fromXYWH(
+            panel_rect.max[0] - pad - refresh_w,
+            panel_rect.min[1] + pad,
+            refresh_w,
+            button_h,
+        );
+        if (self.drawButtonWidget(refresh_rect, refresh_label, .{
+            .variant = .secondary,
+            .disabled = self.connection_state != .connected or self.client_context.pending_workboard_request_id != null,
+        })) {
+            self.requestMissionDashboardRefresh(true);
+        }
+
+        var approvals_label_buf: [64]u8 = undefined;
+        const approvals_label = std.fmt.bufPrint(
+            &approvals_label_buf,
+            "Approvals {d}",
+            .{self.client_context.approvals.items.len},
+        ) catch "Approvals";
+        const approvals_w = @max(112.0 * self.ui_scale, self.measureTextFast(approvals_label) + pad * 1.6);
+        const approvals_rect = Rect.fromXYWH(
+            refresh_rect.min[0] - pad * 0.6 - approvals_w,
+            refresh_rect.min[1],
+            approvals_w,
+            button_h,
+        );
+        if (self.drawButtonWidget(approvals_rect, approvals_label, .{
+            .variant = .ghost,
+            .disabled = self.client_context.approvals.items.len == 0 and self.client_context.approvals_resolved.items.len == 0,
+        })) {
+            manager.ensurePanel(.ApprovalsInbox);
+        }
+
+        self.drawTextTrimmed(
+            panel_rect.min[0] + pad,
+            panel_rect.min[1] + pad,
+            @max(1.0, approvals_rect.min[0] - panel_rect.min[0] - pad * 1.6),
+            "Mission Workboard",
+            self.theme.colors.text_primary,
+        );
+
+        var status_buf: [160]u8 = undefined;
+        self.drawTextTrimmed(
+            panel_rect.min[0] + pad,
+            panel_rect.min[1] + pad + line_h + layout.row_gap * 0.35,
+            inner_w,
+            self.missionDashboardStatusText(&status_buf),
+            self.theme.colors.text_secondary,
+        );
+
+        const cards_top = panel_rect.min[1] + pad + line_h * 2.0 + layout.row_gap;
+        const card_gap = @max(layout.inner_inset, 10.0 * self.ui_scale);
+        const card_h = @max(84.0 * self.ui_scale, button_h * 2.4);
+        const card_w = @max(80.0, (inner_w - card_gap * 2.0) / 3.0);
+        const missions_rect = Rect.fromXYWH(panel_rect.min[0] + pad, cards_top, card_w, card_h);
+        const approvals_card_rect = Rect.fromXYWH(missions_rect.max[0] + card_gap, cards_top, card_w, card_h);
+        const recovery_rect = Rect.fromXYWH(approvals_card_rect.max[0] + card_gap, cards_top, card_w, card_h);
+
+        var running_count: usize = 0;
+        var waiting_count: usize = 0;
+        var failed_count: usize = 0;
+        var recovering_count: usize = 0;
+        for (self.mission_records.items) |mission| {
+            if (std.ascii.eqlIgnoreCase(mission.state, "running")) running_count += 1;
+            if (std.ascii.eqlIgnoreCase(mission.state, "waiting_for_approval") or std.ascii.eqlIgnoreCase(mission.state, "blocked")) waiting_count += 1;
+            if (std.ascii.eqlIgnoreCase(mission.state, "failed") or std.ascii.eqlIgnoreCase(mission.state, "cancelled")) failed_count += 1;
+            if (mission.recovery_count > 0 or std.ascii.eqlIgnoreCase(mission.state, "recovering")) recovering_count += 1;
+        }
+
+        var missions_summary_buf: [96]u8 = undefined;
+        const missions_summary = std.fmt.bufPrint(
+            &missions_summary_buf,
+            "{d} running, {d} waiting, {d} failed",
+            .{ running_count, waiting_count, failed_count },
+        ) catch "Mission activity";
+        self.drawMissionSummaryCard(missions_rect, "Missions", self.theme.colors.primary, if (self.mission_records.items.len > 0) "Live queue" else "No missions", missions_summary);
+
+        var approvals_summary_buf: [96]u8 = undefined;
+        const approvals_summary = std.fmt.bufPrint(
+            &approvals_summary_buf,
+            "{d} pending, {d} resolved in-session",
+            .{ self.client_context.approvals.items.len, self.client_context.approvals_resolved.items.len },
+        ) catch "Approval queue";
+        self.drawMissionSummaryCard(
+            approvals_card_rect,
+            "Approvals",
+            if (self.client_context.approvals.items.len > 0) zcolors.rgba(236, 174, 36, 255) else self.theme.colors.border,
+            if (self.client_context.approvals.items.len > 0) "Operator review" else "Queue clear",
+            approvals_summary,
+        );
+
+        var recovery_title_buf: [64]u8 = undefined;
+        const recovery_title = self.workspaceRecoveryHeadline(&recovery_title_buf);
+        var recovery_summary_buf: [96]u8 = undefined;
+        const recovery_summary = std.fmt.bufPrint(
+            &recovery_summary_buf,
+            "{d} missions with recovery history",
+            .{recovering_count},
+        ) catch "Mission recovery";
+        self.drawMissionSummaryCard(recovery_rect, "Recovery", self.workspaceRecoveryColor(), recovery_title, recovery_summary);
+
+        const content_top = cards_top + card_h + layout.row_gap;
+        const content_h = @max(1.0, panel_rect.max[1] - content_top - pad);
+        const list_w = @max(240.0 * self.ui_scale, inner_w * 0.36);
+        const list_rect = Rect.fromXYWH(panel_rect.min[0] + pad, content_top, list_w, content_h);
+        const detail_rect = Rect.fromXYWH(list_rect.max[0] + card_gap, content_top, @max(1.0, panel_rect.max[0] - list_rect.max[0] - pad - card_gap), content_h);
+        self.drawMissionListPanel(list_rect);
+        self.drawMissionDetailPanel(detail_rect);
+    }
+
+    fn drawMissionSummaryCard(self: *App, rect: Rect, accent: [4]f32, title: []const u8, value: []const u8, summary: []const u8) void {
+        self.drawSurfacePanel(rect);
+        const pad = @max(self.theme.spacing.xs, 8.0 * self.ui_scale);
+        const line_h = self.textLineHeight();
+        const accent_rect = Rect.fromXYWH(rect.min[0], rect.min[1], @max(3.0, 4.0 * self.ui_scale), rect.height());
+        self.drawFilledRect(accent_rect, accent);
+        self.drawTextTrimmed(rect.min[0] + pad * 1.6, rect.min[1] + pad, rect.width() - pad * 2.0, title, self.theme.colors.text_secondary);
+        self.drawTextTrimmed(rect.min[0] + pad * 1.6, rect.min[1] + pad + line_h + pad * 0.15, rect.width() - pad * 2.0, value, self.theme.colors.text_primary);
+        self.drawTextTrimmed(rect.min[0] + pad * 1.6, rect.min[1] + rect.height() - pad - line_h, rect.width() - pad * 2.0, summary, self.theme.colors.text_secondary);
+    }
+
+    fn drawMissionListPanel(self: *App, rect: Rect) void {
+        self.drawSurfacePanel(rect);
+        const pad = @max(self.theme.spacing.xs, 8.0 * self.ui_scale);
+        const line_h = self.textLineHeight();
+        const header_y = rect.min[1] + pad;
+        self.drawTextTrimmed(rect.min[0] + pad, header_y, rect.width() - pad * 2.0, "Mission Queue", self.theme.colors.text_primary);
+
+        if (self.mission_records.items.len == 0) {
+            self.drawTextTrimmed(
+                rect.min[0] + pad,
+                header_y + line_h + pad,
+                rect.width() - pad * 2.0,
+                if (self.connection_state == .connected) "No missions recorded yet." else "Connect to load mission records.",
+                self.theme.colors.text_secondary,
+            );
+            return;
+        }
+
+        const row_gap = @max(6.0 * self.ui_scale, pad * 0.6);
+        const row_h = @max(line_h * 3.0, 76.0 * self.ui_scale);
+        var y = header_y + line_h + pad * 0.8;
+        var drawn: usize = 0;
+        const available_rows = @as(usize, @intFromFloat(@max(1.0, (rect.max[1] - y - pad) / (row_h + row_gap))));
+        const now_ms = std.time.milliTimestamp();
+
+        for (self.mission_records.items) |mission| {
+            if (drawn >= available_rows) break;
+            const row_rect = Rect.fromXYWH(rect.min[0] + pad, y, rect.width() - pad * 2.0, row_h);
+            const selected = self.mission_selected_id != null and std.mem.eql(u8, self.mission_selected_id.?, mission.mission_id);
+            const hovered = row_rect.contains(.{ self.mouse_x, self.mouse_y });
+            const fill = if (selected)
+                zcolors.withAlpha(self.theme.colors.primary, 0.14)
+            else if (hovered)
+                zcolors.withAlpha(self.theme.colors.primary, 0.08)
+            else
+                zcolors.withAlpha(self.theme.colors.surface, 0.6);
+            self.drawFilledRect(row_rect, fill);
+            self.drawRect(row_rect, if (selected) self.theme.colors.primary else self.theme.colors.border);
+
+            const content_x = row_rect.min[0] + pad;
+            const content_w = row_rect.width() - pad * 2.0;
+            self.drawTextTrimmed(content_x, row_rect.min[1] + pad * 0.55, @max(1.0, content_w - 88.0 * self.ui_scale), missionDisplayTitle(&mission), self.theme.colors.text_primary);
+
+            var state_buf: [40]u8 = undefined;
+            const state_rect = Rect.fromXYWH(row_rect.max[0] - pad - 80.0 * self.ui_scale, row_rect.min[1] + pad * 0.45, 80.0 * self.ui_scale, line_h + pad * 0.5);
+            const state_label = normalizedMissionStateLabel(mission.state, &state_buf);
+            self.drawMissionStateBadge(state_rect, state_label, missionStateColor(self, mission.state));
+
+            var secondary_buf: [160]u8 = undefined;
+            const secondary = std.fmt.bufPrint(
+                &secondary_buf,
+                "{s}  {s}",
+                .{ mission.stage, mission.project_id orelse "no-project" },
+            ) catch mission.stage;
+            self.drawTextTrimmed(content_x, row_rect.min[1] + pad * 0.55 + line_h + pad * 0.25, content_w, secondary, self.theme.colors.text_secondary);
+
+            var meta_buf: [160]u8 = undefined;
+            const relative = if (mission.updated_at_ms > 0) blk: {
+                var time_buf: [40]u8 = undefined;
+                break :blk formatRelativeTimeLabel(now_ms, mission.updated_at_ms, &time_buf);
+            } else "unknown";
+            const meta = std.fmt.bufPrint(
+                &meta_buf,
+                "{s}  {s}",
+                .{ mission.agent_id orelse "agent:unknown", relative },
+            ) catch relative;
+            self.drawTextTrimmed(content_x, row_rect.min[1] + pad * 0.55 + line_h * 2.0 + pad * 0.3, content_w, meta, self.theme.colors.text_secondary);
+
+            if (self.mouse_released and row_rect.contains(.{ self.mouse_x, self.mouse_y })) {
+                self.setSelectedMissionId(mission.mission_id);
+            }
+
+            y += row_h + row_gap;
+            drawn += 1;
+        }
+
+        if (self.mission_records.items.len > drawn) {
+            var more_buf: [64]u8 = undefined;
+            const more = std.fmt.bufPrint(&more_buf, "...and {d} more", .{self.mission_records.items.len - drawn}) catch "...";
+            self.drawTextTrimmed(rect.min[0] + pad, rect.max[1] - pad - line_h, rect.width() - pad * 2.0, more, self.theme.colors.text_secondary);
+        }
+    }
+
+    fn drawMissionDetailPanel(self: *App, rect: Rect) void {
+        self.drawSurfacePanel(rect);
+        const mission = self.selectedMission() orelse {
+            self.drawTextTrimmed(rect.min[0] + self.theme.spacing.sm, rect.min[1] + self.theme.spacing.sm, rect.width() - self.theme.spacing.sm * 2.0, "Select a mission to inspect it.", self.theme.colors.text_secondary);
+            return;
+        };
+
+        const pad = @max(self.theme.spacing.sm, 10.0 * self.ui_scale);
+        const line_h = self.textLineHeight();
+        const inner_w = rect.width() - pad * 2.0;
+        var y = rect.min[1] + pad;
+
+        self.drawTextTrimmed(rect.min[0] + pad, y, inner_w - 96.0 * self.ui_scale, missionDisplayTitle(mission), self.theme.colors.text_primary);
+        var state_buf: [40]u8 = undefined;
+        const badge_rect = Rect.fromXYWH(rect.max[0] - pad - 88.0 * self.ui_scale, y - pad * 0.2, 88.0 * self.ui_scale, line_h + pad * 0.6);
+        self.drawMissionStateBadge(badge_rect, normalizedMissionStateLabel(mission.state, &state_buf), missionStateColor(self, mission.state));
+        y += line_h + pad * 0.6;
+
+        if (mission.summary) |summary| {
+            y += self.drawTextWrapped(rect.min[0] + pad, y, inner_w, summary, self.theme.colors.text_secondary) + pad * 0.5;
+        }
+
+        y = self.drawMissionDetailLine(rect, pad, y, "Use Case", mission.use_case);
+        y = self.drawMissionDetailLine(rect, pad, y, "Stage", mission.stage);
+        y = self.drawMissionDetailLine(rect, pad, y, "Agent", mission.agent_id orelse "unknown");
+        if (mission.persona_pack) |persona_pack| {
+            y = self.drawMissionDetailLine(rect, pad, y, "Persona Pack", persona_pack);
+        }
+        if (mission.project_id) |project_id| {
+            y = self.drawMissionDetailLine(rect, pad, y, "Project", project_id);
+        }
+        if (mission.worktree_name) |worktree_name| {
+            y = self.drawMissionDetailLine(rect, pad, y, "Worktree", worktree_name);
+        }
+        if (mission.workspace_root) |workspace_root| {
+            y = self.drawMissionDetailLine(rect, pad, y, "Workspace", workspace_root);
+        }
+
+        var recovery_buf: [96]u8 = undefined;
+        const recovery_text = if (mission.recovery_count > 0)
+            (std.fmt.bufPrint(&recovery_buf, "{d} recoveries", .{mission.recovery_count}) catch "recovery history")
+        else
+            "none";
+        y = self.drawMissionDetailLine(rect, pad, y, "Recovery", recovery_text);
+        if (mission.recovery_reason) |reason| {
+            y = self.drawMissionDetailLine(rect, pad, y, "Recovery Reason", reason);
+        }
+        if (mission.blocked_reason) |reason| {
+            y = self.drawMissionDetailLine(rect, pad, y, "Blocked", reason);
+        }
+
+        y += pad * 0.4;
+        self.drawTextTrimmed(rect.min[0] + pad, y, inner_w, "Memory ownership", self.theme.colors.text_primary);
+        y += line_h;
+        y += self.drawTextWrapped(
+            rect.min[0] + pad,
+            y,
+            inner_w,
+            "Kernel policy memories stay write-protected, identity memories remain agent-owned, and working memory stays mutable for strategy updates.",
+            self.theme.colors.text_secondary,
+        ) + pad * 0.6;
+
+        if (mission.pending_approval) |approval| {
+            self.drawTextTrimmed(rect.min[0] + pad, y, inner_w, "Pending approval", self.theme.colors.text_primary);
+            y += line_h;
+            y += self.drawTextWrapped(rect.min[0] + pad, y, inner_w, approval.message, self.theme.colors.text_secondary) + pad * 0.2;
+            var approval_buf: [128]u8 = undefined;
+            const approval_meta = std.fmt.bufPrint(
+                &approval_buf,
+                "{s} requested by {s}/{s}",
+                .{ approval.action_kind, approval.requested_by.actor_type, approval.requested_by.actor_id },
+            ) catch approval.action_kind;
+            y += self.drawTextWrapped(rect.min[0] + pad, y, inner_w, approval_meta, self.theme.colors.text_secondary) + pad * 0.6;
+        }
+
+        if (mission.artifacts.items.len > 0 and y < rect.max[1] - line_h * 2.0) {
+            self.drawTextTrimmed(rect.min[0] + pad, y, inner_w, "Artifacts", self.theme.colors.text_primary);
+            y += line_h;
+            const start_index = if (mission.artifacts.items.len > MISSION_PREVIEW_ARTIFACT_COUNT) mission.artifacts.items.len - MISSION_PREVIEW_ARTIFACT_COUNT else 0;
+            for (mission.artifacts.items[start_index..]) |artifact| {
+                if (y >= rect.max[1] - line_h * 2.0) break;
+                var artifact_buf: [256]u8 = undefined;
+                const artifact_line = std.fmt.bufPrint(
+                    &artifact_buf,
+                    "{s}  {s}",
+                    .{ artifact.kind, artifact.summary orelse artifact.path orelse "(no summary)" },
+                ) catch artifact.kind;
+                self.drawTextTrimmed(rect.min[0] + pad, y, inner_w, artifact_line, self.theme.colors.text_secondary);
+                y += line_h;
+            }
+            y += pad * 0.4;
+        }
+
+        if (mission.events.items.len > 0 and y < rect.max[1] - line_h * 2.0) {
+            self.drawTextTrimmed(rect.min[0] + pad, y, inner_w, "Recent events", self.theme.colors.text_primary);
+            y += line_h;
+            const start_index = if (mission.events.items.len > MISSION_PREVIEW_EVENT_COUNT) mission.events.items.len - MISSION_PREVIEW_EVENT_COUNT else 0;
+            const now_ms = std.time.milliTimestamp();
+            for (mission.events.items[start_index..]) |event| {
+                if (y >= rect.max[1] - line_h * 2.0) break;
+                var time_buf: [40]u8 = undefined;
+                var event_buf: [256]u8 = undefined;
+                const event_line = std.fmt.bufPrint(
+                    &event_buf,
+                    "{s}  {s}",
+                    .{ formatRelativeTimeLabel(now_ms, event.created_at_ms, &time_buf), event.event_type },
+                ) catch event.event_type;
+                self.drawTextTrimmed(rect.min[0] + pad, y, inner_w, event_line, self.theme.colors.text_secondary);
+                y += line_h;
+            }
+        }
+    }
+
+    fn drawMissionDetailLine(self: *App, rect: Rect, pad: f32, y: f32, label: []const u8, value: []const u8) f32 {
+        const line_h = self.textLineHeight();
+        const label_w = @max(110.0 * self.ui_scale, rect.width() * 0.18);
+        self.drawTextTrimmed(rect.min[0] + pad, y, label_w, label, self.theme.colors.text_secondary);
+        self.drawTextTrimmed(rect.min[0] + pad + label_w + pad * 0.6, y, rect.width() - label_w - pad * 3.0, value, self.theme.colors.text_primary);
+        return y + line_h;
+    }
+
+    fn drawMissionStateBadge(self: *App, rect: Rect, label: []const u8, color: [4]f32) void {
+        self.drawFilledRect(rect, zcolors.withAlpha(color, 0.18));
+        self.drawRect(rect, color);
+        self.drawCenteredText(rect, label, color);
+    }
+
+    fn setSelectedMissionId(self: *App, mission_id: []const u8) void {
+        if (self.mission_selected_id) |existing| {
+            if (std.mem.eql(u8, existing, mission_id)) return;
+            self.allocator.free(existing);
+        }
+        self.mission_selected_id = self.allocator.dupe(u8, mission_id) catch null;
+    }
+
+    fn workspaceRecoveryHeadline(self: *App, buf: []u8) []const u8 {
+        if (self.workspace_recovery_suspended_until != 0 and self.debug_frame_counter < self.workspace_recovery_suspended_until) {
+            return "suspended";
+        }
+        if (self.workspace_recovery_blocked_until != 0 and self.debug_frame_counter < self.workspace_recovery_blocked_until) {
+            return "cooldown";
+        }
+        if (self.workspace_recovery_failures > 0) {
+            return std.fmt.bufPrint(buf, "{d} recent retries", .{self.workspace_recovery_failures}) catch "retrying";
+        }
+        return "stable";
+    }
+
+    fn workspaceRecoveryColor(self: *App) [4]f32 {
+        if (self.workspace_recovery_suspended_until != 0 and self.debug_frame_counter < self.workspace_recovery_suspended_until) {
+            return self.theme.colors.danger;
+        }
+        if (self.workspace_recovery_blocked_until != 0 and self.debug_frame_counter < self.workspace_recovery_blocked_until) {
+            return zcolors.rgba(236, 174, 36, 255);
+        }
+        if (self.workspace_recovery_failures > 0) {
+            return zcolors.rgba(236, 174, 36, 255);
+        }
+        return self.theme.colors.success;
+    }
+
+    fn missionDashboardStatusText(self: *App, buf: []u8) []const u8 {
+        if (self.connection_state != .connected) return "Disconnected";
+        if (self.client_context.pending_workboard_request_id != null) return "Updating mission dashboard...";
+        if (self.mission_last_error) |value| return value;
+        if (self.mission_last_refresh_ms <= 0) return "Mission dashboard not loaded yet.";
+        var rel_buf: [40]u8 = undefined;
+        const relative = formatRelativeTimeLabel(std.time.milliTimestamp(), self.mission_last_refresh_ms, &rel_buf);
+        return std.fmt.bufPrint(buf, "Live mission data refreshed {s}", .{relative}) catch "Live mission data";
     }
 
     fn drawProjectPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
@@ -16758,6 +17732,218 @@ const App = struct {
         self.drawText(x + width, y, ellipsis, color);
     }
 };
+
+fn dupRequiredStringField(allocator: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8) ![]u8 {
+    const value = obj.get(key) orelse return error.InvalidResponse;
+    if (value != .string) return error.InvalidResponse;
+    return allocator.dupe(u8, value.string);
+}
+
+fn dupOptionalStringField(allocator: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8) !?[]u8 {
+    const value = obj.get(key) orelse return null;
+    return switch (value) {
+        .string => try allocator.dupe(u8, value.string),
+        .null => null,
+        else => return error.InvalidResponse,
+    };
+}
+
+fn intFieldOrDefault(obj: std.json.ObjectMap, key: []const u8, default: i64) !i64 {
+    const value = obj.get(key) orelse return default;
+    return switch (value) {
+        .integer => @intCast(value.integer),
+        .float => @intFromFloat(value.float),
+        .null => default,
+        else => return error.InvalidResponse,
+    };
+}
+
+fn u64FieldOrDefault(obj: std.json.ObjectMap, key: []const u8, default: u64) !u64 {
+    const value = obj.get(key) orelse return default;
+    return switch (value) {
+        .integer => if (value.integer < 0) return error.InvalidResponse else @intCast(value.integer),
+        .float => if (value.float < 0) return error.InvalidResponse else @intFromFloat(value.float),
+        .null => default,
+        else => return error.InvalidResponse,
+    };
+}
+
+fn parseMissionActorView(allocator: std.mem.Allocator, value: std.json.Value) !MissionActorView {
+    if (value != .object) return error.InvalidResponse;
+    return .{
+        .actor_type = try dupRequiredStringField(allocator, value.object, "actor_type"),
+        .actor_id = try dupRequiredStringField(allocator, value.object, "actor_id"),
+    };
+}
+
+fn parseMissionArtifactView(allocator: std.mem.Allocator, value: std.json.Value) !MissionArtifactView {
+    if (value != .object) return error.InvalidResponse;
+    return .{
+        .kind = try dupRequiredStringField(allocator, value.object, "kind"),
+        .path = try dupOptionalStringField(allocator, value.object, "path"),
+        .summary = try dupOptionalStringField(allocator, value.object, "summary"),
+        .created_at_ms = try intFieldOrDefault(value.object, "created_at_ms", 0),
+    };
+}
+
+fn parseMissionEventView(allocator: std.mem.Allocator, value: std.json.Value) !MissionEventView {
+    if (value != .object) return error.InvalidResponse;
+    return .{
+        .seq = try u64FieldOrDefault(value.object, "seq", 0),
+        .event_type = try dupRequiredStringField(allocator, value.object, "event_type"),
+        .payload_json = blk: {
+            const payload = value.object.get("payload") orelse return error.InvalidResponse;
+            break :blk try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(payload, .{})});
+        },
+        .created_at_ms = try intFieldOrDefault(value.object, "created_at_ms", 0),
+    };
+}
+
+fn parseMissionApprovalView(allocator: std.mem.Allocator, value: std.json.Value) !MissionApprovalView {
+    if (value != .object) return error.InvalidResponse;
+    const obj = value.object;
+    return .{
+        .approval_id = try dupRequiredStringField(allocator, obj, "approval_id"),
+        .action_kind = try dupRequiredStringField(allocator, obj, "action_kind"),
+        .message = try dupRequiredStringField(allocator, obj, "message"),
+        .payload_json = blk: {
+            const payload = obj.get("payload") orelse break :blk null;
+            break :blk switch (payload) {
+                .null => null,
+                else => try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(payload, .{})}),
+            };
+        },
+        .requested_at_ms = try intFieldOrDefault(obj, "requested_at_ms", 0),
+        .requested_by = try parseMissionActorView(allocator, obj.get("requested_by") orelse return error.InvalidResponse),
+        .resolved_at_ms = try intFieldOrDefault(obj, "resolved_at_ms", 0),
+        .resolved_by = blk: {
+            const resolved = obj.get("resolved_by") orelse break :blk null;
+            if (resolved == .null) break :blk null;
+            break :blk try parseMissionActorView(allocator, resolved);
+        },
+        .resolution_note = try dupOptionalStringField(allocator, obj, "resolution_note"),
+        .resolution = try dupOptionalStringField(allocator, obj, "resolution"),
+    };
+}
+
+fn lookupMissionPersonaPack(agent_packs: []const MissionAgentPackView, agent_id: []const u8) ?[]const u8 {
+    for (agent_packs) |entry| {
+        if (std.mem.eql(u8, entry.agent_id, agent_id)) return entry.persona_pack;
+    }
+    return null;
+}
+
+fn missionResultErrorMessage(allocator: std.mem.Allocator, result_json: []const u8) !?[]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, result_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return null;
+    const root = parsed.value.object;
+    if (root.get("ok")) |value| {
+        if (value == .bool and value.bool) return null;
+    }
+    const err_val = root.get("error") orelse return try allocator.dupe(u8, "mission operation failed");
+    return switch (err_val) {
+        .string => try allocator.dupe(u8, err_val.string),
+        .object => blk: {
+            if (err_val.object.get("message")) |message| {
+                if (message == .string) break :blk try allocator.dupe(u8, message.string);
+            }
+            if (err_val.object.get("code")) |code| {
+                if (code == .string) break :blk try allocator.dupe(u8, code.string);
+            }
+            break :blk try allocator.dupe(u8, "mission operation failed");
+        },
+        .null => null,
+        else => try allocator.dupe(u8, "mission operation failed"),
+    };
+}
+
+fn deinitMissionRecordList(allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged(MissionRecordView)) void {
+    for (list.items) |*mission| mission.deinit(allocator);
+    list.deinit(allocator);
+    list.* = .{};
+}
+
+fn deinitMissionAgentPackList(allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged(MissionAgentPackView)) void {
+    for (list.items) |*entry| entry.deinit(allocator);
+    list.deinit(allocator);
+    list.* = .{};
+}
+
+fn freeOwnedExecApproval(allocator: std.mem.Allocator, approval: *zui.protocol.types.ExecApproval) void {
+    allocator.free(approval.id);
+    allocator.free(approval.payload_json);
+    if (approval.summary) |summary| allocator.free(summary);
+    if (approval.requested_by) |value| allocator.free(value);
+    if (approval.resolved_by) |value| allocator.free(value);
+    if (approval.decision) |value| allocator.free(value);
+    approval.* = undefined;
+}
+
+fn deinitExecApprovalList(allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged(zui.protocol.types.ExecApproval)) void {
+    for (list.items) |*approval| freeOwnedExecApproval(allocator, approval);
+    list.deinit(allocator);
+    list.* = .{};
+}
+
+fn freeOwnedWorkboardItem(allocator: std.mem.Allocator, item: *zui.protocol.types.WorkboardItem) void {
+    allocator.free(item.id);
+    if (item.kind) |value| allocator.free(value);
+    if (item.status) |value| allocator.free(value);
+    if (item.title) |value| allocator.free(value);
+    if (item.summary) |value| allocator.free(value);
+    if (item.owner) |value| allocator.free(value);
+    if (item.agent_id) |value| allocator.free(value);
+    if (item.parent_id) |value| allocator.free(value);
+    if (item.cron_key) |value| allocator.free(value);
+    if (item.payload_json) |value| allocator.free(value);
+    item.* = undefined;
+}
+
+fn deinitWorkboardItemOwnedSlice(allocator: std.mem.Allocator, items: []zui.protocol.types.WorkboardItem) void {
+    for (items) |*item| freeOwnedWorkboardItem(allocator, item);
+    allocator.free(items);
+}
+
+fn missionDisplayTitle(mission: *const MissionRecordView) []const u8 {
+    return mission.title orelse mission.summary orelse mission.mission_id;
+}
+
+fn normalizedMissionStateLabel(state: []const u8, buf: []u8) []const u8 {
+    if (std.ascii.eqlIgnoreCase(state, "waiting_for_approval")) return "waiting";
+    if (std.ascii.eqlIgnoreCase(state, "completed")) return "done";
+    if (std.ascii.eqlIgnoreCase(state, "cancelled")) return "cancelled";
+    if (std.ascii.eqlIgnoreCase(state, "recovering")) return "recovering";
+    return std.fmt.bufPrint(buf, "{s}", .{state}) catch state;
+}
+
+fn missionStateColor(app: *App, state: []const u8) [4]f32 {
+    if (std.ascii.eqlIgnoreCase(state, "running")) return app.theme.colors.primary;
+    if (std.ascii.eqlIgnoreCase(state, "completed")) return app.theme.colors.success;
+    if (std.ascii.eqlIgnoreCase(state, "failed") or std.ascii.eqlIgnoreCase(state, "cancelled")) return app.theme.colors.danger;
+    if (std.ascii.eqlIgnoreCase(state, "waiting_for_approval") or
+        std.ascii.eqlIgnoreCase(state, "blocked") or
+        std.ascii.eqlIgnoreCase(state, "planning"))
+    {
+        return zcolors.rgba(236, 174, 36, 255);
+    }
+    if (std.ascii.eqlIgnoreCase(state, "recovering")) return zcolors.rgba(120, 180, 255, 255);
+    return app.theme.colors.border;
+}
+
+fn formatRelativeTimeLabel(now_ms: i64, ts_ms: i64, buf: []u8) []const u8 {
+    if (ts_ms <= 0) return "unknown";
+    const delta_ms_abs: i64 = if (now_ms >= ts_ms) now_ms - ts_ms else ts_ms - now_ms;
+    const minutes: i64 = @divTrunc(delta_ms_abs, 60_000);
+    if (minutes < 1) return "just now";
+    if (minutes < 60) return std.fmt.bufPrint(buf, "{d}m ago", .{minutes}) catch "recent";
+    const hours: i64 = @divTrunc(minutes, 60);
+    if (hours < 24) return std.fmt.bufPrint(buf, "{d}h ago", .{hours}) catch "today";
+    const days: i64 = @divTrunc(hours, 24);
+    if (days < 30) return std.fmt.bufPrint(buf, "{d}d ago", .{days}) catch "this month";
+    const months: i64 = @divTrunc(days, 30);
+    return std.fmt.bufPrint(buf, "{d}mo ago", .{months}) catch "older";
+}
 
 // Image loading stubs required by ziggy-ui
 pub export fn zsc_load_icon_rgba_from_memory(data: [*c]const u8, len: c_int, width: [*c]c_int, height: [*c]c_int) [*c]u8 {
