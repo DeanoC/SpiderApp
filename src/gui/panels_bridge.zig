@@ -57,6 +57,13 @@ pub const DebugPanelAction = if (has_panel_interfaces) zui.ui.panel_interfaces.D
 pub const ConnectRole = if (has_panel_interfaces) zui.ui.panel_interfaces.ConnectRole else enum { admin, user };
 pub const SettingsConnectionState = if (has_panel_interfaces) zui.ui.panel_interfaces.SettingsConnectionState else enum { disconnected };
 pub const SettingsTerminalBackend = if (has_panel_interfaces) zui.ui.panel_interfaces.SettingsTerminalBackend else enum { plain_text };
+pub const SettingsThemeMode = if (has_panel_interfaces) zui.ui.panel_interfaces.SettingsThemeMode else enum { pack_default };
+pub const SettingsThemeProfile = if (has_panel_interfaces) zui.ui.panel_interfaces.SettingsThemeProfile else enum { auto };
+pub const ThemePackQuickPickView = if (has_panel_interfaces) zui.ui.panel_interfaces.ThemePackQuickPickView else struct {
+    label: []const u8 = "",
+    value: []const u8 = "",
+    selected: bool = false,
+};
 pub const LauncherSettingsModel = if (has_panel_interfaces) zui.ui.panel_interfaces.LauncherSettingsModel else struct {};
 pub const LauncherSettingsAction = if (has_panel_interfaces) zui.ui.panel_interfaces.LauncherSettingsAction else enum { connect };
 
@@ -101,6 +108,9 @@ pub fn assertAvailable() void {
     _ = ConnectRole;
     _ = SettingsConnectionState;
     _ = SettingsTerminalBackend;
+    _ = SettingsThemeMode;
+    _ = SettingsThemeProfile;
+    _ = ThemePackQuickPickView;
     _ = LauncherSettingsModel;
     _ = LauncherSettingsAction;
     _ = ProjectPanelModel;

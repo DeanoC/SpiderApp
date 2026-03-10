@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const zui = @import("ziggy-ui");
 const zui_panels = @import("ziggy-ui-panels");
 const ws_client_mod = @import("websocket_client.zig");
@@ -38,7 +39,10 @@ const text_buffer = zui.ui.text_buffer;
 
 const Rect = zui.core.Rect;
 const UiRect = ui_draw_context.Rect;
-const Paint = zui.theme_engine.Paint;
+const Paint = zui.ui.theme_engine.style_sheet.Paint;
+
+const UiThemePackStatus = zui.ui.theme_engine.runtime.PackStatusKind;
+const UiThemePackMeta = zui.ui.theme_engine.runtime.PackMeta;
 
 const ConnectionState = enum {
     disconnected,
@@ -394,9 +398,7 @@ const SettingsFocusField = enum {
     project_mount_export_name,
     default_session,
     default_agent,
-    ui_theme,
-    ui_profile,
-    ui_theme_pack,
+    theme_pack,
     node_watch_filter,
     node_watch_replay_limit,
     debug_search_filter,
@@ -415,9 +417,7 @@ fn isSettingsPanelFocusField(field: SettingsFocusField) bool {
         .server_url,
         .default_session,
         .default_agent,
-        .ui_theme,
-        .ui_profile,
-        .ui_theme_pack,
+        .theme_pack,
         => true,
         else => false,
     };
@@ -430,9 +430,7 @@ fn settingsFocusFieldToExternal(field: SettingsFocusField) LauncherSettingsPanel
         .server_url => .server_url,
         .default_session => .default_session,
         .default_agent => .default_agent,
-        .ui_theme => .ui_theme,
-        .ui_profile => .ui_profile,
-        .ui_theme_pack => .ui_theme_pack,
+        .theme_pack => .theme_pack,
         else => .none,
     };
 }
@@ -442,10 +440,54 @@ fn settingsFocusFieldFromExternal(field: LauncherSettingsPanel.FocusField) Setti
         .server_url => .server_url,
         .default_session => .default_session,
         .default_agent => .default_agent,
-        .ui_theme => .ui_theme,
-        .ui_profile => .ui_profile,
-        .ui_theme_pack => .ui_theme_pack,
+        .theme_pack => .theme_pack,
         .none => .none,
+    };
+}
+
+fn settingsThemeModeFromConfig(mode: config_mod.Config.ThemeMode) panels_bridge.SettingsThemeMode {
+    return switch (mode) {
+        .pack_default => .pack_default,
+        .light => .light,
+        .dark => .dark,
+    };
+}
+
+fn configThemeModeFromSettings(mode: panels_bridge.SettingsThemeMode) config_mod.Config.ThemeMode {
+    return switch (mode) {
+        .pack_default => .pack_default,
+        .light => .light,
+        .dark => .dark,
+    };
+}
+
+fn settingsThemeProfileFromConfig(profile_value: config_mod.Config.ThemeProfile) panels_bridge.SettingsThemeProfile {
+    return switch (profile_value) {
+        .auto => .auto,
+        .desktop => .desktop,
+        .phone => .phone,
+        .tablet => .tablet,
+        .fullscreen => .fullscreen,
+    };
+}
+
+fn configThemeProfileFromSettings(profile_value: panels_bridge.SettingsThemeProfile) config_mod.Config.ThemeProfile {
+    return switch (profile_value) {
+        .auto => .auto,
+        .desktop => .desktop,
+        .phone => .phone,
+        .tablet => .tablet,
+        .fullscreen => .fullscreen,
+    };
+}
+
+fn themeProfileLabel(profile_value: panels_bridge.SettingsThemeProfile) ?[]const u8 {
+    return switch (profile_value) {
+        .auto => null,
+        .desktop => "desktop",
+        .phone => "phone",
+        .tablet => "tablet",
+        .fullscreen => "fullscreen",
     };
 }
 
@@ -644,9 +686,9 @@ const SettingsPanel = struct {
     project_mount_export_name: std.ArrayList(u8) = .empty,
     default_session: std.ArrayList(u8) = .empty,
     default_agent: std.ArrayList(u8) = .empty,
-    ui_theme: std.ArrayList(u8) = .empty,
-    ui_profile: std.ArrayList(u8) = .empty,
-    ui_theme_pack: std.ArrayList(u8) = .empty,
+    theme_mode: panels_bridge.SettingsThemeMode = .pack_default,
+    theme_profile: panels_bridge.SettingsThemeProfile = .auto,
+    theme_pack: std.ArrayList(u8) = .empty,
     watch_theme_pack: bool = false,
     terminal_backend_kind: terminal_render_backend.Backend.Kind = .plain_text,
     ws_verbose_logs: bool = false,
@@ -685,9 +727,7 @@ const SettingsPanel = struct {
         self.project_mount_export_name.deinit(allocator);
         self.default_session.deinit(allocator);
         self.default_agent.deinit(allocator);
-        self.ui_theme.deinit(allocator);
-        self.ui_profile.deinit(allocator);
-        self.ui_theme_pack.deinit(allocator);
+        self.theme_pack.deinit(allocator);
     }
 };
 
@@ -702,6 +742,15 @@ const UiWindow = struct {
     persist_in_workspace: bool = false,
     owns_manager: bool = true,
     owns_swapchain: bool = true,
+};
+
+const ThemePackEntry = struct {
+    name: []u8,
+
+    fn deinit(self: *ThemePackEntry, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        self.* = undefined;
+    }
 };
 
 const SessionMessageState = struct {
@@ -921,6 +970,35 @@ fn dockDropTargetLabel(location: dock_graph.DropLocation) []const u8 {
     };
 }
 
+fn scanThemeDirStamp(dir: *std.fs.Dir) !i128 {
+    var latest: i128 = 0;
+    var it = dir.iterate();
+    while (try it.next()) |entry| {
+        switch (entry.kind) {
+            .file => {
+                var file = dir.openFile(entry.name, .{}) catch continue;
+                defer file.close();
+                const stat = file.stat() catch continue;
+                latest = @max(latest, stat.mtime);
+            },
+            .directory => {
+                if (std.mem.eql(u8, entry.name, ".") or std.mem.eql(u8, entry.name, "..")) continue;
+                var child = dir.openDir(entry.name, .{ .iterate = true }) catch continue;
+                defer child.close();
+                latest = @max(latest, try scanThemeDirStamp(&child));
+            },
+            else => {},
+        }
+    }
+    return latest;
+}
+
+fn scanThemePackStamp(path: []const u8) ?i128 {
+    var dir = std.fs.cwd().openDir(path, .{ .iterate = true }) catch return null;
+    defer dir.close();
+    return scanThemeDirStamp(&dir) catch null;
+}
+
 const App = struct {
     allocator: std.mem.Allocator,
     window: *c.SDL_Window,
@@ -1095,6 +1173,8 @@ const App = struct {
     credential_store: credential_store_mod.CredentialStore,
 
     theme: *const zui.Theme,
+    host_theme_engine: zui.theme_engine.ThemeEngine,
+    shared_theme_engine: zui.ui.theme_engine.theme_engine.ThemeEngine,
     ui_scale: f32 = 1.0,
     metrics_context: ui_draw_context.DrawContext,
     ascii_glyph_width_cache: [128]f32 = [_]f32{-1.0} ** 128,
@@ -1198,6 +1278,9 @@ const App = struct {
     workspace_snapshot: ?workspace.WorkspaceSnapshot = null,
     workspace_snapshot_stale: bool = false,
     workspace_snapshot_restore_attempted: bool = false,
+    theme_pack_entries: std.ArrayListUnmanaged(ThemePackEntry) = .{},
+    theme_pack_watch_next_scan_ms: i64 = 0,
+    theme_pack_watch_stamp_ns: i128 = 0,
 
     pub fn init(allocator: std.mem.Allocator) !App {
         panels_bridge.assertAvailable();
@@ -1299,19 +1382,13 @@ const App = struct {
         if (config.selectedAgent()) |value| {
             settings_panel.default_agent.appendSlice(allocator, value) catch {};
         }
-        if (config.ui_theme) |value| {
-            settings_panel.ui_theme.clearRetainingCapacity();
-            settings_panel.ui_theme.appendSlice(allocator, value) catch {};
+        settings_panel.theme_mode = settingsThemeModeFromConfig(config.theme_mode);
+        settings_panel.theme_profile = settingsThemeProfileFromConfig(config.theme_profile);
+        if (config.theme_pack) |value| {
+            settings_panel.theme_pack.clearRetainingCapacity();
+            settings_panel.theme_pack.appendSlice(allocator, value) catch {};
         }
-        if (config.ui_profile) |value| {
-            settings_panel.ui_profile.clearRetainingCapacity();
-            settings_panel.ui_profile.appendSlice(allocator, value) catch {};
-        }
-        if (config.ui_theme_pack) |value| {
-            settings_panel.ui_theme_pack.clearRetainingCapacity();
-            settings_panel.ui_theme_pack.appendSlice(allocator, value) catch {};
-        }
-        settings_panel.watch_theme_pack = config.ui_watch_theme_pack;
+        settings_panel.watch_theme_pack = config.watch_theme_pack;
         settings_panel.ws_verbose_logs = config.gui_verbose_ws_logs;
         settings_panel.auto_connect_on_launch = config.auto_connect_on_launch;
         settings_panel.terminal_backend_kind = terminal_render_backend.Backend.parseKind(
@@ -1328,6 +1405,11 @@ const App = struct {
             .agent_registry = undefined,
             .status_text = try allocator.dupe(u8, "Not connected"),
             .theme = zui.theme.current(),
+            .host_theme_engine = zui.theme_engine.ThemeEngine.init(allocator, zui.theme_engine.PlatformCaps.defaultForTarget()),
+            .shared_theme_engine = zui.ui.theme_engine.theme_engine.ThemeEngine.init(
+                allocator,
+                zui.ui.theme_engine.profile.PlatformCaps.defaultForTarget(),
+            ),
             .ui_scale = 1.0,
             .metrics_context = undefined,
             .config = config,
@@ -1352,7 +1434,8 @@ const App = struct {
         app.debug_search_filter.appendSlice(allocator, "") catch {};
         app.perf_benchmark_label_input.appendSlice(allocator, "") catch {};
         app.contract_invoke_payload.appendSlice(allocator, "{}") catch {};
-        app.applyThemeFromSettings();
+        app.refreshThemePackEntries();
+        app.applyThemeSettings(false);
         app.metrics_context = ui_draw_context.DrawContext.init(
             allocator,
             .{ .direct = .{} },
@@ -1485,6 +1568,9 @@ const App = struct {
         self.credential_store.deinit();
         self.client_context.deinit();
         self.agent_registry.deinit(self.allocator);
+        self.clearThemePackEntries();
+        self.shared_theme_engine.deinit();
+        self.host_theme_engine.deinit();
 
         self.metrics_context.deinit();
         self.ui_commands.deinit();
@@ -1533,6 +1619,8 @@ const App = struct {
                 self.closeUiWindowById(polled.window_close_id);
             }
 
+            self.pollThemePackWatcher();
+
             var requested_spawn_window = false;
             var i: usize = 0;
             while (i < self.ui_windows.items.len) : (i += 1) {
@@ -1563,6 +1651,13 @@ const App = struct {
                 } else {
                     self.ui_scale = dpi_scale;
                 }
+                var themed_fb_w: c_int = 0;
+                var themed_fb_h: c_int = 0;
+                _ = c.SDL_GetWindowSizeInPixels(window.window, &themed_fb_w, &themed_fb_h);
+                self.resolveThemeProfileForWindow(
+                    @intCast(if (themed_fb_w > 0) themed_fb_w else 1),
+                    @intCast(if (themed_fb_h > 0) themed_fb_h else 1),
+                );
                 zui.ui.theme.applyTypography(dpi_scale);
 
                 if (!manager_healthy) {
@@ -4000,9 +4095,7 @@ const App = struct {
             .project_mount_export_name => &self.settings_panel.project_mount_export_name,
             .default_session => &self.settings_panel.default_session,
             .default_agent => &self.settings_panel.default_agent,
-            .ui_theme => &self.settings_panel.ui_theme,
-            .ui_profile => &self.settings_panel.ui_profile,
-            .ui_theme_pack => &self.settings_panel.ui_theme_pack,
+            .theme_pack => &self.settings_panel.theme_pack,
             .node_watch_filter => &self.node_service_watch_filter,
             .node_watch_replay_limit => &self.node_service_watch_replay_limit,
             .debug_search_filter => &self.debug_search_filter,
@@ -4527,9 +4620,10 @@ const App = struct {
                 null,
         );
         self.config.auto_connect_on_launch = self.settings_panel.auto_connect_on_launch;
-        try self.config.setTheme(if (self.settings_panel.ui_theme.items.len > 0) self.settings_panel.ui_theme.items else null);
-        try self.config.setProfile(if (self.settings_panel.ui_profile.items.len > 0) self.settings_panel.ui_profile.items else null);
-        try self.config.setThemePack(if (self.settings_panel.ui_theme_pack.items.len > 0) self.settings_panel.ui_theme_pack.items else null);
+        self.config.setThemeMode(configThemeModeFromSettings(self.settings_panel.theme_mode));
+        self.config.setThemeProfile(configThemeProfileFromSettings(self.settings_panel.theme_profile));
+        try self.config.setThemePack(if (self.settings_panel.theme_pack.items.len > 0) self.settings_panel.theme_pack.items else null);
+        _ = self.config.rememberThemePack(self.effectiveThemePackPath());
         self.config.setWatchThemePack(self.settings_panel.watch_theme_pack);
         try self.config.setTerminalBackend(terminal_render_backend.Backend.kindName(self.settings_panel.terminal_backend_kind));
         self.config.gui_verbose_ws_logs = self.settings_panel.ws_verbose_logs;
@@ -4548,7 +4642,7 @@ const App = struct {
         try self.config.save();
 
         self.applySelectedTerminalBackend();
-        self.applyThemeFromSettings();
+        self.applyThemeSettings(false);
     }
 
     fn clearWorkspaceData(self: *App) void {
@@ -6031,26 +6125,269 @@ const App = struct {
         self.clearWorkspaceError();
     }
 
-    fn applyThemeFromSettings(self: *App) void {
-        const label = if (self.settings_panel.ui_theme.items.len > 0)
-            self.settings_panel.ui_theme.items
+    fn rawThemePackPath(self: *const App) ?[]const u8 {
+        return if (self.settings_panel.theme_pack.items.len > 0)
+            self.settings_panel.theme_pack.items
         else
             null;
-        const mode: zui.theme.Mode = if (label) |value|
-            if (std.ascii.eqlIgnoreCase(value, "dark"))
-                .dark
-            else
-                .light
-        else
-            .light;
-        zui.theme.setMode(mode);
-        const ui_mode: zui.ui.theme.Mode = switch (mode) {
+    }
+
+    fn effectiveThemePackPath(self: *const App) []const u8 {
+        return self.rawThemePackPath() orelse "themes/zsc_modern_ai";
+    }
+
+    fn effectiveThemeMode(self: *const App) zui.theme.Mode {
+        const pack_default: zui.theme.Mode = switch (zui.ui.theme_engine.runtime.getPackDefaultMode() orelse .dark) {
             .light => .light,
             .dark => .dark,
         };
-        zui.ui.theme.setMode(ui_mode);
+        if (zui.ui.theme_engine.runtime.getPackModeLockToDefault()) return pack_default;
+        return switch (self.settings_panel.theme_mode) {
+            .pack_default => pack_default,
+            .light => .light,
+            .dark => .dark,
+        };
+    }
+
+    fn resolveThemeProfileForWindow(self: *App, fb_width: u32, fb_height: u32) void {
+        const profile_label = themeProfileLabel(self.settings_panel.theme_profile);
+        self.shared_theme_engine.resolveProfileFromConfig(fb_width, fb_height, profile_label);
+        self.host_theme_engine.resolveProfileFromConfig(fb_width, fb_height, profile_label);
+    }
+
+    fn applyThemeSettings(self: *App, force_reload: bool) void {
+        const pack_path = self.effectiveThemePackPath();
+        self.shared_theme_engine.applyThemePackDirFromPath(pack_path, force_reload) catch |err| {
+            std.log.warn("Failed to apply shared theme pack {s}: {s}", .{ pack_path, @errorName(err) });
+        };
+        self.host_theme_engine.loadAndApplyThemePackDir(pack_path) catch |err| {
+            std.log.warn("Failed to apply host theme pack {s}: {s}", .{ pack_path, @errorName(err) });
+        };
+
+        const mode = self.effectiveThemeMode();
+        zui.theme.setMode(mode);
+        zui.ui.theme.setMode(switch (mode) {
+            .light => .light,
+            .dark => .dark,
+        });
+        zui.ui.theme.apply();
         self.theme = zui.theme.current();
+        self.syncThemePackWatchStamp();
         self.invalidateGlyphWidthCache();
+    }
+
+    fn syncThemePackWatchStamp(self: *App) void {
+        self.theme_pack_watch_stamp_ns = scanThemePackStamp(self.effectiveThemePackPath()) orelse 0;
+        self.theme_pack_watch_next_scan_ms = std.time.milliTimestamp() + 750;
+    }
+
+    fn pollThemePackWatcher(self: *App) void {
+        if (!self.settings_panel.watch_theme_pack) {
+            self.theme_pack_watch_stamp_ns = 0;
+            return;
+        }
+
+        const now_ms = std.time.milliTimestamp();
+        if (now_ms < self.theme_pack_watch_next_scan_ms) return;
+        self.theme_pack_watch_next_scan_ms = now_ms + 750;
+
+        const stamp = scanThemePackStamp(self.effectiveThemePackPath()) orelse return;
+        if (self.theme_pack_watch_stamp_ns == 0) {
+            self.theme_pack_watch_stamp_ns = stamp;
+            return;
+        }
+        if (stamp > self.theme_pack_watch_stamp_ns) {
+            self.theme_pack_watch_stamp_ns = stamp;
+            self.applyThemeSettings(true);
+        }
+    }
+
+    fn clearThemePackEntries(self: *App) void {
+        for (self.theme_pack_entries.items) |*entry| entry.deinit(self.allocator);
+        self.theme_pack_entries.deinit(self.allocator);
+        self.theme_pack_entries = .{};
+    }
+
+    fn refreshThemePackEntries(self: *App) void {
+        self.clearThemePackEntries();
+        if (builtin.target.os.tag == .emscripten or builtin.target.os.tag == .wasi) return;
+
+        var themes_dir = std.fs.cwd().openDir("themes", .{ .iterate = true }) catch return;
+        defer themes_dir.close();
+
+        var it = themes_dir.iterate();
+        while (it.next() catch null) |entry| {
+            if (entry.kind != .directory or entry.name.len == 0) continue;
+
+            var pack_dir = themes_dir.openDir(entry.name, .{}) catch continue;
+            defer pack_dir.close();
+            var manifest = pack_dir.openFile("manifest.json", .{}) catch continue;
+            manifest.close();
+
+            const name = self.allocator.dupe(u8, entry.name) catch continue;
+            self.theme_pack_entries.append(self.allocator, .{ .name = name }) catch {
+                self.allocator.free(name);
+                break;
+            };
+        }
+
+        if (self.theme_pack_entries.items.len > 1) {
+            const Ctx = struct {};
+            std.sort.pdq(ThemePackEntry, self.theme_pack_entries.items, Ctx{}, struct {
+                fn lessThan(_: Ctx, a: ThemePackEntry, b: ThemePackEntry) bool {
+                    return std.mem.lessThan(u8, a.name, b.name);
+                }
+            }.lessThan);
+        }
+    }
+
+    fn openThemePackBrowseLocation(self: *App) void {
+        const target = self.rawThemePackPath() orelse "themes";
+        const argv = switch (builtin.target.os.tag) {
+            .windows => [_][]const u8{ "explorer.exe", target },
+            .macos => [_][]const u8{ "open", target },
+            else => [_][]const u8{ "xdg-open", target },
+        };
+        var child = std.process.Child.init(&argv, self.allocator);
+        _ = child.spawn() catch {};
+    }
+
+    fn sharedStyleSheet(self: *const App) zui.ui.theme_engine.style_sheet.StyleSheet {
+        _ = self;
+        return zui.ui.theme_engine.runtime.getStyleSheet();
+    }
+
+    fn connectionStatusColors(self: *const App) struct { fill: [4]f32, border: [4]f32, text: [4]f32 } {
+        const ss = self.sharedStyleSheet();
+        const tone = switch (self.connection_state) {
+            .disconnected => ss.status.danger,
+            .connecting => ss.status.warning,
+            .connected => ss.status.success,
+            .error_state => ss.status.info,
+        };
+        const fallback_fill = switch (self.connection_state) {
+            .disconnected => zcolors.rgba(200, 80, 80, 255),
+            .connecting => zcolors.rgba(220, 200, 60, 255),
+            .connected => zcolors.rgba(90, 210, 90, 255),
+            .error_state => zcolors.rgba(230, 120, 70, 255),
+        };
+        return .{
+            .fill = tone.fill orelse fallback_fill,
+            .border = tone.border orelse zcolors.blend(fallback_fill, self.theme.colors.border, 0.25),
+            .text = tone.text orelse self.theme.colors.text_primary,
+        };
+    }
+
+    fn syntaxThemeColor(self: *const App, kind: JsonTokenKind) [4]f32 {
+        const syntax = self.sharedStyleSheet().syntax;
+        return switch (kind) {
+            .key => syntax.key orelse zcolors.blend(self.theme.colors.text_primary, self.theme.colors.primary, 0.5),
+            .string => syntax.string orelse zcolors.rgba(48, 140, 92, 255),
+            .number => syntax.number orelse zcolors.rgba(193, 126, 54, 255),
+            .keyword => syntax.keyword orelse zcolors.rgba(137, 88, 186, 255),
+            .punctuation => syntax.punctuation orelse self.theme.colors.text_secondary,
+            .plain => syntax.plain orelse self.theme.colors.text_primary,
+        };
+    }
+
+    fn chartSeriesThemeColor(self: *const App, idx: usize) [4]f32 {
+        const charts = self.sharedStyleSheet().charts;
+        return switch (idx) {
+            0 => charts.series_1 orelse zcolors.rgba(92, 173, 255, 255),
+            1 => charts.series_2 orelse zcolors.rgba(255, 170, 72, 255),
+            2 => charts.series_3 orelse zcolors.rgba(175, 122, 255, 255),
+            3 => charts.series_4 orelse zcolors.rgba(98, 205, 128, 255),
+            4 => charts.series_5 orelse self.theme.colors.primary,
+            5 => charts.series_6 orelse self.theme.colors.primary,
+            else => self.theme.colors.primary,
+        };
+    }
+
+    fn textInputStateStyle(
+        self: *const App,
+        state: widgets.text_input.TextInputState,
+        opts: widgets.text_input.Options,
+    ) zui.ui.theme_engine.style_sheet.TextInputStateStyle {
+        const style = self.sharedStyleSheet().text_input;
+        if (opts.disabled) return style.states.disabled;
+        if (opts.read_only) return style.states.read_only;
+        if (state.focused) return style.states.focused;
+        if (state.hovered) return style.states.hover;
+        return .{};
+    }
+
+    fn textInputFillPaint(
+        self: *const App,
+        state: widgets.text_input.TextInputState,
+        opts: widgets.text_input.Options,
+    ) Paint {
+        const style = self.sharedStyleSheet().text_input;
+        const override = self.textInputStateStyle(state, opts);
+        if (override.fill) |paint| return paint;
+        if (style.fill) |paint| return paint;
+        if (opts.disabled) return Paint{ .solid = zcolors.withAlpha(self.theme.colors.surface, 0.5) };
+        if (opts.read_only) return Paint{ .solid = self.theme.colors.surface };
+        if (state.focused) return Paint{ .solid = zcolors.blend(self.theme.colors.background, self.theme.colors.primary, 0.05) };
+        if (state.hovered) return Paint{ .solid = zcolors.blend(self.theme.colors.background, self.theme.colors.primary, 0.03) };
+        return Paint{ .solid = self.theme.colors.background };
+    }
+
+    fn textInputBorderColor(
+        self: *const App,
+        state: widgets.text_input.TextInputState,
+        opts: widgets.text_input.Options,
+    ) [4]f32 {
+        const style = self.sharedStyleSheet().text_input;
+        const override = self.textInputStateStyle(state, opts);
+        if (override.border) |color| return color;
+        if (style.border) |color| return color;
+        if (opts.disabled) return zcolors.withAlpha(self.theme.colors.border, 0.3);
+        if (state.focused) return self.theme.colors.primary;
+        if (state.hovered) return zcolors.blend(self.theme.colors.border, self.theme.colors.primary, 0.2);
+        return self.theme.colors.border;
+    }
+
+    fn textInputTextColor(
+        self: *const App,
+        state: widgets.text_input.TextInputState,
+        opts: widgets.text_input.Options,
+    ) [4]f32 {
+        const style = self.sharedStyleSheet().text_input;
+        const override = self.textInputStateStyle(state, opts);
+        if (override.text) |color| return color;
+        if (style.text) |color| return color;
+        if (opts.disabled) return zcolors.withAlpha(self.theme.colors.text_primary, 0.45);
+        return self.theme.colors.text_primary;
+    }
+
+    fn textInputPlaceholderColor(
+        self: *const App,
+        state: widgets.text_input.TextInputState,
+        opts: widgets.text_input.Options,
+    ) [4]f32 {
+        const style = self.sharedStyleSheet().text_input;
+        const override = self.textInputStateStyle(state, opts);
+        return override.placeholder orelse style.placeholder orelse self.theme.colors.text_secondary;
+    }
+
+    fn textInputSelectionColor(
+        self: *const App,
+        state: widgets.text_input.TextInputState,
+        opts: widgets.text_input.Options,
+    ) [4]f32 {
+        const style = self.sharedStyleSheet().text_input;
+        const override = self.textInputStateStyle(state, opts);
+        return override.selection orelse style.selection orelse zcolors.withAlpha(self.theme.colors.primary, 0.3);
+    }
+
+    fn textInputCaretColor(
+        self: *const App,
+        state: widgets.text_input.TextInputState,
+        opts: widgets.text_input.Options,
+    ) [4]f32 {
+        const style = self.sharedStyleSheet().text_input;
+        const override = self.textInputStateStyle(state, opts);
+        return override.caret orelse style.caret orelse self.theme.colors.primary;
     }
 
     fn invalidateGlyphWidthCache(self: *App) void {
@@ -6228,10 +6565,18 @@ const App = struct {
             content_rect.height(),
         });
 
-        self.ui_commands.pushRect(
-            .{ .min = .{ 0, 0 }, .max = .{ @floatFromInt(fb_width), @floatFromInt(fb_height) } },
-            .{ .fill = self.theme.colors.background },
+        const shell = self.sharedStyleSheet().shell;
+        const surfaces = self.sharedStyleSheet().surfaces;
+        const full_rect = Rect.fromXYWH(0, 0, @floatFromInt(fb_width), @floatFromInt(fb_height));
+        self.drawPaintRect(
+            full_rect,
+            surfaces.background orelse Paint{ .solid = self.theme.colors.background },
         );
+        self.drawPaintRect(
+            content_rect,
+            shell.dock_fill orelse surfaces.surface orelse Paint{ .solid = self.theme.colors.surface },
+        );
+        if (shell.dock_border) |dock_border| self.drawRect(content_rect, dock_border);
 
         const layout = self.panelLayoutMetrics();
         const pad = layout.inset;
@@ -6251,10 +6596,12 @@ const App = struct {
             @max(1.0, content_rect.height() - pad * 2.0),
         );
 
-        self.drawSurfacePanel(left_rect);
-        self.drawRect(left_rect, self.theme.colors.border);
-        self.drawSurfacePanel(right_rect);
-        self.drawRect(right_rect, self.theme.colors.border);
+        const sidebar_fill = shell.sidebar_fill orelse surfaces.surface orelse Paint{ .solid = self.theme.colors.surface };
+        const sidebar_border = self.sharedStyleSheet().panel.border orelse self.theme.colors.border;
+        self.drawPaintRect(left_rect, sidebar_fill);
+        self.drawRect(left_rect, sidebar_border);
+        self.drawPaintRect(right_rect, sidebar_fill);
+        self.drawRect(right_rect, sidebar_border);
 
         var left_y = left_rect.min[1] + pad;
         const title = "Spider Web Connections";
@@ -6568,11 +6915,19 @@ const App = struct {
             .{ @floatFromInt(fb_width), dock_height },
         );
 
-        // Draw background
-        self.ui_commands.pushRect(
-            .{ .min = .{ 0, 0 }, .max = .{ @floatFromInt(fb_width), @floatFromInt(fb_height) } },
-            .{ .fill = self.theme.colors.background },
+        const shell = self.sharedStyleSheet().shell;
+        const surfaces = self.sharedStyleSheet().surfaces;
+        const full_rect = Rect.fromXYWH(0, 0, @floatFromInt(fb_width), @floatFromInt(fb_height));
+        const viewport_rect = Rect{ .min = viewport.min, .max = viewport.max };
+        self.drawPaintRect(
+            full_rect,
+            surfaces.background orelse Paint{ .solid = self.theme.colors.background },
         );
+        self.drawPaintRect(
+            viewport_rect,
+            shell.dock_fill orelse surfaces.surface orelse Paint{ .solid = self.theme.colors.surface },
+        );
+        if (shell.dock_border) |dock_border| self.drawRect(viewport_rect, dock_border);
 
         ui_window.ui_state.last_dock_content_rect = viewport;
 
@@ -6665,10 +7020,13 @@ const App = struct {
         const layout = self.panelLayoutMetrics();
         const bar_h = self.windowMenuBarHeight();
         const bar_rect = Rect.fromXYWH(0, 0, @floatFromInt(fb_width), bar_h);
-        self.ui_commands.pushRect(
-            .{ .min = bar_rect.min, .max = bar_rect.max },
-            .{ .fill = self.theme.colors.background, .stroke = self.theme.colors.border },
+        const shell = self.sharedStyleSheet().shell;
+        const surfaces = self.sharedStyleSheet().surfaces;
+        self.drawPaintRect(
+            bar_rect,
+            shell.menu_bar_fill orelse surfaces.menu_bar orelse Paint{ .solid = self.theme.colors.background },
         );
+        self.drawRect(bar_rect, self.theme.colors.border);
 
         const domains: []const IdeMenuDomain = if (self.ui_stage == .launcher)
             &[_]IdeMenuDomain{ .file, .help }
@@ -7949,6 +8307,16 @@ const App = struct {
             .focused_field = settingsFocusFieldToExternal(self.settings_panel.focused_field),
             .scroll_y = self.settings_panel.settings_scroll_y,
         };
+        var model = self.launcherSettingsModel();
+        var meta_buf: [256]u8 = undefined;
+        model.theme_pack_meta_text = self.themePackMetaText(&meta_buf);
+        var quick_buf: [4]panels_bridge.ThemePackQuickPickView = undefined;
+        var recent_buf: [8]panels_bridge.ThemePackQuickPickView = undefined;
+        var available_buf: [16]panels_bridge.ThemePackQuickPickView = undefined;
+        const picks = self.populateThemePackQuickPicks(&quick_buf, &recent_buf, &available_buf);
+        model.theme_pack_quick_picks = picks.quick;
+        model.theme_pack_recent = picks.recent;
+        model.theme_pack_available = picks.available;
         const action = LauncherSettingsPanel.draw(
             host,
             panel_rect,
@@ -7958,14 +8326,12 @@ const App = struct {
                 .text_primary = self.theme.colors.text_primary,
                 .text_secondary = self.theme.colors.text_secondary,
             },
-            self.launcherSettingsModel(),
+            model,
             .{
                 .server_url = self.settings_panel.server_url.items,
                 .default_session = self.settings_panel.default_session.items,
                 .default_agent = self.settings_panel.default_agent.items,
-                .ui_theme = self.settings_panel.ui_theme.items,
-                .ui_profile = self.settings_panel.ui_profile.items,
-                .ui_theme_pack = self.settings_panel.ui_theme_pack.items,
+                .theme_pack = self.settings_panel.theme_pack.items,
             },
             .{
                 .mouse_x = self.mouse_x,
@@ -8001,6 +8367,16 @@ const App = struct {
             .focused_field = settingsFocusFieldToExternal(self.settings_panel.focused_field),
             .scroll_y = self.settings_panel.settings_scroll_y,
         };
+        var model = self.launcherSettingsModel();
+        var meta_buf: [256]u8 = undefined;
+        model.theme_pack_meta_text = self.themePackMetaText(&meta_buf);
+        var quick_buf: [4]panels_bridge.ThemePackQuickPickView = undefined;
+        var recent_buf: [8]panels_bridge.ThemePackQuickPickView = undefined;
+        var available_buf: [16]panels_bridge.ThemePackQuickPickView = undefined;
+        const picks = self.populateThemePackQuickPicks(&quick_buf, &recent_buf, &available_buf);
+        model.theme_pack_quick_picks = picks.quick;
+        model.theme_pack_recent = picks.recent;
+        model.theme_pack_available = picks.available;
         const action = LauncherSettingsPanel.draw(
             host,
             panel_rect,
@@ -8010,11 +8386,9 @@ const App = struct {
                 .text_primary = self.theme.colors.text_primary,
                 .text_secondary = self.theme.colors.text_secondary,
             },
-            self.launcherSettingsModel(),
+            model,
             .{
-                .ui_theme = self.settings_panel.ui_theme.items,
-                .ui_profile = self.settings_panel.ui_profile.items,
-                .ui_theme_pack = self.settings_panel.ui_theme_pack.items,
+                .theme_pack = self.settings_panel.theme_pack.items,
             },
             .{
                 .mouse_x = self.mouse_x,
@@ -10301,6 +10675,7 @@ const App = struct {
             .plain_text => .plain_text,
             .ghostty_vt => .ghostty_vt,
         };
+        const pack_status = zui.ui.theme_engine.runtime.getPackStatus();
         return .{
             .connection_state = connection_state,
             .active_role = active_role,
@@ -10308,7 +10683,106 @@ const App = struct {
             .auto_connect_on_launch = self.settings_panel.auto_connect_on_launch,
             .ws_verbose_logs = self.settings_panel.ws_verbose_logs,
             .terminal_backend = terminal_backend,
+            .theme_mode = self.settings_panel.theme_mode,
+            .theme_mode_locked = zui.ui.theme_engine.runtime.getPackModeLockToDefault(),
+            .theme_profile = self.settings_panel.theme_profile,
+            .theme_pack_status_kind = switch (pack_status.kind) {
+                .none => .idle,
+                .fetching => .fetching,
+                .ok => .ok,
+                .failed => .failed,
+            },
+            .theme_pack_status_text = pack_status.msg,
+            .theme_pack_watch_supported = !(builtin.target.os.tag == .emscripten or builtin.target.os.tag == .wasi),
+            .theme_pack_reload_supported = true,
+            .theme_pack_browse_supported = true,
+            .theme_pack_refresh_supported = !(builtin.target.os.tag == .emscripten or builtin.target.os.tag == .wasi),
         };
+    }
+
+    fn themePackSelected(self: *const App, path: []const u8) bool {
+        return std.mem.eql(u8, self.effectiveThemePackPath(), path);
+    }
+
+    fn themePackChipLabel(path: []const u8) []const u8 {
+        const themes_prefix = "themes/";
+        if (std.mem.startsWith(u8, path, themes_prefix)) return path[themes_prefix.len..];
+        const idx = std.mem.lastIndexOfAny(u8, path, "/\\") orelse return path;
+        return if (idx + 1 < path.len) path[idx + 1 ..] else path;
+    }
+
+    fn themePackMetaText(self: *const App, buf: []u8) ?[]const u8 {
+        _ = self;
+        const meta: UiThemePackMeta = zui.ui.theme_engine.runtime.getPackMeta() orelse return null;
+        const name = if (meta.name.len > 0) meta.name else meta.id;
+        return std.fmt.bufPrint(
+            buf,
+            "Pack: {s} ({s}) | defaults: {s}/{s}",
+            .{ name, meta.author, meta.defaults_variant, meta.defaults_profile },
+        ) catch null;
+    }
+
+    fn populateThemePackQuickPicks(
+        self: *const App,
+        quick_buf: []panels_bridge.ThemePackQuickPickView,
+        recent_buf: []panels_bridge.ThemePackQuickPickView,
+        available_buf: []panels_bridge.ThemePackQuickPickView,
+    ) struct {
+        quick: []const panels_bridge.ThemePackQuickPickView,
+        recent: []const panels_bridge.ThemePackQuickPickView,
+        available: []const panels_bridge.ThemePackQuickPickView,
+    } {
+        const builtins = [_]struct { label: []const u8, path: []const u8 }{
+            .{ .label = "Modern AI", .path = "themes/zsc_modern_ai" },
+        };
+
+        var quick_len: usize = 0;
+        for (builtins) |pick| {
+            if (quick_len >= quick_buf.len) break;
+            quick_buf[quick_len] = .{
+                .label = pick.label,
+                .value = pick.path,
+                .selected = self.themePackSelected(pick.path),
+            };
+            quick_len += 1;
+        }
+
+        var recent_len: usize = 0;
+        const recent = self.config.theme_pack_recent orelse &[_][]const u8{};
+        for (recent) |item| {
+            if (recent_len >= recent_buf.len) break;
+            recent_buf[recent_len] = .{
+                .label = themePackChipLabel(item),
+                .value = item,
+                .selected = self.themePackSelected(item),
+            };
+            recent_len += 1;
+        }
+
+        var available_len: usize = 0;
+        for (self.theme_pack_entries.items) |entry| {
+            if (available_len >= available_buf.len) break;
+            if (std.mem.startsWith(u8, entry.name, "zsc_") and !std.mem.eql(u8, entry.name, "zsc_modern_ai")) continue;
+            var full_path_buf: [256]u8 = undefined;
+            const full_path = std.fmt.bufPrint(&full_path_buf, "themes/{s}", .{entry.name}) catch entry.name;
+            available_buf[available_len] = .{
+                .label = entry.name,
+                .value = entry.name,
+                .selected = self.themePackSelected(full_path),
+            };
+            available_len += 1;
+        }
+
+        return .{
+            .quick = quick_buf[0..quick_len],
+            .recent = recent_buf[0..recent_len],
+            .available = available_buf[0..available_len],
+        };
+    }
+
+    fn replaceSettingsText(self: *App, buf: *std.ArrayList(u8), value: ?[]const u8) void {
+        buf.clearRetainingCapacity();
+        if (value) |text| buf.appendSlice(self.allocator, text) catch {};
     }
 
     fn performLauncherSettingsAction(self: *App, manager: *panel_manager.PanelManager, action: panels_bridge.LauncherSettingsAction) void {
@@ -10322,8 +10796,46 @@ const App = struct {
                     std.log.err("Failed to set connect role {s}: {s}", .{ @tagName(role), @errorName(err) });
                 };
             },
+            .set_theme_mode => |mode| {
+                self.settings_panel.theme_mode = mode;
+                self.applyThemeSettings(false);
+            },
+            .set_theme_profile => |profile| {
+                self.settings_panel.theme_profile = profile;
+                self.applyThemeSettings(false);
+            },
             .toggle_watch_theme_pack => {
                 self.settings_panel.watch_theme_pack = !self.settings_panel.watch_theme_pack;
+                if (self.settings_panel.watch_theme_pack) self.syncThemePackWatchStamp();
+            },
+            .apply_theme_pack_input => {
+                _ = self.config.rememberThemePack(self.effectiveThemePackPath());
+                self.applyThemeSettings(false);
+            },
+            .select_theme_pack => |value| {
+                if (std.mem.startsWith(u8, value, "themes/") or std.mem.indexOfAny(u8, value, "/\\") != null) {
+                    self.replaceSettingsText(&self.settings_panel.theme_pack, value);
+                } else {
+                    var buf: [256]u8 = undefined;
+                    const path = std.fmt.bufPrint(&buf, "themes/{s}", .{value}) catch value;
+                    self.replaceSettingsText(&self.settings_panel.theme_pack, path);
+                }
+                _ = self.config.rememberThemePack(self.effectiveThemePackPath());
+                self.applyThemeSettings(false);
+            },
+            .reload_theme_pack => {
+                _ = self.config.rememberThemePack(self.effectiveThemePackPath());
+                self.applyThemeSettings(true);
+            },
+            .disable_theme_pack => {
+                self.replaceSettingsText(&self.settings_panel.theme_pack, null);
+                self.applyThemeSettings(false);
+            },
+            .browse_theme_pack => {
+                self.openThemePackBrowseLocation();
+            },
+            .refresh_theme_pack_list => {
+                self.refreshThemePackEntries();
             },
             .toggle_auto_connect_on_launch => {
                 self.settings_panel.auto_connect_on_launch = !self.settings_panel.auto_connect_on_launch;
@@ -10703,22 +11215,17 @@ const App = struct {
                 self.theme.colors.text_secondary,
             );
             var points_ctx = SparklinePointsCtx{ .points = chart.points };
-            const stroke_color = switch (idx) {
-                0 => zcolors.rgba(92, 173, 255, 255),
-                1 => zcolors.rgba(255, 170, 72, 255),
-                2 => zcolors.rgba(175, 122, 255, 255),
-                3 => zcolors.rgba(98, 205, 128, 255),
-                else => self.theme.colors.primary,
-            };
+            const charts = self.sharedStyleSheet().charts;
+            const stroke_color = self.chartSeriesThemeColor(idx);
             widgets.sparkline.draw(
                 &self.ui_commands,
                 chart_rect,
                 .{ .ctx = @as(*const anyopaque, @ptrCast(&points_ctx)), .count = chart.points.len, .at = &sparklinePointAt },
                 .{
                     .stroke_color = stroke_color,
-                    .fill_color = zcolors.withAlpha(stroke_color, 0.28),
-                    .background_color = zcolors.withAlpha(self.theme.colors.surface, 0.96),
-                    .border_color = self.theme.colors.border,
+                    .fill_color = zcolors.withAlpha(stroke_color, charts.fill_alpha orelse 0.28),
+                    .background_color = charts.background orelse zcolors.withAlpha(self.theme.colors.surface, 0.96),
+                    .border_color = charts.border orelse self.theme.colors.border,
                     .max_columns = PERF_SPARKLINE_MAX_COLUMNS,
                 },
             );
@@ -11030,14 +11537,7 @@ const App = struct {
     }
 
     fn jsonTokenColor(self: *App, kind: JsonTokenKind) [4]f32 {
-        return switch (kind) {
-            .key => zcolors.blend(self.theme.colors.text_primary, self.theme.colors.primary, 0.5),
-            .string => zcolors.rgba(48, 140, 92, 255),
-            .number => zcolors.rgba(193, 126, 54, 255),
-            .keyword => zcolors.rgba(137, 88, 186, 255),
-            .punctuation => self.theme.colors.text_secondary,
-            .plain => self.theme.colors.text_primary,
-        };
+        return self.syntaxThemeColor(kind);
     }
 
     fn wrappedLineBreak(self: *App, wrap_x: f32, cursor_x: *f32, cursor_y: *f32, rows: *usize) void {
@@ -12009,28 +12509,21 @@ const App = struct {
             .{ fb_w, status_height },
         );
 
-        // Semi-transparent background
-        const bg_color = zcolors.withAlpha(self.theme.colors.background, 0.9);
-        self.ui_commands.pushRect(
-            .{ .min = status_rect.min, .max = status_rect.max },
-            .{ .fill = bg_color },
-        );
+        const shell = self.sharedStyleSheet().shell;
+        const status_panel_rect = Rect{ .min = status_rect.min, .max = status_rect.max };
+        self.drawPaintRect(status_panel_rect, shell.status_bar_fill orelse Paint{ .solid = zcolors.withAlpha(self.theme.colors.background, 0.9) });
+        self.drawRect(status_panel_rect, shell.status_bar_border orelse self.theme.colors.border);
 
         // Status indicator
         const indicator_size: f32 = 8.0 * self.ui_scale;
-        const indicator_color = switch (self.connection_state) {
-            .disconnected => zcolors.rgba(200, 80, 80, 255),
-            .connecting => zcolors.rgba(220, 200, 60, 255),
-            .connected => zcolors.rgba(90, 210, 90, 255),
-            .error_state => zcolors.rgba(230, 120, 70, 255),
-        };
+        const tone = self.connectionStatusColors();
 
         self.ui_commands.pushRect(
             .{
                 .min = .{ status_rect.min[0] + 8, status_rect.min[1] + 8 },
                 .max = .{ status_rect.min[0] + 8 + indicator_size, status_rect.min[1] + 8 + indicator_size },
             },
-            .{ .fill = indicator_color },
+            .{ .fill = tone.fill, .stroke = tone.border },
         );
 
         // Status text
@@ -12038,7 +12531,7 @@ const App = struct {
             status_rect.min[0] + 24,
             status_rect.min[1] + 4,
             self.status_text,
-            self.theme.colors.text_secondary,
+            tone.text,
         );
     }
 
@@ -12050,20 +12543,16 @@ const App = struct {
         const indicator_size = @max(10.0 * self.ui_scale, line_height * 0.58);
         const indicator_y = rect.min[1] + @max(0.0, (rect.height() - indicator_size) * 0.5);
         const indicator = Rect.fromXYWH(rect.min[0] + inner, indicator_y, indicator_size, indicator_size);
-        const dot = switch (self.connection_state) {
-            .disconnected => zcolors.rgba(200, 80, 80, 255),
-            .connecting => zcolors.rgba(220, 200, 60, 255),
-            .connected => zcolors.rgba(90, 210, 90, 255),
-            .error_state => zcolors.rgba(230, 120, 70, 255),
-        };
-        self.drawFilledRect(indicator, dot);
+        const tone = self.connectionStatusColors();
+        self.drawFilledRect(indicator, tone.fill);
+        self.drawRect(indicator, tone.border);
 
         self.drawTextTrimmed(
             indicator.max[0] + inner,
             rect.min[1] + @max(0.0, (rect.height() - line_height) * 0.5),
             rect.width() - (indicator.max[0] - rect.min[0]) - inner * 2.0,
             self.status_text,
-            self.theme.colors.text_primary,
+            tone.text,
         );
     }
 
@@ -12124,16 +12613,18 @@ const App = struct {
             self.setDragMouseCapture(true);
         }
 
-        self.drawFilledRect(track_rect, zcolors.withAlpha(self.theme.colors.border, 0.25));
+        const scrollbar = self.sharedStyleSheet().scrollbar;
+        self.drawFilledRect(track_rect, scrollbar.track orelse zcolors.withAlpha(self.theme.colors.border, 0.25));
         const hovered = thumb_rect.contains(.{ self.mouse_x, self.mouse_y });
         const active = self.form_scroll_drag_target == target;
         const thumb_color = if (active)
-            self.theme.colors.primary
+            (scrollbar.thumb_active orelse self.theme.colors.primary)
         else if (hovered)
-            zcolors.blend(self.theme.colors.border, self.theme.colors.primary, 0.46)
+            (scrollbar.thumb_hover orelse zcolors.blend(self.theme.colors.border, self.theme.colors.primary, 0.46))
         else
-            self.theme.colors.border;
+            (scrollbar.thumb orelse self.theme.colors.border);
         self.drawFilledRect(thumb_rect, thumb_color);
+        if (scrollbar.border) |border| self.drawRect(track_rect, border);
     }
 
     fn drawButtonWidget(self: *App, rect: Rect, label: []const u8, opts: widgets.button.Options) bool {
@@ -12145,36 +12636,60 @@ const App = struct {
             opts,
         );
 
-        var fill: [4]f32 = switch (opts.variant) {
-            .primary => self.theme.colors.primary,
-            .secondary => self.theme.colors.surface,
-            .ghost => zcolors.withAlpha(self.theme.colors.primary, 0.08),
+        const ss = self.sharedStyleSheet();
+        var variant_style = switch (opts.variant) {
+            .primary => ss.button.primary,
+            .secondary => ss.button.secondary,
+            .ghost => ss.button.ghost,
         };
-
-        if (opts.disabled) {
-            fill = zcolors.blend(fill, self.theme.colors.background, 0.45);
-        } else if (state.pressed) {
-            fill = zcolors.blend(fill, zcolors.rgba(255, 255, 255, 255), 0.22);
-        } else if (state.hovered) {
-            fill = zcolors.blend(fill, self.theme.colors.primary, 0.12);
-        }
-
-        self.drawFilledRect(rect, fill);
-
-        var border = self.theme.colors.border;
-        if (state.hovered and !opts.disabled) {
-            border = zcolors.blend(border, self.theme.colors.primary, 0.28);
-        }
-        self.drawRect(rect, border);
-
-        var text_color = switch (opts.variant) {
+        var fill = switch (opts.variant) {
+            .primary => variant_style.fill orelse Paint{ .solid = self.theme.colors.primary },
+            .secondary => variant_style.fill orelse Paint{ .solid = self.theme.colors.surface },
+            .ghost => variant_style.fill orelse Paint{ .solid = zcolors.withAlpha(self.theme.colors.primary, 0.08) },
+        };
+        var border = variant_style.border orelse self.theme.colors.border;
+        var text_color = variant_style.text orelse switch (opts.variant) {
             .primary => zcolors.rgba(255, 255, 255, 255),
             .secondary => self.theme.colors.text_primary,
             .ghost => self.theme.colors.primary,
         };
+
         if (opts.disabled) {
-            text_color = zcolors.withAlpha(self.theme.colors.text_secondary, 0.7);
+            if (variant_style.states.disabled.fill) |paint| fill = paint;
+            if (variant_style.states.disabled.border) |color| border = color;
+            if (variant_style.states.disabled.text) |color| text_color = color;
+            if (!variant_style.states.disabled.isSet()) {
+                fill = switch (fill) {
+                    .solid => |color| Paint{ .solid = zcolors.blend(color, self.theme.colors.background, 0.45) },
+                    else => fill,
+                };
+                text_color = zcolors.withAlpha(self.theme.colors.text_secondary, 0.7);
+            }
+        } else if (state.pressed) {
+            if (variant_style.states.pressed.fill) |paint| fill = paint;
+            if (variant_style.states.pressed.border) |color| border = color;
+            if (variant_style.states.pressed.text) |color| text_color = color;
+            if (!variant_style.states.pressed.isSet()) {
+                fill = switch (fill) {
+                    .solid => |color| Paint{ .solid = zcolors.blend(color, zcolors.rgba(255, 255, 255, 255), 0.22) },
+                    else => fill,
+                };
+            }
+        } else if (state.hovered) {
+            if (variant_style.states.hover.fill) |paint| fill = paint;
+            if (variant_style.states.hover.border) |color| border = color;
+            if (variant_style.states.hover.text) |color| text_color = color;
+            if (!variant_style.states.hover.isSet()) {
+                fill = switch (fill) {
+                    .solid => |color| Paint{ .solid = zcolors.blend(color, self.theme.colors.primary, 0.12) },
+                    else => fill,
+                };
+                border = zcolors.blend(border, self.theme.colors.primary, 0.28);
+            }
         }
+
+        self.drawPaintRect(rect, fill);
+        self.drawRect(rect, border);
         self.drawCenteredText(rect, label, text_color);
 
         return !block_interaction and !opts.disabled and self.mouse_released and rect.contains(.{ self.mouse_x, self.mouse_y });
@@ -12199,8 +12714,8 @@ const App = struct {
         const left_clicked_inside = !suppress_interaction and self.mouse_clicked and rect.contains(mouse_pos) and !opts.disabled;
         const right_clicked_inside = !suppress_interaction and self.mouse_right_clicked and rect.contains(mouse_pos) and !opts.disabled;
 
-        const fill = widgets.text_input.getFillPaint(self.theme, state, opts);
-        const border = widgets.text_input.getBorderColor(self.theme, state, opts);
+        const fill = self.textInputFillPaint(state, opts);
+        const border = self.textInputBorderColor(state, opts);
 
         self.drawPaintRect(rect, fill);
         self.drawRect(rect, border);
@@ -12289,7 +12804,7 @@ const App = struct {
         if (text.len == 0) {
             const placeholder = if (opts.placeholder.len > 0) opts.placeholder else "";
             if (placeholder.len > 0) {
-                self.drawTextTrimmed(text_x, text_y, max_w, placeholder, widgets.text_input.getPlaceholderColor(self.theme));
+                self.drawTextTrimmed(text_x, text_y, max_w, placeholder, self.textInputPlaceholderColor(state, opts));
             }
         } else {
             if (focused) {
@@ -12305,13 +12820,11 @@ const App = struct {
                             @max(0.0, sel_right - sel_left),
                             line_height,
                         );
-                        self.drawFilledRect(sel_rect, widgets.text_input.getSelectionColor(self.theme));
+                        self.drawFilledRect(sel_rect, self.textInputSelectionColor(state, opts));
                     }
                 }
             }
-            var text_color = self.theme.colors.text_primary;
-            if (opts.disabled) text_color = zcolors.withAlpha(text_color, 0.45);
-            self.drawText(text_x, text_y, text[visible_start..], text_color);
+            self.drawText(text_x, text_y, text[visible_start..], self.textInputTextColor(state, opts));
         }
 
         if (focused and !opts.disabled and !opts.read_only) {
@@ -12329,7 +12842,7 @@ const App = struct {
             );
             self.ui_commands.pushRect(
                 .{ .min = caret_rect.min, .max = caret_rect.max },
-                .{ .fill = self.theme.colors.primary },
+                .{ .fill = self.textInputCaretColor(state, opts) },
             );
         }
 
@@ -13848,6 +14361,15 @@ const App = struct {
         return "unknown";
     }
 
+    fn fsrpcVerboseLogsEnabled(self: *const App) bool {
+        return self.settings_panel.ws_verbose_logs;
+    }
+
+    fn logFsrpcVerbose(self: *const App, comptime fmt: []const u8, args: anytype) void {
+        if (!self.fsrpcVerboseLogsEnabled()) return;
+        std.log.info(fmt, args);
+    }
+
     fn sendAndAwaitFsrpc(
         self: *App,
         client: *ws_client_mod.WebSocketClient,
@@ -13856,7 +14378,7 @@ const App = struct {
         timeout_ms: u32,
     ) !FsrpcEnvelope {
         const req_type = fsrpcRequestTypeForLog(request_json);
-        std.log.info(
+        self.logFsrpcVerbose(
             "[GUI][FSRPC] send type={s} tag={d} timeout_ms={d}",
             .{ req_type, tag, timeout_ms },
         );
@@ -13888,7 +14410,7 @@ const App = struct {
             self.allocator.free(raw);
             return error.InvalidResponse;
         };
-        std.log.info(
+        self.logFsrpcVerbose(
             "[GUI][FSRPC] recv type={s} tag={d} bytes={d} alive={}",
             .{ req_type, tag, raw.len, client.isAlive() },
         );
@@ -13979,18 +14501,18 @@ const App = struct {
 
     fn fsrpcBootstrapGui(self: *App, client: *ws_client_mod.WebSocketClient) !void {
         if (self.fsrpc_ready) {
-            std.log.info("[GUI][FSRPC] bootstrap skipped: already ready", .{});
+            self.logFsrpcVerbose("[GUI][FSRPC] bootstrap skipped: already ready", .{});
             return;
         }
 
-        std.log.info("[GUI][FSRPC] bootstrap start", .{});
+        self.logFsrpcVerbose("[GUI][FSRPC] bootstrap start", .{});
 
         try control_plane.ensureUnifiedV2Connection(
             self.allocator,
             client,
             &self.message_counter,
         );
-        std.log.info("[GUI][FSRPC] unified-v2 ready", .{});
+        self.logFsrpcVerbose("[GUI][FSRPC] unified-v2 ready", .{});
 
         const version_tag = self.nextFsrpcTag();
         const version_req = try std.fmt.allocPrint(
@@ -14002,7 +14524,7 @@ const App = struct {
         var version = try self.sendAndAwaitFsrpc(client, version_req, version_tag, FSRPC_DEFAULT_TIMEOUT_MS);
         defer version.deinit(self.allocator);
         try self.ensureFsrpcOk(&version);
-        std.log.info("[GUI][FSRPC] version ok tag={d}", .{version_tag});
+        self.logFsrpcVerbose("[GUI][FSRPC] version ok tag={d}", .{version_tag});
 
         const attach_tag = self.nextFsrpcTag();
         const attach_req = try std.fmt.allocPrint(
@@ -14015,7 +14537,7 @@ const App = struct {
         defer attach.deinit(self.allocator);
         try self.ensureFsrpcOk(&attach);
         self.fsrpc_ready = true;
-        std.log.info("[GUI][FSRPC] bootstrap ready attach_tag={d}", .{attach_tag});
+        self.logFsrpcVerbose("[GUI][FSRPC] bootstrap ready attach_tag={d}", .{attach_tag});
     }
 
     fn fsrpcClunkBestEffort(self: *App, client: *ws_client_mod.WebSocketClient, fid: u32) void {
@@ -14081,14 +14603,14 @@ const App = struct {
     }
 
     fn submitChatJobViaFsrpc(self: *App, client: *ws_client_mod.WebSocketClient, text: []const u8) !SubmitChatJobResult {
-        std.log.info("[GUI][FSRPC] submitChatJobViaFsrpc start text_len={d}", .{text.len});
+        self.logFsrpcVerbose("[GUI][FSRPC] submitChatJobViaFsrpc start text_len={d}", .{text.len});
         try self.fsrpcBootstrapGui(client);
         var chat_paths = try self.discoverScopedChatBindingPathsGui(client);
         defer chat_paths.deinit(self.allocator);
 
         const input_fid = self.nextFsrpcFid();
         defer self.fsrpcClunkBestEffort(client, input_fid);
-        std.log.info("[GUI][FSRPC] chat input fid={d}", .{input_fid});
+        self.logFsrpcVerbose("[GUI][FSRPC] chat input fid={d}", .{input_fid});
         try self.walkPathGui(client, input_fid, chat_paths.input_path);
 
         const open_input_tag = self.nextFsrpcTag();
@@ -14101,7 +14623,7 @@ const App = struct {
         var open_input = try self.sendAndAwaitFsrpc(client, open_input_req, open_input_tag, FSRPC_DEFAULT_TIMEOUT_MS);
         defer open_input.deinit(self.allocator);
         try self.ensureFsrpcOk(&open_input);
-        std.log.info("[GUI][FSRPC] chat input open ok fid={d}", .{input_fid});
+        self.logFsrpcVerbose("[GUI][FSRPC] chat input open ok fid={d}", .{input_fid});
 
         const encoded = try encodeDataB64(self.allocator, text);
         defer self.allocator.free(encoded);
@@ -14130,7 +14652,7 @@ const App = struct {
         const write_payload = try self.getFsrpcPayloadObject(write.parsed.value.object);
         const job_value = write_payload.get("job") orelse return error.InvalidResponse;
         if (job_value != .string) return error.InvalidResponse;
-        std.log.info(
+        self.logFsrpcVerbose(
             "[GUI][FSRPC] chat write ok fid={d} request_id={s} job={s}",
             .{ input_fid, write_request_id, job_value.string },
         );
@@ -16460,9 +16982,10 @@ const App = struct {
     // Drawing helpers
 
     fn drawSurfacePanel(self: *App, rect: Rect) void {
-        const fill = Paint{ .solid = self.theme.colors.surface };
+        const ss = self.sharedStyleSheet();
+        const fill = ss.surfaces.surface orelse ss.panel.fill orelse Paint{ .solid = self.theme.colors.surface };
         self.drawPaintRect(rect, fill);
-        self.drawRect(rect, self.theme.colors.border);
+        self.drawRect(rect, ss.panel.border orelse self.theme.colors.border);
     }
 
     fn drawPaintRect(self: *App, rect: Rect, paint: Paint) void {
