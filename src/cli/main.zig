@@ -1233,6 +1233,10 @@ fn parseWorkspaceBindSpec(raw: []const u8) !WorkspaceBindSpec {
     };
 }
 
+fn effectiveWorkspaceUpTemplateId(workspace_id: ?[]const u8, requested_template_id: ?[]const u8) ?[]const u8 {
+    return requested_template_id orelse if (workspace_id == null) "dev" else null;
+}
+
 fn executeWorkspaceUp(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const client = try getOrCreateClient(allocator, options);
@@ -1243,7 +1247,7 @@ fn executeWorkspaceUp(allocator: std.mem.Allocator, options: args.Options, cmd: 
 
     var positional_project_name: ?[]const u8 = null;
     var explicit_project_id: ?[]const u8 = options.workspace;
-    var template_id: ?[]const u8 = "dev";
+    var requested_template_id: ?[]const u8 = null;
     var activate = true;
     var mounts = std.ArrayListUnmanaged(WorkspaceUpMountSpec){};
     defer mounts.deinit(allocator);
@@ -1282,7 +1286,7 @@ fn executeWorkspaceUp(allocator: std.mem.Allocator, options: args.Options, cmd: 
         if (std.mem.eql(u8, arg, "--template")) {
             i += 1;
             if (i >= cmd.args.len) return error.InvalidArguments;
-            template_id = cmd.args[i];
+            requested_template_id = cmd.args[i];
             continue;
         }
         if (std.mem.startsWith(u8, arg, "--")) return error.InvalidArguments;
@@ -1317,6 +1321,7 @@ fn executeWorkspaceUp(allocator: std.mem.Allocator, options: args.Options, cmd: 
     }
 
     const project_id = explicit_project_id orelse cfg.selectedWorkspace();
+    const template_id = effectiveWorkspaceUpTemplateId(project_id, requested_template_id);
     const project_name: ?[]const u8 = if (positional_project_name) |value|
         value
     else if (project_id == null)
@@ -1423,7 +1428,7 @@ fn executeWorkspaceUp(allocator: std.mem.Allocator, options: args.Options, cmd: 
             "false"},
     );
     try stdout.print("  activate: {s}\n", .{if (activate) "true" else "false"});
-    try stdout.print("  template: {s}\n", .{template_id orelse "dev"});
+    try stdout.print("  template: {s}\n", .{template_id orelse "unchanged"});
     try stdout.print("  mounts requested: {d}\n", .{mounts.items.len});
     try stdout.print("  binds requested: {d}\n", .{binds.items.len});
 
@@ -1436,6 +1441,13 @@ fn executeWorkspaceUp(allocator: std.mem.Allocator, options: args.Options, cmd: 
     );
     defer status.deinit(allocator);
     try printWorkspaceStatus(stdout, &status, false);
+}
+
+test "effectiveWorkspaceUpTemplateId defaults only on create paths" {
+    try std.testing.expectEqualStrings("dev", effectiveWorkspaceUpTemplateId(null, null).?);
+    try std.testing.expectEqualStrings("custom", effectiveWorkspaceUpTemplateId(null, "custom").?);
+    try std.testing.expect(effectiveWorkspaceUpTemplateId("ws-123", null) == null);
+    try std.testing.expectEqualStrings("custom", effectiveWorkspaceUpTemplateId("ws-123", "custom").?);
 }
 
 fn executeWorkspaceDoctor(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
