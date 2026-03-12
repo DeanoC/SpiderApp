@@ -29,7 +29,7 @@ run_alive() {
     log_file="$(mktemp)"
     log "$label"
     set +e
-    timeout "${SMOKE_TIMEOUT_SEC}s" "$@" >"$log_file" 2>&1
+    timeout --kill-after=5s "${SMOKE_TIMEOUT_SEC}s" "$@" >"$log_file" 2>&1
     local rc=$?
     set -e
     if [[ $rc -ne 0 && $rc -ne 124 ]]; then
@@ -39,6 +39,24 @@ run_alive() {
         return 1
     fi
     rm -f "$log_file"
+}
+
+wine_runtime_available() {
+    local probe_log
+    probe_log="$(mktemp)"
+    set +e
+    timeout --kill-after=5s "${SMOKE_TIMEOUT_SEC}s" env WINEDEBUG=-all xvfb-run -a wine cmd /c exit 0 >"$probe_log" 2>&1
+    local rc=$?
+    set -e
+    if [[ $rc -eq 0 ]]; then
+        rm -f "$probe_log"
+        return 0
+    fi
+
+    log "wine runtime probe unavailable (exit=$rc); skipping windows runtime smoke"
+    sed -n '1,20p' "$probe_log" >&2
+    rm -f "$probe_log"
+    return 1
 }
 
 ensure_tools() {
@@ -101,6 +119,9 @@ smoke_windows() {
         echo "[smoke-gui] missing Windows GUI binary: $WIN_GUI_BIN" >&2
         exit 1
     }
+    if ! wine_runtime_available; then
+        return 0
+    fi
 
     run_alive "windows ghostty backend under wine (library missing -> fallback)" env WINEDEBUG=-all xvfb-run -a wine "$WIN_GUI_BIN"
 

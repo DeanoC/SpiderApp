@@ -98,6 +98,9 @@ const PERF_SAMPLE_INTERVAL_MS: i64 = 1_000;
 const PERF_HISTORY_CAPACITY: usize = 600;
 const PERF_SPARKLINE_MAX_COLUMNS: usize = 24;
 const PERF_AUTOMATION_DEFAULT_DURATION_MS: i64 = 12_000;
+const MISSION_REFRESH_INTERVAL_MS: i64 = 5_000;
+const MISSION_PREVIEW_EVENT_COUNT: usize = 4;
+const MISSION_PREVIEW_ARTIFACT_COUNT: usize = 4;
 const TERMINAL_OUTPUT_MAX_BYTES: usize = 512 * 1024;
 const TERMINAL_READ_POLL_INTERVAL_MS: i64 = 120;
 const TERMINAL_READ_TIMEOUT_MS: u32 = 1;
@@ -119,7 +122,7 @@ const ChatWorkspacePanel = zui_panels.chat_workspace_panel;
 const LauncherSettingsPanel = zui_panels.launcher_settings_panel;
 const FilesystemPanel = zui_panels.filesystem_panel;
 const FilesystemToolsPanel = zui_panels.filesystem_tools_panel;
-const ProjectPanel = zui_panels.project_panel;
+const WorkspacePanel = zui_panels.workspace_panel;
 const DebugPanel = zui_panels.debug_panel;
 const DebugEventStreamPanel = zui_panels.debug_event_stream;
 const TerminalPanel = zui_panels.terminal_panel;
@@ -168,6 +171,138 @@ const ConnectSetupHint = struct {
         if (self.message) |value| allocator.free(value);
         if (self.project_id) |value| allocator.free(value);
         if (self.project_vision) |value| allocator.free(value);
+        self.* = undefined;
+    }
+};
+
+const MissionActorView = struct {
+    actor_type: []u8,
+    actor_id: []u8,
+
+    fn deinit(self: *MissionActorView, allocator: std.mem.Allocator) void {
+        allocator.free(self.actor_type);
+        allocator.free(self.actor_id);
+        self.* = undefined;
+    }
+};
+
+const MissionArtifactView = struct {
+    kind: []u8,
+    path: ?[]u8 = null,
+    summary: ?[]u8 = null,
+    created_at_ms: i64 = 0,
+
+    fn deinit(self: *MissionArtifactView, allocator: std.mem.Allocator) void {
+        allocator.free(self.kind);
+        if (self.path) |value| allocator.free(value);
+        if (self.summary) |value| allocator.free(value);
+        self.* = undefined;
+    }
+};
+
+const MissionEventView = struct {
+    seq: u64,
+    event_type: []u8,
+    payload_json: []u8,
+    created_at_ms: i64,
+
+    fn deinit(self: *MissionEventView, allocator: std.mem.Allocator) void {
+        allocator.free(self.event_type);
+        allocator.free(self.payload_json);
+        self.* = undefined;
+    }
+};
+
+const MissionApprovalView = struct {
+    approval_id: []u8,
+    action_kind: []u8,
+    message: []u8,
+    payload_json: ?[]u8 = null,
+    requested_at_ms: i64 = 0,
+    requested_by: MissionActorView,
+    resolved_at_ms: i64 = 0,
+    resolved_by: ?MissionActorView = null,
+    resolution_note: ?[]u8 = null,
+    resolution: ?[]u8 = null,
+
+    fn deinit(self: *MissionApprovalView, allocator: std.mem.Allocator) void {
+        allocator.free(self.approval_id);
+        allocator.free(self.action_kind);
+        allocator.free(self.message);
+        if (self.payload_json) |value| allocator.free(value);
+        self.requested_by.deinit(allocator);
+        if (self.resolved_by) |*value| value.deinit(allocator);
+        if (self.resolution_note) |value| allocator.free(value);
+        if (self.resolution) |value| allocator.free(value);
+        self.* = undefined;
+    }
+};
+
+const MissionAgentPackView = struct {
+    agent_id: []u8,
+    persona_pack: ?[]u8 = null,
+
+    fn deinit(self: *MissionAgentPackView, allocator: std.mem.Allocator) void {
+        allocator.free(self.agent_id);
+        if (self.persona_pack) |value| allocator.free(value);
+        self.* = undefined;
+    }
+};
+
+const MissionRecordView = struct {
+    mission_id: []u8,
+    use_case: []u8,
+    title: ?[]u8 = null,
+    stage: []u8,
+    state: []u8,
+    agent_id: ?[]u8 = null,
+    persona_pack: ?[]u8 = null,
+    project_id: ?[]u8 = null,
+    run_id: ?[]u8 = null,
+    workspace_root: ?[]u8 = null,
+    worktree_name: ?[]u8 = null,
+    contract_id: ?[]u8 = null,
+    contract_context_path: ?[]u8 = null,
+    contract_state_path: ?[]u8 = null,
+    contract_artifact_root: ?[]u8 = null,
+    created_by: MissionActorView,
+    created_at_ms: i64 = 0,
+    updated_at_ms: i64 = 0,
+    last_heartbeat_ms: i64 = 0,
+    checkpoint_seq: u64 = 0,
+    recovery_count: u64 = 0,
+    recovery_reason: ?[]u8 = null,
+    blocked_reason: ?[]u8 = null,
+    summary: ?[]u8 = null,
+    pending_approval: ?MissionApprovalView = null,
+    artifacts: std.ArrayListUnmanaged(MissionArtifactView) = .{},
+    events: std.ArrayListUnmanaged(MissionEventView) = .{},
+
+    fn deinit(self: *MissionRecordView, allocator: std.mem.Allocator) void {
+        allocator.free(self.mission_id);
+        allocator.free(self.use_case);
+        if (self.title) |value| allocator.free(value);
+        allocator.free(self.stage);
+        allocator.free(self.state);
+        if (self.agent_id) |value| allocator.free(value);
+        if (self.persona_pack) |value| allocator.free(value);
+        if (self.project_id) |value| allocator.free(value);
+        if (self.run_id) |value| allocator.free(value);
+        if (self.workspace_root) |value| allocator.free(value);
+        if (self.worktree_name) |value| allocator.free(value);
+        if (self.contract_id) |value| allocator.free(value);
+        if (self.contract_context_path) |value| allocator.free(value);
+        if (self.contract_state_path) |value| allocator.free(value);
+        if (self.contract_artifact_root) |value| allocator.free(value);
+        self.created_by.deinit(allocator);
+        if (self.recovery_reason) |value| allocator.free(value);
+        if (self.blocked_reason) |value| allocator.free(value);
+        if (self.summary) |value| allocator.free(value);
+        if (self.pending_approval) |*value| value.deinit(allocator);
+        for (self.artifacts.items) |*item| item.deinit(allocator);
+        self.artifacts.deinit(allocator);
+        for (self.events.items) |*item| item.deinit(allocator);
+        self.events.deinit(allocator);
         self.* = undefined;
     }
 };
@@ -392,10 +527,13 @@ const SettingsFocusField = enum {
     project_token,
     project_create_name,
     project_create_vision,
+    workspace_template_id,
     project_operator_token,
     project_mount_path,
     project_mount_node_id,
     project_mount_export_name,
+    workspace_bind_path,
+    workspace_bind_target_path,
     default_session,
     default_agent,
     theme_pack,
@@ -564,41 +702,50 @@ fn isTerminalPanelFocusField(field: SettingsFocusField) bool {
     };
 }
 
-fn projectFocusFieldToExternal(field: SettingsFocusField) ProjectPanel.FocusField {
+fn projectFocusFieldToExternal(field: SettingsFocusField) WorkspacePanel.FocusField {
     return switch (field) {
-        .project_token => .project_token,
+        .project_token => .workspace_token,
         .project_create_name => .create_name,
         .project_create_vision => .create_vision,
+        .workspace_template_id => .template_id,
         .project_operator_token => .operator_token,
         .project_mount_path => .mount_path,
         .project_mount_node_id => .mount_node_id,
         .project_mount_export_name => .mount_export_name,
+        .workspace_bind_path => .bind_path,
+        .workspace_bind_target_path => .bind_target_path,
         else => .none,
     };
 }
 
-fn projectFocusFieldFromExternal(field: ProjectPanel.FocusField) SettingsFocusField {
+fn projectFocusFieldFromExternal(field: WorkspacePanel.FocusField) SettingsFocusField {
     return switch (field) {
-        .project_token => .project_token,
+        .workspace_token => .project_token,
         .create_name => .project_create_name,
         .create_vision => .project_create_vision,
+        .template_id => .workspace_template_id,
         .operator_token => .project_operator_token,
         .mount_path => .project_mount_path,
         .mount_node_id => .project_mount_node_id,
         .mount_export_name => .project_mount_export_name,
+        .bind_path => .workspace_bind_path,
+        .bind_target_path => .workspace_bind_target_path,
         .none => .none,
     };
 }
 
-fn isProjectPanelFocusField(field: SettingsFocusField) bool {
+fn isWorkspacePanelFocusField(field: SettingsFocusField) bool {
     return switch (field) {
         .project_token,
         .project_create_name,
         .project_create_vision,
+        .workspace_template_id,
         .project_operator_token,
         .project_mount_path,
         .project_mount_node_id,
         .project_mount_export_name,
+        .workspace_bind_path,
+        .workspace_bind_target_path,
         => true,
         else => false,
     };
@@ -680,10 +827,13 @@ const SettingsPanel = struct {
     project_token: std.ArrayList(u8) = .empty,
     project_create_name: std.ArrayList(u8) = .empty,
     project_create_vision: std.ArrayList(u8) = .empty,
+    workspace_template_id: std.ArrayList(u8) = .empty,
     project_operator_token: std.ArrayList(u8) = .empty,
     project_mount_path: std.ArrayList(u8) = .empty,
     project_mount_node_id: std.ArrayList(u8) = .empty,
     project_mount_export_name: std.ArrayList(u8) = .empty,
+    workspace_bind_path: std.ArrayList(u8) = .empty,
+    workspace_bind_target_path: std.ArrayList(u8) = .empty,
     default_session: std.ArrayList(u8) = .empty,
     default_agent: std.ArrayList(u8) = .empty,
     theme_mode: panels_bridge.SettingsThemeMode = .pack_default,
@@ -705,10 +855,13 @@ const SettingsPanel = struct {
         panel.project_token.appendSlice(allocator, "") catch {};
         panel.project_create_name.appendSlice(allocator, "") catch {};
         panel.project_create_vision.appendSlice(allocator, "") catch {};
+        panel.workspace_template_id.appendSlice(allocator, "dev") catch {};
         panel.project_operator_token.appendSlice(allocator, "") catch {};
         panel.project_mount_path.appendSlice(allocator, "/") catch {};
         panel.project_mount_node_id.appendSlice(allocator, "") catch {};
         panel.project_mount_export_name.appendSlice(allocator, "") catch {};
+        panel.workspace_bind_path.appendSlice(allocator, "/repo") catch {};
+        panel.workspace_bind_target_path.appendSlice(allocator, "/nodes/local/fs") catch {};
         panel.default_session.appendSlice(allocator, "main") catch {};
         panel.default_agent.appendSlice(allocator, "") catch {};
         panel.terminal_backend_kind = defaultTerminalBackendKind();
@@ -721,10 +874,13 @@ const SettingsPanel = struct {
         self.project_token.deinit(allocator);
         self.project_create_name.deinit(allocator);
         self.project_create_vision.deinit(allocator);
+        self.workspace_template_id.deinit(allocator);
         self.project_operator_token.deinit(allocator);
         self.project_mount_path.deinit(allocator);
         self.project_mount_node_id.deinit(allocator);
         self.project_mount_export_name.deinit(allocator);
+        self.workspace_bind_path.deinit(allocator);
+        self.workspace_bind_target_path.deinit(allocator);
         self.default_session.deinit(allocator);
         self.default_agent.deinit(allocator);
         self.theme_pack.deinit(allocator);
@@ -1100,7 +1256,11 @@ const App = struct {
     workspace_state: ?workspace_types.WorkspaceStatus = null,
     workspace_last_error: ?[]u8 = null,
     workspace_last_refresh_ms: i64 = 0,
-    project_panel_id: ?workspace.PanelId = null,
+    mission_records: std.ArrayListUnmanaged(MissionRecordView) = .{},
+    mission_selected_id: ?[]u8 = null,
+    mission_last_error: ?[]u8 = null,
+    mission_last_refresh_ms: i64 = 0,
+    workspace_panel_id: ?workspace.PanelId = null,
     project_selector_open: bool = false,
     filesystem_panel_id: ?workspace.PanelId = null,
     filesystem_tools_panel_id: ?workspace.PanelId = null,
@@ -1359,10 +1519,10 @@ const App = struct {
         settings_panel.server_url.clearRetainingCapacity();
         settings_panel.server_url.appendSlice(allocator, config.server_url) catch {};
         settings_panel.project_id.clearRetainingCapacity();
-        if (config.selectedProject()) |value| {
+        if (config.selectedWorkspace()) |value| {
             settings_panel.project_id.appendSlice(allocator, value) catch {};
             if (!isSystemProjectId(value)) {
-                if (config.getProjectToken(value)) |project_token| {
+                if (config.getWorkspaceToken(value)) |project_token| {
                     settings_panel.project_token.clearRetainingCapacity();
                     settings_panel.project_token.appendSlice(allocator, project_token) catch {};
                 }
@@ -1502,7 +1662,7 @@ const App = struct {
         self.clearSessions();
         self.chat_sessions.deinit(self.allocator);
         self.session_messages.deinit(self.allocator);
-        workspace_types.deinitProjectList(self.allocator, &self.projects);
+        workspace_types.deinitWorkspaceList(self.allocator, &self.projects);
         workspace_types.deinitNodeList(self.allocator, &self.nodes);
         if (self.workspace_state) |*status| {
             status.deinit(self.allocator);
@@ -4089,10 +4249,13 @@ const App = struct {
             .project_token => &self.settings_panel.project_token,
             .project_create_name => &self.settings_panel.project_create_name,
             .project_create_vision => &self.settings_panel.project_create_vision,
+            .workspace_template_id => &self.settings_panel.workspace_template_id,
             .project_operator_token => &self.settings_panel.project_operator_token,
             .project_mount_path => &self.settings_panel.project_mount_path,
             .project_mount_node_id => &self.settings_panel.project_mount_node_id,
             .project_mount_export_name => &self.settings_panel.project_mount_export_name,
+            .workspace_bind_path => &self.settings_panel.workspace_bind_path,
+            .workspace_bind_target_path => &self.settings_panel.workspace_bind_target_path,
             .default_session => &self.settings_panel.default_session,
             .default_agent => &self.settings_panel.default_agent,
             .theme_pack => &self.settings_panel.theme_pack,
@@ -4597,14 +4760,14 @@ const App = struct {
 
     fn syncSettingsToConfig(self: *App) !void {
         try self.config.setServerUrl(self.settings_panel.server_url.items);
-        try self.config.setSelectedProject(
+        try self.config.setSelectedWorkspace(
             if (self.settings_panel.project_id.items.len > 0)
                 self.settings_panel.project_id.items
             else
                 null,
         );
         if (self.settings_panel.project_id.items.len > 0) {
-            try self.config.setProjectToken(
+            try self.config.setWorkspaceToken(
                 self.settings_panel.project_id.items,
                 self.settings_panel.project_token.items,
             );
@@ -4646,7 +4809,7 @@ const App = struct {
     }
 
     fn clearWorkspaceData(self: *App) void {
-        workspace_types.deinitProjectList(self.allocator, &self.projects);
+        workspace_types.deinitWorkspaceList(self.allocator, &self.projects);
         workspace_types.deinitNodeList(self.allocator, &self.nodes);
         self.project_selector_open = false;
         self.clearConnectSetupHint();
@@ -4659,6 +4822,41 @@ const App = struct {
             self.workspace_last_error = null;
         }
         self.workspace_last_refresh_ms = 0;
+        self.clearMissionDashboardData();
+    }
+
+    fn clearMissionDashboardData(self: *App) void {
+        for (self.mission_records.items) |*mission| mission.deinit(self.allocator);
+        self.mission_records.deinit(self.allocator);
+        self.mission_records = .{};
+        if (self.mission_selected_id) |value| {
+            self.allocator.free(value);
+            self.mission_selected_id = null;
+        }
+        if (self.mission_last_error) |value| {
+            self.allocator.free(value);
+            self.mission_last_error = null;
+        }
+        self.mission_last_refresh_ms = 0;
+        self.client_context.clearWorkboardItems();
+        self.client_context.clearApprovals();
+        self.client_context.clearPendingWorkboardRequest();
+        self.client_context.clearPendingApprovalResolveRequest();
+    }
+
+    fn setMissionDashboardError(self: *App, message: []const u8) void {
+        if (self.mission_last_error) |value| {
+            self.allocator.free(value);
+            self.mission_last_error = null;
+        }
+        self.mission_last_error = self.allocator.dupe(u8, message) catch null;
+    }
+
+    fn clearMissionDashboardError(self: *App) void {
+        if (self.mission_last_error) |value| {
+            self.allocator.free(value);
+            self.mission_last_error = null;
+        }
     }
 
     fn clearFilesystemEntries(self: *App) void {
@@ -5354,19 +5552,19 @@ const App = struct {
         if (std.mem.indexOf(u8, remote, "project_auth_failed") != null) {
             return self.allocator.dupe(
                 u8,
-                "Project access denied. If the project is locked, provide its Project Token.",
+                "Workspace access denied. If the workspace is locked, provide its Workspace Token.",
             ) catch null;
         }
         if (std.mem.indexOf(u8, remote, "project_not_found") != null) {
             return self.allocator.dupe(
                 u8,
-                "Selected project no longer exists. Clear project selection and reconnect.",
+                "Selected workspace no longer exists. Clear workspace selection and reconnect.",
             ) catch null;
         }
         if (std.mem.indexOf(u8, remote, "project_assignment_forbidden") != null) {
             return self.allocator.dupe(
                 u8,
-                "This agent is not allowed on that project (system project is Mother-only).",
+                "This agent is not allowed on that workspace (the system workspace is Mother-only).",
             ) catch null;
         }
         if (std.mem.indexOf(u8, remote, "control_plane_error") != null and
@@ -5374,19 +5572,19 @@ const App = struct {
         {
             return self.allocator.dupe(
                 u8,
-                "Selected project settings are invalid for this server. Clear project/token in Settings and retry.",
+                "Selected workspace settings are invalid for this server. Clear workspace/token in Settings and retry.",
             ) catch null;
         }
         if (std.mem.indexOf(u8, remote, "provisioning_required") != null) {
             return self.allocator.dupe(
                 u8,
-                "This user token has no non-system project/agent target. Ask an admin to provision one via Mother.",
+                "This user token has no non-system workspace/agent target. Ask an admin to provision one via Mother.",
             ) catch null;
         }
         if (std.mem.indexOf(u8, remote, "last_target_invalid") != null) {
             return self.allocator.dupe(
                 u8,
-                "The remembered project/agent target is no longer valid. Ask an admin to re-provision access.",
+                "The remembered workspace/agent target is no longer valid. Ask an admin to re-provision access.",
             ) catch null;
         }
         return null;
@@ -5408,13 +5606,13 @@ const App = struct {
         if (std.mem.indexOf(u8, remote, "observe access denied for active project") != null) {
             return self.allocator.dupe(
                 u8,
-                "Project observe policy denied this stream. Check access_policy.actions.observe and agent overrides.",
+                "Workspace observe policy denied this stream. Check access_policy.actions.observe and agent overrides.",
             ) catch null;
         }
         if (std.mem.indexOf(u8, remote, "watch requires a project-scoped session binding") != null) {
             return self.allocator.dupe(
                 u8,
-                "Attach the session to a project first (project selection + reconnect/session attach).",
+                "Attach the session to a workspace first (workspace selection + Attach Session).",
             ) catch null;
         }
         if (std.mem.indexOf(u8, remote, "forbidden") != null) {
@@ -5496,7 +5694,7 @@ const App = struct {
         self.settings_panel.project_token.clearRetainingCapacity();
         self.session_attach_state = .unknown;
         self.syncSettingsToConfig() catch |err| {
-            std.log.warn("Failed to persist cleared selected project after attach failure: {s}", .{@errorName(err)});
+            std.log.warn("Failed to persist cleared selected workspace after attach failure: {s}", .{@errorName(err)});
         };
     }
 
@@ -5581,7 +5779,7 @@ const App = struct {
 
     fn selectedProjectId(self: *const App) ?[]const u8 {
         if (self.settings_panel.project_id.items.len > 0) return self.settings_panel.project_id.items;
-        return self.config.selectedProject();
+        return self.config.selectedWorkspace();
     }
 
     fn defaultAttachProjectId(self: *const App) ?[]const u8 {
@@ -5628,7 +5826,7 @@ const App = struct {
         self.project_selector_open = false;
         self.settings_panel.project_token.clearRetainingCapacity();
         if (!isSystemProjectId(project_id)) {
-            if (self.config.getProjectToken(project_id)) |token| {
+            if (self.config.getWorkspaceToken(project_id)) |token| {
                 try self.settings_panel.project_token.appendSlice(self.allocator, token);
             }
         }
@@ -5640,8 +5838,8 @@ const App = struct {
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
         try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
 
-        var projects = try control_plane.listProjects(self.allocator, client, &self.message_counter);
-        errdefer workspace_types.deinitProjectList(self.allocator, &projects);
+        var projects = try control_plane.listWorkspaces(self.allocator, client, &self.message_counter);
+        errdefer workspace_types.deinitWorkspaceList(self.allocator, &projects);
         var nodes = try control_plane.listNodes(self.allocator, client, &self.message_counter);
         errdefer workspace_types.deinitNodeList(self.allocator, &nodes);
         const selected_project_id = self.selectedProjectId();
@@ -5665,9 +5863,9 @@ const App = struct {
                     if (isSelectedProjectAttachRemoteError(remote)) {
                         self.clearSelectedProjectAfterAttachFailure();
                     }
-                    selected_project_warning = self.formatControlRemoteMessage("Selected project unavailable", remote);
+                    selected_project_warning = self.formatControlRemoteMessage("Selected workspace unavailable", remote);
                 } else {
-                    selected_project_warning = std.fmt.allocPrint(self.allocator, "Selected project unavailable: {s}", .{@errorName(err)}) catch null;
+                    selected_project_warning = std.fmt.allocPrint(self.allocator, "Selected workspace unavailable: {s}", .{@errorName(err)}) catch null;
                 }
                 break :blk try control_plane.workspaceStatus(
                     self.allocator,
@@ -5681,7 +5879,7 @@ const App = struct {
         };
         errdefer workspace_status.deinit(self.allocator);
 
-        workspace_types.deinitProjectList(self.allocator, &self.projects);
+        workspace_types.deinitWorkspaceList(self.allocator, &self.projects);
         workspace_types.deinitNodeList(self.allocator, &self.nodes);
         if (self.workspace_state) |*status| status.deinit(self.allocator);
 
@@ -5694,6 +5892,385 @@ const App = struct {
         } else {
             self.clearWorkspaceError();
         }
+
+        self.refreshMissionDashboardData() catch |err| {
+            if (self.formatMissionDashboardOpError("Refresh missions", err)) |message| {
+                defer self.allocator.free(message);
+                self.setMissionDashboardError(message);
+            } else {
+                self.setMissionDashboardError("Refresh missions failed");
+            }
+        };
+    }
+
+    fn refreshMissionDashboardData(self: *App) !void {
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        try self.fsrpcBootstrapGui(client);
+
+        const request_id = try std.fmt.allocPrint(self.allocator, "missions-{d}", .{std.time.milliTimestamp()});
+        self.client_context.setPendingWorkboardRequest(request_id);
+        defer self.client_context.clearPendingWorkboardRequest();
+
+        var agent_packs = self.loadMissionAgentPacks(client) catch std.ArrayListUnmanaged(MissionAgentPackView){};
+        defer deinitMissionAgentPackList(self.allocator, &agent_packs);
+
+        try self.writeFsPathTextGui(client, "/agents/self/missions/control/list.json", "{}");
+        const result_json = try self.readFsPathTextGui(client, "/agents/self/missions/result.json");
+        defer self.allocator.free(result_json);
+        if (try missionResultErrorMessage(self.allocator, result_json)) |message| {
+            defer self.allocator.free(message);
+            self.setMissionDashboardError(message);
+            return error.RemoteError;
+        }
+
+        var missions = try self.parseMissionListResult(result_json, agent_packs.items);
+        errdefer deinitMissionRecordList(self.allocator, &missions);
+
+        const workboard_items = try self.buildMissionWorkboardItemsOwned(missions.items);
+        errdefer deinitWorkboardItemOwnedSlice(self.allocator, workboard_items);
+
+        var approvals = try self.buildMissionApprovalsOwned(missions.items);
+        self.client_context.clearApprovals();
+        var approval_index: usize = 0;
+        errdefer {
+            while (approval_index < approvals.items.len) : (approval_index += 1) {
+                freeOwnedExecApproval(self.allocator, &approvals.items[approval_index]);
+            }
+            approvals.deinit(self.allocator);
+        }
+        while (approval_index < approvals.items.len) : (approval_index += 1) {
+            try self.client_context.upsertApprovalOwned(approvals.items[approval_index]);
+        }
+        approvals.items.len = 0;
+        approvals.deinit(self.allocator);
+
+        self.client_context.setWorkboardItemsOwned(workboard_items);
+        self.replaceMissionRecordsOwned(missions);
+        self.mission_last_refresh_ms = std.time.milliTimestamp();
+        self.clearMissionDashboardError();
+    }
+
+    fn requestMissionDashboardRefresh(self: *App, force: bool) void {
+        if (self.connection_state != .connected) return;
+        if (self.client_context.pending_workboard_request_id != null) return;
+        const now = std.time.milliTimestamp();
+        if (!force and self.mission_last_refresh_ms != 0 and now - self.mission_last_refresh_ms < MISSION_REFRESH_INTERVAL_MS) return;
+        self.refreshMissionDashboardData() catch |err| {
+            if (self.formatMissionDashboardOpError("Refresh missions", err)) |message| {
+                defer self.allocator.free(message);
+                self.setMissionDashboardError(message);
+            } else {
+                self.setMissionDashboardError("Refresh missions failed");
+            }
+        };
+    }
+
+    fn replaceMissionRecordsOwned(self: *App, missions: std.ArrayListUnmanaged(MissionRecordView)) void {
+        for (self.mission_records.items) |*mission| mission.deinit(self.allocator);
+        self.mission_records.deinit(self.allocator);
+        self.mission_records = missions;
+        self.syncMissionSelection();
+    }
+
+    fn syncMissionSelection(self: *App) void {
+        if (self.mission_selected_id) |selected_id| {
+            for (self.mission_records.items) |*mission| {
+                if (std.mem.eql(u8, mission.mission_id, selected_id)) return;
+            }
+            self.allocator.free(selected_id);
+            self.mission_selected_id = null;
+        }
+        if (self.mission_selected_id == null and self.mission_records.items.len > 0) {
+            self.mission_selected_id = self.allocator.dupe(u8, self.mission_records.items[0].mission_id) catch null;
+        }
+    }
+
+    fn selectedMission(self: *App) ?*MissionRecordView {
+        const selected_id = self.mission_selected_id orelse return if (self.mission_records.items.len > 0) &self.mission_records.items[0] else null;
+        for (self.mission_records.items) |*mission| {
+            if (std.mem.eql(u8, mission.mission_id, selected_id)) return mission;
+        }
+        return if (self.mission_records.items.len > 0) &self.mission_records.items[0] else null;
+    }
+
+    fn loadMissionAgentPacks(self: *App, client: *ws_client_mod.WebSocketClient) !std.ArrayListUnmanaged(MissionAgentPackView) {
+        try self.writeFsPathTextGui(client, "/agents/self/agents/control/list.json", "{}");
+        const result_json = try self.readFsPathTextGui(client, "/agents/self/agents/result.json");
+        defer self.allocator.free(result_json);
+
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, result_json, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return error.InvalidResponse;
+        const root = parsed.value.object;
+        if (root.get("ok")) |value| {
+            if (value == .bool and !value.bool) return error.RemoteError;
+        }
+        const result_val = root.get("result") orelse return error.InvalidResponse;
+        if (result_val != .object) return error.InvalidResponse;
+        const agents_val = result_val.object.get("agents") orelse return error.InvalidResponse;
+        if (agents_val != .array) return error.InvalidResponse;
+
+        var out = std.ArrayListUnmanaged(MissionAgentPackView){};
+        errdefer deinitMissionAgentPackList(self.allocator, &out);
+
+        for (agents_val.array.items) |item| {
+            if (item != .object) continue;
+            const obj = item.object;
+            const agent_id = try dupRequiredStringField(self.allocator, obj, "agent_id");
+            errdefer self.allocator.free(agent_id);
+            const persona_pack = try dupOptionalStringField(self.allocator, obj, "persona_pack");
+            errdefer if (persona_pack) |value| self.allocator.free(value);
+            try out.append(self.allocator, .{
+                .agent_id = agent_id,
+                .persona_pack = persona_pack,
+            });
+        }
+
+        return out;
+    }
+
+    fn parseMissionListResult(
+        self: *App,
+        result_json: []const u8,
+        agent_packs: []const MissionAgentPackView,
+    ) !std.ArrayListUnmanaged(MissionRecordView) {
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, result_json, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return error.InvalidResponse;
+        const root = parsed.value.object;
+        if (root.get("ok")) |value| {
+            if (value == .bool and !value.bool) return error.RemoteError;
+        }
+        const result_val = root.get("result") orelse return error.InvalidResponse;
+        if (result_val != .object) return error.InvalidResponse;
+        const missions_val = result_val.object.get("missions") orelse return error.InvalidResponse;
+        if (missions_val != .array) return error.InvalidResponse;
+
+        var out = std.ArrayListUnmanaged(MissionRecordView){};
+        errdefer deinitMissionRecordList(self.allocator, &out);
+
+        for (missions_val.array.items) |item| {
+            if (item != .object) continue;
+            try out.append(self.allocator, try self.parseMissionRecordView(item.object, agent_packs));
+        }
+
+        return out;
+    }
+
+    fn parseMissionRecordView(
+        self: *App,
+        obj: std.json.ObjectMap,
+        agent_packs: []const MissionAgentPackView,
+    ) !MissionRecordView {
+        var mission = MissionRecordView{
+            .mission_id = try dupRequiredStringField(self.allocator, obj, "mission_id"),
+            .use_case = try dupRequiredStringField(self.allocator, obj, "use_case"),
+            .title = try dupOptionalStringField(self.allocator, obj, "title"),
+            .stage = try dupRequiredStringField(self.allocator, obj, "stage"),
+            .state = try dupRequiredStringField(self.allocator, obj, "state"),
+            .agent_id = try dupOptionalStringField(self.allocator, obj, "agent_id"),
+            .project_id = try dupOptionalStringField(self.allocator, obj, "project_id"),
+            .run_id = try dupOptionalStringField(self.allocator, obj, "run_id"),
+            .workspace_root = try dupOptionalStringField(self.allocator, obj, "workspace_root"),
+            .worktree_name = try dupOptionalStringField(self.allocator, obj, "worktree_name"),
+            .created_by = try parseMissionActorView(self.allocator, obj.get("created_by") orelse return error.InvalidResponse),
+            .created_at_ms = try intFieldOrDefault(obj, "created_at_ms", 0),
+            .updated_at_ms = try intFieldOrDefault(obj, "updated_at_ms", 0),
+            .last_heartbeat_ms = try intFieldOrDefault(obj, "last_heartbeat_ms", 0),
+            .checkpoint_seq = try u64FieldOrDefault(obj, "checkpoint_seq", 0),
+            .recovery_count = try u64FieldOrDefault(obj, "recovery_count", 0),
+            .recovery_reason = try dupOptionalStringField(self.allocator, obj, "recovery_reason"),
+            .blocked_reason = try dupOptionalStringField(self.allocator, obj, "blocked_reason"),
+            .summary = try dupOptionalStringField(self.allocator, obj, "summary"),
+        };
+        errdefer mission.deinit(self.allocator);
+
+        if (obj.get("contract")) |value| {
+            if (value != .object) return error.InvalidResponse;
+            mission.contract_id = try dupOptionalStringField(self.allocator, value.object, "contract_id");
+            mission.contract_context_path = try dupOptionalStringField(self.allocator, value.object, "context_path");
+            mission.contract_state_path = try dupOptionalStringField(self.allocator, value.object, "state_path");
+            mission.contract_artifact_root = try dupOptionalStringField(self.allocator, value.object, "artifact_root");
+        }
+
+        if (mission.agent_id) |agent_id| {
+            if (lookupMissionPersonaPack(agent_packs, agent_id)) |persona_pack| {
+                mission.persona_pack = try self.allocator.dupe(u8, persona_pack);
+            }
+        }
+
+        if (obj.get("pending_approval")) |value| {
+            if (value == .object) {
+                mission.pending_approval = try parseMissionApprovalView(self.allocator, value);
+            }
+        }
+
+        if (obj.get("artifacts")) |value| {
+            if (value != .array) return error.InvalidResponse;
+            for (value.array.items) |artifact_val| {
+                if (artifact_val != .object) continue;
+                try mission.artifacts.append(self.allocator, try parseMissionArtifactView(self.allocator, artifact_val));
+            }
+        }
+
+        if (obj.get("events")) |value| {
+            if (value != .array) return error.InvalidResponse;
+            for (value.array.items) |event_val| {
+                if (event_val != .object) continue;
+                try mission.events.append(self.allocator, try parseMissionEventView(self.allocator, event_val));
+            }
+        }
+
+        return mission;
+    }
+
+    fn buildMissionWorkboardItemsOwned(self: *App, missions: []const MissionRecordView) ![]zui.protocol.types.WorkboardItem {
+        var out = try self.allocator.alloc(zui.protocol.types.WorkboardItem, missions.len);
+        errdefer deinitWorkboardItemOwnedSlice(self.allocator, out);
+
+        for (missions, 0..) |mission, index| {
+            const title_source = mission.title orelse mission.summary orelse mission.mission_id;
+            const owner_source = mission.agent_id orelse mission.created_by.actor_id;
+            out[index] = .{
+                .id = try self.allocator.dupe(u8, mission.mission_id),
+                .kind = try self.allocator.dupe(u8, mission.use_case),
+                .status = try self.allocator.dupe(u8, mission.state),
+                .title = try self.allocator.dupe(u8, title_source),
+                .summary = if (mission.summary) |value| try self.allocator.dupe(u8, value) else null,
+                .owner = try self.allocator.dupe(u8, owner_source),
+                .agent_id = if (mission.agent_id) |value| try self.allocator.dupe(u8, value) else null,
+                .parent_id = null,
+                .cron_key = null,
+                .created_at_ms = mission.created_at_ms,
+                .updated_at_ms = mission.updated_at_ms,
+                .due_at_ms = null,
+                .payload_json = if (mission.persona_pack) |value|
+                    try std.fmt.allocPrint(self.allocator, "{{\"mission_id\":\"{s}\",\"persona_pack\":\"{s}\"}}", .{ mission.mission_id, value })
+                else
+                    try std.fmt.allocPrint(self.allocator, "{{\"mission_id\":\"{s}\"}}", .{mission.mission_id}),
+            };
+        }
+        return out;
+    }
+
+    fn buildMissionApprovalsOwned(self: *App, missions: []const MissionRecordView) !std.ArrayListUnmanaged(zui.protocol.types.ExecApproval) {
+        var approvals = std.ArrayListUnmanaged(zui.protocol.types.ExecApproval){};
+        errdefer deinitExecApprovalList(self.allocator, &approvals);
+
+        for (missions) |mission| {
+            const approval = mission.pending_approval orelse continue;
+            var summary_buf: [256]u8 = undefined;
+            const title = mission.title orelse mission.summary orelse mission.mission_id;
+            const summary = std.fmt.bufPrint(
+                &summary_buf,
+                "{s}: {s}",
+                .{ title, approval.action_kind },
+            ) catch approval.action_kind;
+            const payload_json = if (approval.payload_json) |payload|
+                try std.fmt.allocPrint(
+                    self.allocator,
+                    "{{\"mission_id\":\"{s}\",\"action_kind\":\"{s}\",\"payload\":{s}}}",
+                    .{ mission.mission_id, approval.action_kind, payload },
+                )
+            else
+                try std.fmt.allocPrint(
+                    self.allocator,
+                    "{{\"mission_id\":\"{s}\",\"action_kind\":\"{s}\"}}",
+                    .{ mission.mission_id, approval.action_kind },
+                );
+
+            try approvals.append(self.allocator, .{
+                .id = try self.allocator.dupe(u8, approval.approval_id),
+                .payload_json = payload_json,
+                .summary = try self.allocator.dupe(u8, summary),
+                .requested_at_ms = approval.requested_at_ms,
+                .requested_by = try std.fmt.allocPrint(
+                    self.allocator,
+                    "{s}/{s}",
+                    .{ approval.requested_by.actor_type, approval.requested_by.actor_id },
+                ),
+                .resolved_at_ms = null,
+                .resolved_by = null,
+                .decision = null,
+                .can_resolve = true,
+            });
+        }
+
+        return approvals;
+    }
+
+    fn resolveMissionApproval(self: *App, action: zui.ui.operator_view.ExecApprovalResolveAction) !void {
+        const mission = self.findMissionForApprovalId(action.request_id) orelse return error.NotFound;
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        try self.fsrpcBootstrapGui(client);
+
+        const request_id = try std.fmt.allocPrint(self.allocator, "mission-approval-{d}", .{std.time.milliTimestamp()});
+        const approval_target = try self.allocator.dupe(u8, action.request_id);
+        const decision_label = switch (action.decision) {
+            .allow_once, .allow_always => "approve",
+            .deny => "deny",
+        };
+        const decision_copy = try self.allocator.dupe(u8, decision_label);
+        self.client_context.setPendingApprovalResolveRequest(request_id, approval_target, decision_copy);
+        defer self.client_context.clearPendingApprovalResolveRequest();
+
+        const control_name = switch (action.decision) {
+            .allow_once, .allow_always => "approve.json",
+            .deny => "reject.json",
+        };
+        const payload = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"mission_id\":\"{s}\"}}",
+            .{mission.mission_id},
+        );
+        defer self.allocator.free(payload);
+
+        const control_path = try std.fmt.allocPrint(self.allocator, "/agents/self/missions/control/{s}", .{control_name});
+        defer self.allocator.free(control_path);
+        try self.writeFsPathTextGui(client, control_path, payload);
+
+        const result_json = try self.readFsPathTextGui(client, "/agents/self/missions/result.json");
+        defer self.allocator.free(result_json);
+        if (try missionResultErrorMessage(self.allocator, result_json)) |message| {
+            defer self.allocator.free(message);
+            self.setMissionDashboardError(message);
+            return error.RemoteError;
+        }
+
+        try self.client_context.markApprovalResolvedOwned(
+            action.request_id,
+            switch (action.decision) {
+                .allow_once, .allow_always => "approve",
+                .deny => "deny",
+            },
+            "SpiderApp",
+            std.time.milliTimestamp(),
+        );
+        try self.refreshMissionDashboardData();
+    }
+
+    fn findMissionForApprovalId(self: *App, approval_id: []const u8) ?*MissionRecordView {
+        for (self.mission_records.items) |*mission| {
+            if (mission.pending_approval) |approval| {
+                if (std.mem.eql(u8, approval.approval_id, approval_id)) return mission;
+            }
+        }
+        return null;
+    }
+
+    fn formatMissionDashboardOpError(self: *App, operation: []const u8, err: anyerror) ?[]u8 {
+        if (self.mission_last_error) |message| {
+            return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, message }) catch null;
+        }
+        if (err == error.RemoteError) {
+            if (control_plane.lastRemoteError()) |remote| {
+                return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, remote }) catch null;
+            }
+        }
+        if (self.fsrpc_last_remote_error) |remote| {
+            return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, remote }) catch null;
+        }
+        return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, @errorName(err) }) catch null;
     }
 
     fn activateSelectedProject(self: *App) !void {
@@ -5702,7 +6279,7 @@ const App = struct {
 
         const token = self.selectedProjectToken(project_id);
 
-        var status = try control_plane.activateProject(
+        var status = try control_plane.activateWorkspace(
             self.allocator,
             client,
             &self.message_counter,
@@ -5716,6 +6293,7 @@ const App = struct {
         self.workspace_last_refresh_ms = std.time.milliTimestamp();
         self.clearWorkspaceError();
         self.session_attach_state = .unknown;
+        self.refreshMissionDashboardData() catch {};
 
         if (self.settings_panel.project_token.items.len == 0) {
             if (token) |value| {
@@ -5976,12 +6554,17 @@ const App = struct {
             self.settings_panel.project_create_vision.items
         else
             null;
-        var created = try control_plane.createProject(
+        const template_id = blk: {
+            const trimmed = std.mem.trim(u8, self.settings_panel.workspace_template_id.items, " \t\r\n");
+            break :blk if (trimmed.len > 0) trimmed else "dev";
+        };
+        var created = try control_plane.createWorkspace(
             self.allocator,
             client,
             &self.message_counter,
             self.settings_panel.project_create_name.items,
             vision,
+            template_id,
             self.resolveProjectOperatorToken(),
         );
         defer created.deinit(self.allocator);
@@ -6056,7 +6639,7 @@ const App = struct {
         if (mount_path.len == 0 or node_id.len == 0 or export_name.len == 0) return error.MissingField;
         try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
 
-        var detail = try control_plane.setProjectMount(
+        var detail = try control_plane.setWorkspaceMount(
             self.allocator,
             client,
             &self.message_counter,
@@ -6073,7 +6656,7 @@ const App = struct {
     }
 
     fn validateProjectMountAddInput(self: *App) ?[]const u8 {
-        _ = self.selectedProjectId() orelse return "Select a project before adding mounts.";
+        _ = self.selectedProjectId() orelse return "Select a workspace before adding mounts.";
         const mount_path = std.mem.trim(u8, self.settings_panel.project_mount_path.items, " \t");
         if (mount_path.len == 0) return "Mount path is required.";
         const node_id = std.mem.trim(u8, self.settings_panel.project_mount_node_id.items, " \t");
@@ -6084,7 +6667,7 @@ const App = struct {
     }
 
     fn validateProjectMountRemoveInput(self: *App) ?[]const u8 {
-        _ = self.selectedProjectId() orelse return "Select a project before removing mounts.";
+        _ = self.selectedProjectId() orelse return "Select a workspace before removing mounts.";
         const mount_path = std.mem.trim(u8, self.settings_panel.project_mount_path.items, " \t");
         if (mount_path.len == 0) return "Mount path is required.";
         const node_id = std.mem.trim(u8, self.settings_panel.project_mount_node_id.items, " \t");
@@ -6109,7 +6692,7 @@ const App = struct {
         if ((node_id_filter == null) != (export_name_filter == null)) return error.MissingField;
         try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
 
-        var detail = try control_plane.removeProjectMount(
+        var detail = try control_plane.removeWorkspaceMount(
             self.allocator,
             client,
             &self.message_counter,
@@ -6118,6 +6701,68 @@ const App = struct {
             mount_path,
             node_id_filter,
             export_name_filter,
+        );
+        defer detail.deinit(self.allocator);
+
+        self.refreshWorkspaceData() catch {};
+        self.clearWorkspaceError();
+    }
+
+    fn validateWorkspaceBindAddInput(self: *App) ?[]const u8 {
+        _ = self.selectedProjectId() orelse return "Select a workspace before adding binds.";
+        const bind_path = std.mem.trim(u8, self.settings_panel.workspace_bind_path.items, " \t");
+        if (bind_path.len == 0) return "Bind path is required.";
+        const target_path = std.mem.trim(u8, self.settings_panel.workspace_bind_target_path.items, " \t");
+        if (target_path.len == 0) return "Target path is required.";
+        return null;
+    }
+
+    fn validateWorkspaceBindRemoveInput(self: *App) ?[]const u8 {
+        _ = self.selectedProjectId() orelse return "Select a workspace before removing binds.";
+        const bind_path = std.mem.trim(u8, self.settings_panel.workspace_bind_path.items, " \t");
+        if (bind_path.len == 0) return "Bind path is required.";
+        return null;
+    }
+
+    fn setWorkspaceBindFromPanel(self: *App) !void {
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        const project_id = self.selectedProjectId() orelse return error.MissingField;
+        const project_token = self.selectedProjectToken(project_id);
+        const bind_path = std.mem.trim(u8, self.settings_panel.workspace_bind_path.items, " \t");
+        const target_path = std.mem.trim(u8, self.settings_panel.workspace_bind_target_path.items, " \t");
+        if (bind_path.len == 0 or target_path.len == 0) return error.MissingField;
+        try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
+
+        var detail = try control_plane.setWorkspaceBind(
+            self.allocator,
+            client,
+            &self.message_counter,
+            project_id,
+            project_token,
+            bind_path,
+            target_path,
+        );
+        defer detail.deinit(self.allocator);
+
+        self.refreshWorkspaceData() catch {};
+        self.clearWorkspaceError();
+    }
+
+    fn removeWorkspaceBindFromPanel(self: *App) !void {
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        const project_id = self.selectedProjectId() orelse return error.MissingField;
+        const project_token = self.selectedProjectToken(project_id);
+        const bind_path = std.mem.trim(u8, self.settings_panel.workspace_bind_path.items, " \t");
+        if (bind_path.len == 0) return error.MissingField;
+        try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
+
+        var detail = try control_plane.removeWorkspaceBind(
+            self.allocator,
+            client,
+            &self.message_counter,
+            project_id,
+            project_token,
+            bind_path,
         );
         defer detail.deinit(self.allocator);
 
@@ -6791,7 +7436,7 @@ const App = struct {
         }
 
         var right_y = right_rect.min[1] + pad;
-        self.drawLabel(right_rect.min[0] + pad, right_y, "Projects", self.theme.colors.text_primary);
+        self.drawLabel(right_rect.min[0] + pad, right_y, "Workspaces", self.theme.colors.text_primary);
         right_y += layout.line_height + layout.row_gap * 0.6;
         if (self.launcher_notice) |notice| {
             self.drawTextTrimmed(
@@ -6814,7 +7459,7 @@ const App = struct {
             filter_rect,
             self.launcher_project_filter.items,
             self.settings_panel.focused_field == .launcher_project_filter,
-            .{ .placeholder = "Search projects" },
+            .{ .placeholder = "Search workspaces" },
         );
         if (filter_focused) self.settings_panel.focused_field = .launcher_project_filter;
         right_y += layout.input_height + layout.row_gap * 0.55;
@@ -6829,7 +7474,7 @@ const App = struct {
             create_name_rect,
             self.settings_panel.project_create_name.items,
             self.settings_panel.focused_field == .project_create_name,
-            .{ .placeholder = "New project name" },
+            .{ .placeholder = "New workspace name" },
         );
         if (create_name_focused) self.settings_panel.focused_field = .project_create_name;
         right_y += layout.input_height + layout.row_gap;
@@ -6866,11 +7511,11 @@ const App = struct {
         );
         if (self.drawButtonWidget(
             open_rect,
-            "Open Project",
+            "Open Workspace",
             .{ .variant = .primary, .disabled = self.connection_state != .connected or self.selectedProjectId() == null },
         )) {
             self.openSelectedProjectFromLauncher() catch |err| {
-                const msg = self.formatControlOpError("Failed to open project", err);
+                const msg = self.formatControlOpError("Failed to open workspace", err);
                 if (msg) |value| {
                     defer self.allocator.free(value);
                     self.setLauncherNotice(value);
@@ -6886,11 +7531,11 @@ const App = struct {
         );
         if (self.drawButtonWidget(
             create_rect,
-            "Create Project",
+            "Create Workspace",
             .{ .variant = .secondary, .disabled = self.connection_state != .connected or self.settings_panel.project_create_name.items.len == 0 },
         )) {
             self.createProjectFromPanel() catch |err| {
-                const msg = self.formatControlOpError("Project create failed", err);
+                const msg = self.formatControlOpError("Workspace create failed", err);
                 if (msg) |value| {
                     defer self.allocator.free(value);
                     self.setLauncherNotice(value);
@@ -6997,7 +7642,7 @@ const App = struct {
             .file => "File",
             .edit => "Edit",
             .view => "View",
-            .project => "Project",
+            .project => "Workspace",
             .tools => "Tools",
             .window => "Window",
             .help => "Help",
@@ -7094,7 +7739,7 @@ const App = struct {
                     } else {
                         if (self.drawButtonWidget(
                             Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                            "Switch Project",
+                            "Switch Workspace",
                             .{ .variant = .secondary },
                         )) {
                             self.returnToLauncher(.switched_project);
@@ -7170,7 +7815,7 @@ const App = struct {
                         "Settings",
                         .{ .variant = .secondary },
                     )) {
-                        self.ensureWorkspacePanel(&self.manager);
+                        self.ensureSettingsPanel(&self.manager);
                         self.ide_menu_open = null;
                     }
                     row_y += row_h + row_gap;
@@ -7691,12 +8336,12 @@ const App = struct {
                 self.drawSettingsPanel(manager, rect);
                 self.perf_frame_panel_ns.settings += std.time.nanoTimestamp() - started_ns;
             },
-            .ProjectWorkspace => {
+            .WorkspaceOverview => {
                 const started_ns = std.time.nanoTimestamp();
                 if (!self.drawHostPanelWithRuntime(manager, panel, rect)) {
-                    self.drawProjectPanel(manager, rect);
+                    self.drawWorkspacePanel(manager, rect);
                 }
-                self.project_panel_id = panel.id;
+                self.workspace_panel_id = panel.id;
                 self.perf_frame_panel_ns.projects += std.time.nanoTimestamp() - started_ns;
             },
             .FilesystemBrowser => {
@@ -7723,13 +8368,22 @@ const App = struct {
                 self.debug_panel_id = panel.id;
                 self.perf_frame_panel_ns.debug += std.time.nanoTimestamp() - started_ns;
             },
+            .Workboard => {
+                const started_ns = std.time.nanoTimestamp();
+                self.drawMissionWorkboardPanel(manager, panel, rect);
+                self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
+            },
+            .ApprovalsInbox => {
+                const started_ns = std.time.nanoTimestamp();
+                self.drawApprovalsInboxPanel(manager, panel, rect);
+                self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
+            },
             .ToolOutput => {
                 if (self.terminal_panel_id != null and self.terminal_panel_id.? == panel.id) {
                     const started_ns = std.time.nanoTimestamp();
                     self.drawTerminalPanel(manager, rect);
                     self.perf_frame_panel_ns.terminal += std.time.nanoTimestamp() - started_ns;
                 } else if (std.mem.eql(u8, panel.title, "Debug Stream") or
-                    std.mem.eql(u8, panel.title, "Projects") or
                     std.mem.eql(u8, panel.title, "Filesystem Browser") or
                     std.mem.eql(u8, panel.title, "Filesystem Tools"))
                 {
@@ -7771,7 +8425,7 @@ const App = struct {
     };
 
     fn drawHostPanelWithRuntime(self: *App, manager: *panel_manager.PanelManager, panel: *workspace.Panel, rect: UiRect) bool {
-        if (panel.kind != .ProjectWorkspace and panel.kind != .FilesystemBrowser and panel.kind != .FilesystemTools and panel.kind != .DebugStream) {
+        if (panel.kind != .WorkspaceOverview and panel.kind != .FilesystemBrowser and panel.kind != .FilesystemTools and panel.kind != .DebugStream) {
             return false;
         }
 
@@ -7779,7 +8433,7 @@ const App = struct {
         var action: panels_bridge.UiAction = .{};
         var pending_attachment: ?panels_bridge.AttachmentOpen = null;
         const host_registry = panels_bridge.runtime.HostPanelRegistry{
-            .project_workspace = .{ .ctx = @ptrCast(&runtime_ctx), .draw_fn = drawProjectWorkspaceHostPanel },
+            .workspace_overview = .{ .ctx = @ptrCast(&runtime_ctx), .draw_fn = drawWorkspaceOverviewHostPanel },
             .filesystem_browser = .{ .ctx = @ptrCast(&runtime_ctx), .draw_fn = drawFilesystemBrowserHostPanel },
             .filesystem_tools = .{ .ctx = @ptrCast(&runtime_ctx), .draw_fn = drawFilesystemToolsHostPanel },
             .debug_stream = .{ .ctx = @ptrCast(&runtime_ctx), .draw_fn = drawDebugStreamHostPanel },
@@ -7799,7 +8453,7 @@ const App = struct {
         return true;
     }
 
-    fn drawProjectWorkspaceHostPanel(
+    fn drawWorkspaceOverviewHostPanel(
         ctx: *anyopaque,
         allocator: std.mem.Allocator,
         panel: *workspace.Panel,
@@ -7813,7 +8467,7 @@ const App = struct {
         _ = action;
         _ = pending_attachment;
         const runtime_ctx: *HostPanelRuntimeCtx = @ptrCast(@alignCast(ctx));
-        runtime_ctx.app.drawProjectPanel(manager, panel_rect orelse return);
+        runtime_ctx.app.drawWorkspacePanel(manager, panel_rect orelse return);
     }
 
     fn drawFilesystemBrowserHostPanel(
@@ -7871,7 +8525,6 @@ const App = struct {
         if (panel.kind != .ToolOutput) return;
 
         const target_kind: ?workspace.PanelKind = blk: {
-            if (std.mem.eql(u8, panel.title, "Projects")) break :blk .ProjectWorkspace;
             if (std.mem.eql(u8, panel.title, "Filesystem Browser")) break :blk .FilesystemBrowser;
             if (std.mem.eql(u8, panel.title, "Filesystem Tools")) break :blk .FilesystemTools;
             if (std.mem.eql(u8, panel.title, "Debug Stream")) break :blk .DebugStream;
@@ -7882,14 +8535,14 @@ const App = struct {
         panel.data.deinit(self.allocator);
         panel.kind = kind;
         panel.data = switch (kind) {
-            .ProjectWorkspace => .{ .ProjectWorkspace = {} },
+            .WorkspaceOverview => .{ .WorkspaceOverview = {} },
             .FilesystemBrowser => .{ .FilesystemBrowser = {} },
             .FilesystemTools => .{ .FilesystemTools = {} },
             .DebugStream => .{ .DebugStream = {} },
             else => unreachable,
         };
         switch (kind) {
-            .ProjectWorkspace => self.project_panel_id = panel.id,
+            .WorkspaceOverview => self.workspace_panel_id = panel.id,
             .FilesystemBrowser => self.filesystem_panel_id = panel.id,
             .FilesystemTools => self.filesystem_tools_panel_id = panel.id,
             .DebugStream => self.debug_panel_id = panel.id,
@@ -8408,11 +9061,504 @@ const App = struct {
         }
     }
 
-    fn drawProjectPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+    fn drawApprovalsInboxPanel(self: *App, manager: *panel_manager.PanelManager, panel: *workspace.Panel, rect: UiRect) void {
+        self.requestMissionDashboardRefresh(false);
+
+        var action: panels_bridge.UiAction = .{};
+        var pending_attachment: ?panels_bridge.AttachmentOpen = null;
+        var bridge_cfg = zui.client.config.Config{
+            .server_url = self.config.server_url,
+            .token = self.config.activeRoleToken(),
+            .insecure_tls = self.config.insecure_tls,
+            .auto_connect_on_launch = self.config.auto_connect_on_launch,
+            .connect_host_override = self.config.connect_host_override,
+            .update_manifest_url = self.config.update_manifest_url,
+            .default_session = self.config.default_session,
+            .ui_theme = self.config.ui_theme,
+            .ui_theme_pack = self.config.ui_theme_pack,
+            .ui_watch_theme_pack = self.config.ui_watch_theme_pack,
+            .ui_theme_pack_recent = self.config.ui_theme_pack_recent,
+            .ui_profile = self.config.ui_profile,
+            .ui_expressive_enabled = true,
+            .ui_3d_enabled = true,
+        };
+        _ = panels_bridge.runtime.drawContentsWithHost(
+            self.allocator,
+            &self.client_context,
+            &bridge_cfg,
+            &self.agent_registry,
+            self.connection_state == .connected,
+            build_options.app_version,
+            panel,
+            rect,
+            &self.ui_inbox,
+            manager,
+            &action,
+            &pending_attachment,
+            null,
+            false,
+            null,
+        );
+        if (pending_attachment) |*value| value.deinit(self.allocator);
+
+        if (action.resolve_approval) |resolve| {
+            defer resolve.deinit(self.allocator);
+            self.resolveMissionApproval(resolve) catch |err| {
+                if (self.formatMissionDashboardOpError("Resolve mission approval", err)) |message| {
+                    defer self.allocator.free(message);
+                    self.setMissionDashboardError(message);
+                } else {
+                    self.setMissionDashboardError("Resolve mission approval failed");
+                }
+            };
+        }
+    }
+
+    fn drawMissionWorkboardPanel(self: *App, manager: *panel_manager.PanelManager, _: *workspace.Panel, rect: UiRect) void {
+        self.requestMissionDashboardRefresh(false);
+
+        const panel_rect = Rect{ .min = rect.min, .max = rect.max };
+        self.drawSurfacePanel(panel_rect);
+
+        const layout = self.panelLayoutMetrics();
+        const pad = layout.inset;
+        const inner_w = @max(1.0, panel_rect.width() - pad * 2.0);
+        const line_h = self.textLineHeight();
+        const button_h = layout.button_height;
+
+        const refresh_label = if (self.client_context.pending_workboard_request_id != null) "Refreshing..." else "Refresh";
+        const refresh_w = @max(96.0 * self.ui_scale, self.measureTextFast(refresh_label) + pad * 1.4);
+        const refresh_rect = Rect.fromXYWH(
+            panel_rect.max[0] - pad - refresh_w,
+            panel_rect.min[1] + pad,
+            refresh_w,
+            button_h,
+        );
+        if (self.drawButtonWidget(refresh_rect, refresh_label, .{
+            .variant = .secondary,
+            .disabled = self.connection_state != .connected or self.client_context.pending_workboard_request_id != null,
+        })) {
+            self.requestMissionDashboardRefresh(true);
+        }
+
+        var approvals_label_buf: [64]u8 = undefined;
+        const approvals_label = std.fmt.bufPrint(
+            &approvals_label_buf,
+            "Approvals {d}",
+            .{self.client_context.approvals.items.len},
+        ) catch "Approvals";
+        const approvals_w = @max(112.0 * self.ui_scale, self.measureTextFast(approvals_label) + pad * 1.6);
+        const approvals_rect = Rect.fromXYWH(
+            refresh_rect.min[0] - pad * 0.6 - approvals_w,
+            refresh_rect.min[1],
+            approvals_w,
+            button_h,
+        );
+        if (self.drawButtonWidget(approvals_rect, approvals_label, .{
+            .variant = .ghost,
+            .disabled = self.client_context.approvals.items.len == 0 and self.client_context.approvals_resolved.items.len == 0,
+        })) {
+            manager.ensurePanel(.ApprovalsInbox);
+        }
+
+        self.drawTextTrimmed(
+            panel_rect.min[0] + pad,
+            panel_rect.min[1] + pad,
+            @max(1.0, approvals_rect.min[0] - panel_rect.min[0] - pad * 1.6),
+            "Mission Workboard",
+            self.theme.colors.text_primary,
+        );
+
+        var status_buf: [160]u8 = undefined;
+        self.drawTextTrimmed(
+            panel_rect.min[0] + pad,
+            panel_rect.min[1] + pad + line_h + layout.row_gap * 0.35,
+            inner_w,
+            self.missionDashboardStatusText(&status_buf),
+            self.theme.colors.text_secondary,
+        );
+
+        const cards_top = panel_rect.min[1] + pad + line_h * 2.0 + layout.row_gap;
+        const card_gap = @max(layout.inner_inset, 10.0 * self.ui_scale);
+        const card_h = @max(84.0 * self.ui_scale, button_h * 2.4);
+        const card_w = @max(80.0, (inner_w - card_gap * 2.0) / 3.0);
+        const missions_rect = Rect.fromXYWH(panel_rect.min[0] + pad, cards_top, card_w, card_h);
+        const approvals_card_rect = Rect.fromXYWH(missions_rect.max[0] + card_gap, cards_top, card_w, card_h);
+        const recovery_rect = Rect.fromXYWH(approvals_card_rect.max[0] + card_gap, cards_top, card_w, card_h);
+
+        var running_count: usize = 0;
+        var waiting_count: usize = 0;
+        var failed_count: usize = 0;
+        var recovering_count: usize = 0;
+        for (self.mission_records.items) |mission| {
+            if (std.ascii.eqlIgnoreCase(mission.state, "running")) running_count += 1;
+            if (std.ascii.eqlIgnoreCase(mission.state, "waiting_for_approval") or std.ascii.eqlIgnoreCase(mission.state, "blocked")) waiting_count += 1;
+            if (std.ascii.eqlIgnoreCase(mission.state, "failed") or std.ascii.eqlIgnoreCase(mission.state, "cancelled")) failed_count += 1;
+            if (mission.recovery_count > 0 or std.ascii.eqlIgnoreCase(mission.state, "recovering")) recovering_count += 1;
+        }
+
+        var missions_summary_buf: [96]u8 = undefined;
+        const missions_summary = std.fmt.bufPrint(
+            &missions_summary_buf,
+            "{d} running, {d} waiting, {d} failed",
+            .{ running_count, waiting_count, failed_count },
+        ) catch "Mission activity";
+        self.drawMissionSummaryCard(missions_rect, self.theme.colors.primary, "Missions", if (self.mission_records.items.len > 0) "Live queue" else "No missions", missions_summary);
+
+        var approvals_summary_buf: [96]u8 = undefined;
+        const approvals_summary = std.fmt.bufPrint(
+            &approvals_summary_buf,
+            "{d} pending, {d} resolved in-session",
+            .{ self.client_context.approvals.items.len, self.client_context.approvals_resolved.items.len },
+        ) catch "Approval queue";
+        self.drawMissionSummaryCard(
+            approvals_card_rect,
+            if (self.client_context.approvals.items.len > 0) zcolors.rgba(236, 174, 36, 255) else self.theme.colors.border,
+            "Approvals",
+            if (self.client_context.approvals.items.len > 0) "Operator review" else "Queue clear",
+            approvals_summary,
+        );
+
+        var recovery_title_buf: [64]u8 = undefined;
+        const recovery_title = self.workspaceRecoveryHeadline(&recovery_title_buf);
+        var recovery_summary_buf: [96]u8 = undefined;
+        const recovery_summary = std.fmt.bufPrint(
+            &recovery_summary_buf,
+            "{d} missions with recovery history",
+            .{recovering_count},
+        ) catch "Mission recovery";
+        self.drawMissionSummaryCard(recovery_rect, self.workspaceRecoveryColor(), "Recovery", recovery_title, recovery_summary);
+
+        const content_top = cards_top + card_h + layout.row_gap;
+        const content_h = @max(1.0, panel_rect.max[1] - content_top - pad);
+        const list_w = @max(240.0 * self.ui_scale, inner_w * 0.36);
+        const list_rect = Rect.fromXYWH(panel_rect.min[0] + pad, content_top, list_w, content_h);
+        const detail_rect = Rect.fromXYWH(list_rect.max[0] + card_gap, content_top, @max(1.0, panel_rect.max[0] - list_rect.max[0] - pad - card_gap), content_h);
+        self.drawMissionListPanel(list_rect);
+        self.drawMissionDetailPanel(detail_rect);
+    }
+
+    fn drawMissionSummaryCard(self: *App, rect: Rect, accent: [4]f32, title: []const u8, value: []const u8, summary: []const u8) void {
+        self.drawSurfacePanel(rect);
+        const pad = @max(self.theme.spacing.xs, 8.0 * self.ui_scale);
+        const line_h = self.textLineHeight();
+        const accent_rect = Rect.fromXYWH(rect.min[0], rect.min[1], @max(3.0, 4.0 * self.ui_scale), rect.height());
+        self.drawFilledRect(accent_rect, accent);
+        self.drawTextTrimmed(rect.min[0] + pad * 1.6, rect.min[1] + pad, rect.width() - pad * 2.0, title, self.theme.colors.text_secondary);
+        self.drawTextTrimmed(rect.min[0] + pad * 1.6, rect.min[1] + pad + line_h + pad * 0.15, rect.width() - pad * 2.0, value, self.theme.colors.text_primary);
+        self.drawTextTrimmed(rect.min[0] + pad * 1.6, rect.min[1] + rect.height() - pad - line_h, rect.width() - pad * 2.0, summary, self.theme.colors.text_secondary);
+    }
+
+    fn drawMissionListPanel(self: *App, rect: Rect) void {
+        self.drawSurfacePanel(rect);
+        const pad = @max(self.theme.spacing.xs, 8.0 * self.ui_scale);
+        const line_h = self.textLineHeight();
+        const header_y = rect.min[1] + pad;
+        self.drawTextTrimmed(rect.min[0] + pad, header_y, rect.width() - pad * 2.0, "Mission Queue", self.theme.colors.text_primary);
+
+        if (self.mission_records.items.len == 0) {
+            self.drawTextTrimmed(
+                rect.min[0] + pad,
+                header_y + line_h + pad,
+                rect.width() - pad * 2.0,
+                if (self.connection_state == .connected) "No missions recorded yet." else "Connect to load mission records.",
+                self.theme.colors.text_secondary,
+            );
+            return;
+        }
+
+        const row_gap = @max(6.0 * self.ui_scale, pad * 0.6);
+        const row_h = @max(line_h * 3.0, 76.0 * self.ui_scale);
+        var y = header_y + line_h + pad * 0.8;
+        var drawn: usize = 0;
+        const available_rows = @as(usize, @intFromFloat(@max(1.0, (rect.max[1] - y - pad) / (row_h + row_gap))));
+        const now_ms = std.time.milliTimestamp();
+
+        for (self.mission_records.items) |mission| {
+            if (drawn >= available_rows) break;
+            const row_rect = Rect.fromXYWH(rect.min[0] + pad, y, rect.width() - pad * 2.0, row_h);
+            const selected = self.mission_selected_id != null and std.mem.eql(u8, self.mission_selected_id.?, mission.mission_id);
+            const hovered = row_rect.contains(.{ self.mouse_x, self.mouse_y });
+            const fill = if (selected)
+                zcolors.withAlpha(self.theme.colors.primary, 0.14)
+            else if (hovered)
+                zcolors.withAlpha(self.theme.colors.primary, 0.08)
+            else
+                zcolors.withAlpha(self.theme.colors.surface, 0.6);
+            self.drawFilledRect(row_rect, fill);
+            self.drawRect(row_rect, if (selected) self.theme.colors.primary else self.theme.colors.border);
+
+            const content_x = row_rect.min[0] + pad;
+            const content_w = row_rect.width() - pad * 2.0;
+            self.drawTextTrimmed(content_x, row_rect.min[1] + pad * 0.55, @max(1.0, content_w - 88.0 * self.ui_scale), missionDisplayTitle(&mission), self.theme.colors.text_primary);
+
+            var state_buf: [40]u8 = undefined;
+            const state_rect = Rect.fromXYWH(row_rect.max[0] - pad - 80.0 * self.ui_scale, row_rect.min[1] + pad * 0.45, 80.0 * self.ui_scale, line_h + pad * 0.5);
+            const state_label = normalizedMissionStateLabel(mission.state, &state_buf);
+            self.drawMissionStateBadge(state_rect, state_label, missionStateColor(self, mission.state));
+
+            var secondary_buf: [160]u8 = undefined;
+            const secondary = std.fmt.bufPrint(
+                &secondary_buf,
+                "{s}  {s}",
+                .{ mission.stage, mission.project_id orelse "no-workspace" },
+            ) catch mission.stage;
+            self.drawTextTrimmed(content_x, row_rect.min[1] + pad * 0.55 + line_h + pad * 0.25, content_w, secondary, self.theme.colors.text_secondary);
+
+            var meta_buf: [160]u8 = undefined;
+            const relative = if (mission.updated_at_ms > 0) blk: {
+                var time_buf: [40]u8 = undefined;
+                break :blk formatRelativeTimeLabel(now_ms, mission.updated_at_ms, &time_buf);
+            } else "unknown";
+            const meta = std.fmt.bufPrint(
+                &meta_buf,
+                "{s}  {s}",
+                .{ mission.agent_id orelse "agent:unknown", relative },
+            ) catch relative;
+            self.drawTextTrimmed(content_x, row_rect.min[1] + pad * 0.55 + line_h * 2.0 + pad * 0.3, content_w, meta, self.theme.colors.text_secondary);
+
+            if (self.mouse_released and row_rect.contains(.{ self.mouse_x, self.mouse_y })) {
+                self.setSelectedMissionId(mission.mission_id);
+            }
+
+            y += row_h + row_gap;
+            drawn += 1;
+        }
+
+        if (self.mission_records.items.len > drawn) {
+            var more_buf: [64]u8 = undefined;
+            const more = std.fmt.bufPrint(&more_buf, "...and {d} more", .{self.mission_records.items.len - drawn}) catch "...";
+            self.drawTextTrimmed(rect.min[0] + pad, rect.max[1] - pad - line_h, rect.width() - pad * 2.0, more, self.theme.colors.text_secondary);
+        }
+    }
+
+    fn drawMissionDetailPanel(self: *App, rect: Rect) void {
+        self.drawSurfacePanel(rect);
+        const mission = self.selectedMission() orelse {
+            self.drawTextTrimmed(rect.min[0] + self.theme.spacing.sm, rect.min[1] + self.theme.spacing.sm, rect.width() - self.theme.spacing.sm * 2.0, "Select a mission to inspect it.", self.theme.colors.text_secondary);
+            return;
+        };
+
+        const pad = @max(self.theme.spacing.sm, 10.0 * self.ui_scale);
+        const line_h = self.textLineHeight();
+        const inner_w = rect.width() - pad * 2.0;
+        var y = rect.min[1] + pad;
+
+        self.drawTextTrimmed(rect.min[0] + pad, y, inner_w - 96.0 * self.ui_scale, missionDisplayTitle(mission), self.theme.colors.text_primary);
+        var state_buf: [40]u8 = undefined;
+        const badge_rect = Rect.fromXYWH(rect.max[0] - pad - 88.0 * self.ui_scale, y - pad * 0.2, 88.0 * self.ui_scale, line_h + pad * 0.6);
+        self.drawMissionStateBadge(badge_rect, normalizedMissionStateLabel(mission.state, &state_buf), missionStateColor(self, mission.state));
+        y += line_h + pad * 0.6;
+
+        if (mission.summary) |summary| {
+            y += self.drawTextWrapped(rect.min[0] + pad, y, inner_w, summary, self.theme.colors.text_secondary) + pad * 0.5;
+        }
+
+        y = self.drawMissionDetailLine(rect, pad, y, "Use Case", mission.use_case);
+        y = self.drawMissionDetailLine(rect, pad, y, "Stage", mission.stage);
+        y = self.drawMissionDetailLine(rect, pad, y, "Agent", mission.agent_id orelse "unknown");
+        if (mission.persona_pack) |persona_pack| {
+            y = self.drawMissionDetailLine(rect, pad, y, "Persona Pack", persona_pack);
+        }
+        if (mission.project_id) |project_id| {
+            y = self.drawMissionDetailLine(rect, pad, y, "Workspace", project_id);
+        }
+        if (mission.worktree_name) |worktree_name| {
+            y = self.drawMissionDetailLine(rect, pad, y, "Worktree", worktree_name);
+        }
+        if (mission.workspace_root) |workspace_root| {
+            y = self.drawMissionDetailLine(rect, pad, y, "Workspace", workspace_root);
+        }
+        if (mission.contract_context_path != null or mission.contract_state_path != null or mission.contract_artifact_root != null) {
+            y += pad * 0.35;
+            self.drawTextTrimmed(rect.min[0] + pad, y, inner_w, "Contract", self.theme.colors.text_primary);
+            y += line_h;
+            y = self.drawOptionalMissionDetailLine(rect, pad, y, "Context", mission.contract_context_path);
+            y = self.drawOptionalMissionDetailLine(rect, pad, y, "State File", mission.contract_state_path);
+            y = self.drawOptionalMissionDetailLine(rect, pad, y, "Artifacts Root", mission.contract_artifact_root);
+        }
+
+        if (std.mem.eql(u8, mission.use_case, "pr_review")) {
+            const provider_sync = latestMissionArtifactByKind(mission, "provider_sync");
+            const checkout_sync = latestMissionArtifactByKind(mission, "checkout_sync");
+            const repo_status = latestMissionArtifactByKind(mission, "repo_status");
+            const diff_range = latestMissionArtifactByKind(mission, "diff_range");
+            const validation = latestMissionArtifactByKind(mission, "validation");
+            const recommendation = latestMissionArtifactByKind(mission, "recommendation");
+            const publish_review = latestMissionArtifactByKind(mission, "publish_review");
+
+            if (provider_sync != null or checkout_sync != null or repo_status != null or diff_range != null or validation != null or recommendation != null or publish_review != null) {
+                y += pad * 0.35;
+                self.drawTextTrimmed(rect.min[0] + pad, y, inner_w, "PR Review", self.theme.colors.text_primary);
+                y += line_h;
+                y = self.drawMissionArtifactDetailLine(rect, pad, y, "Provider Sync", provider_sync);
+                y = self.drawMissionArtifactDetailLine(rect, pad, y, "Checkout", checkout_sync);
+                y = self.drawMissionArtifactDetailLine(rect, pad, y, "Repo Status", repo_status);
+                y = self.drawMissionArtifactDetailLine(rect, pad, y, "Diff Range", diff_range);
+                y = self.drawMissionArtifactDetailLine(rect, pad, y, "Validation", validation);
+                y = self.drawMissionArtifactDetailLine(rect, pad, y, "Recommendation", recommendation);
+                y = self.drawMissionArtifactDetailLine(rect, pad, y, "Published Review", publish_review);
+            }
+        }
+
+        var recovery_buf: [96]u8 = undefined;
+        const recovery_text = if (mission.recovery_count > 0)
+            (std.fmt.bufPrint(&recovery_buf, "{d} recoveries", .{mission.recovery_count}) catch "recovery history")
+        else
+            "none";
+        y = self.drawMissionDetailLine(rect, pad, y, "Recovery", recovery_text);
+        if (mission.recovery_reason) |reason| {
+            y = self.drawMissionDetailLine(rect, pad, y, "Recovery Reason", reason);
+        }
+        if (mission.blocked_reason) |reason| {
+            y = self.drawMissionDetailLine(rect, pad, y, "Blocked", reason);
+        }
+
+        y += pad * 0.4;
+        self.drawTextTrimmed(rect.min[0] + pad, y, inner_w, "Memory ownership", self.theme.colors.text_primary);
+        y += line_h;
+        y += self.drawTextWrapped(
+            rect.min[0] + pad,
+            y,
+            inner_w,
+            "Kernel policy memories stay write-protected, identity memories remain agent-owned, and working memory stays mutable for strategy updates.",
+            self.theme.colors.text_secondary,
+        ) + pad * 0.6;
+
+        if (mission.pending_approval) |approval| {
+            self.drawTextTrimmed(rect.min[0] + pad, y, inner_w, "Pending approval", self.theme.colors.text_primary);
+            y += line_h;
+            y += self.drawTextWrapped(rect.min[0] + pad, y, inner_w, approval.message, self.theme.colors.text_secondary) + pad * 0.2;
+            var approval_buf: [128]u8 = undefined;
+            const approval_meta = std.fmt.bufPrint(
+                &approval_buf,
+                "{s} requested by {s}/{s}",
+                .{ approval.action_kind, approval.requested_by.actor_type, approval.requested_by.actor_id },
+            ) catch approval.action_kind;
+            y += self.drawTextWrapped(rect.min[0] + pad, y, inner_w, approval_meta, self.theme.colors.text_secondary) + pad * 0.6;
+        }
+
+        if (mission.artifacts.items.len > 0 and y < rect.max[1] - line_h * 2.0) {
+            self.drawTextTrimmed(rect.min[0] + pad, y, inner_w, "Artifacts", self.theme.colors.text_primary);
+            y += line_h;
+            const start_index = if (mission.artifacts.items.len > MISSION_PREVIEW_ARTIFACT_COUNT) mission.artifacts.items.len - MISSION_PREVIEW_ARTIFACT_COUNT else 0;
+            for (mission.artifacts.items[start_index..]) |artifact| {
+                if (y >= rect.max[1] - line_h * 2.0) break;
+                var artifact_buf: [256]u8 = undefined;
+                const artifact_line = std.fmt.bufPrint(
+                    &artifact_buf,
+                    "{s}  {s}",
+                    .{ artifact.kind, artifact.summary orelse artifact.path orelse "(no summary)" },
+                ) catch artifact.kind;
+                self.drawTextTrimmed(rect.min[0] + pad, y, inner_w, artifact_line, self.theme.colors.text_secondary);
+                y += line_h;
+            }
+            y += pad * 0.4;
+        }
+
+        if (mission.events.items.len > 0 and y < rect.max[1] - line_h * 2.0) {
+            self.drawTextTrimmed(rect.min[0] + pad, y, inner_w, "Recent events", self.theme.colors.text_primary);
+            y += line_h;
+            const start_index = if (mission.events.items.len > MISSION_PREVIEW_EVENT_COUNT) mission.events.items.len - MISSION_PREVIEW_EVENT_COUNT else 0;
+            const now_ms = std.time.milliTimestamp();
+            for (mission.events.items[start_index..]) |event| {
+                if (y >= rect.max[1] - line_h * 2.0) break;
+                var time_buf: [40]u8 = undefined;
+                var event_buf: [256]u8 = undefined;
+                const event_line = std.fmt.bufPrint(
+                    &event_buf,
+                    "{s}  {s}",
+                    .{ formatRelativeTimeLabel(now_ms, event.created_at_ms, &time_buf), event.event_type },
+                ) catch event.event_type;
+                self.drawTextTrimmed(rect.min[0] + pad, y, inner_w, event_line, self.theme.colors.text_secondary);
+                y += line_h;
+            }
+        }
+    }
+
+    fn drawMissionDetailLine(self: *App, rect: Rect, pad: f32, y: f32, label: []const u8, value: []const u8) f32 {
+        const line_h = self.textLineHeight();
+        const label_w = @max(110.0 * self.ui_scale, rect.width() * 0.18);
+        self.drawTextTrimmed(rect.min[0] + pad, y, label_w, label, self.theme.colors.text_secondary);
+        self.drawTextTrimmed(rect.min[0] + pad + label_w + pad * 0.6, y, rect.width() - label_w - pad * 3.0, value, self.theme.colors.text_primary);
+        return y + line_h;
+    }
+
+    fn drawOptionalMissionDetailLine(self: *App, rect: Rect, pad: f32, y: f32, label: []const u8, value: ?[]const u8) f32 {
+        if (value) |text| return self.drawMissionDetailLine(rect, pad, y, label, text);
+        return y;
+    }
+
+    fn drawMissionArtifactDetailLine(
+        self: *App,
+        rect: Rect,
+        pad: f32,
+        y: f32,
+        label: []const u8,
+        artifact: ?*const MissionArtifactView,
+    ) f32 {
+        const value = if (artifact) |entry|
+            entry.path orelse entry.summary orelse entry.kind
+        else
+            null;
+        return self.drawOptionalMissionDetailLine(rect, pad, y, label, value);
+    }
+
+    fn drawMissionStateBadge(self: *App, rect: Rect, label: []const u8, color: [4]f32) void {
+        self.drawFilledRect(rect, zcolors.withAlpha(color, 0.18));
+        self.drawRect(rect, color);
+        self.drawCenteredText(rect, label, color);
+    }
+
+    fn setSelectedMissionId(self: *App, mission_id: []const u8) void {
+        if (self.mission_selected_id) |existing| {
+            if (std.mem.eql(u8, existing, mission_id)) return;
+            self.allocator.free(existing);
+        }
+        self.mission_selected_id = self.allocator.dupe(u8, mission_id) catch null;
+    }
+
+    fn workspaceRecoveryHeadline(self: *App, buf: []u8) []const u8 {
+        if (self.workspace_recovery_suspended_until != 0 and self.debug_frame_counter < self.workspace_recovery_suspended_until) {
+            return "suspended";
+        }
+        if (self.workspace_recovery_blocked_until != 0 and self.debug_frame_counter < self.workspace_recovery_blocked_until) {
+            return "cooldown";
+        }
+        if (self.workspace_recovery_failures > 0) {
+            return std.fmt.bufPrint(buf, "{d} recent retries", .{self.workspace_recovery_failures}) catch "retrying";
+        }
+        return "stable";
+    }
+
+    fn workspaceRecoveryColor(self: *App) [4]f32 {
+        if (self.workspace_recovery_suspended_until != 0 and self.debug_frame_counter < self.workspace_recovery_suspended_until) {
+            return self.theme.colors.danger;
+        }
+        if (self.workspace_recovery_blocked_until != 0 and self.debug_frame_counter < self.workspace_recovery_blocked_until) {
+            return zcolors.rgba(236, 174, 36, 255);
+        }
+        if (self.workspace_recovery_failures > 0) {
+            return zcolors.rgba(236, 174, 36, 255);
+        }
+        return self.theme.colors.success;
+    }
+
+    fn missionDashboardStatusText(self: *App, buf: []u8) []const u8 {
+        if (self.connection_state != .connected) return "Disconnected";
+        if (self.client_context.pending_workboard_request_id != null) return "Updating mission dashboard...";
+        if (self.mission_last_error) |value| return value;
+        if (self.mission_last_refresh_ms <= 0) return "Mission dashboard not loaded yet.";
+        var rel_buf: [40]u8 = undefined;
+        const relative = formatRelativeTimeLabel(std.time.milliTimestamp(), self.mission_last_refresh_ms, &rel_buf);
+        return std.fmt.bufPrint(buf, "Live mission data refreshed {s}", .{relative}) catch "Live mission data";
+    }
+
+    fn drawWorkspacePanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         _ = manager;
-        var view = self.buildProjectPanelView();
+        var view = self.buildWorkspacePanelView();
         defer view.deinit(self.allocator);
-        const host = ProjectPanel.Host{
+        const host = WorkspacePanel.Host{
             .ctx = @ptrCast(self),
             .draw_form_section_title = launcherSettingsDrawFormSectionTitle,
             .draw_form_field_label = launcherSettingsDrawFormFieldLabel,
@@ -8423,11 +9569,11 @@ const App = struct {
             .draw_status_row = projectDrawStatusRow,
             .draw_vertical_scrollbar = projectDrawVerticalScrollbar,
         };
-        var panel_state = ProjectPanel.State{
+        var panel_state = WorkspacePanel.State{
             .focused_field = projectFocusFieldToExternal(self.settings_panel.focused_field),
             .scroll_y = self.settings_panel.projects_scroll_y,
         };
-        const action = ProjectPanel.draw(
+        const action = WorkspacePanel.draw(
             host,
             Rect{ .min = rect.min, .max = rect.max },
             self.panelLayoutMetrics(),
@@ -8441,13 +9587,16 @@ const App = struct {
             self.projectPanelModel(),
             view.view,
             .{
-                .project_token = self.settings_panel.project_token.items,
+                .workspace_token = self.settings_panel.project_token.items,
                 .create_name = self.settings_panel.project_create_name.items,
                 .create_vision = self.settings_panel.project_create_vision.items,
+                .template_id = self.settings_panel.workspace_template_id.items,
                 .operator_token = self.settings_panel.project_operator_token.items,
                 .mount_path = self.settings_panel.project_mount_path.items,
                 .mount_node_id = self.settings_panel.project_mount_node_id.items,
                 .mount_export_name = self.settings_panel.project_mount_export_name.items,
+                .bind_path = self.settings_panel.workspace_bind_path.items,
+                .bind_target_path = self.settings_panel.workspace_bind_target_path.items,
             },
             .{
                 .mouse_x = self.mouse_x,
@@ -8457,11 +9606,11 @@ const App = struct {
             &panel_state,
         );
         const mapped_focus = projectFocusFieldFromExternal(panel_state.focused_field);
-        if (mapped_focus != .none or isProjectPanelFocusField(self.settings_panel.focused_field)) {
+        if (mapped_focus != .none or isWorkspacePanelFocusField(self.settings_panel.focused_field)) {
             self.settings_panel.focused_field = mapped_focus;
         }
         self.settings_panel.projects_scroll_y = panel_state.scroll_y;
-        if (action) |value| self.performProjectPanelAction(value);
+        if (action) |value| self.performWorkspacePanelAction(value);
     }
 
     fn pathWithinMount(path: []const u8, mount_path: []const u8) bool {
@@ -9326,22 +10475,23 @@ const App = struct {
         }
     }
 
-    fn projectPanelModel(self: *App) panels_bridge.ProjectPanelModel {
+    fn projectPanelModel(self: *App) panels_bridge.WorkspacePanelModel {
         const selected_project_lock_state = self.selectedProjectTokenLocked();
         const selected_project_known = selected_project_lock_state != null;
         const selected_is_locked = if (selected_project_lock_state) |locked| locked else false;
         return .{
             .connected = self.connection_state == .connected,
-            .has_projects = self.projects.items.len > 0,
+            .has_workspaces = self.projects.items.len > 0,
             .has_nodes = self.nodes.items.len > 0,
-            .can_create_project = self.connection_state == .connected and self.settings_panel.project_create_name.items.len > 0,
-            .can_activate_project = self.connection_state == .connected and self.selectedProjectId() != null,
-            .can_lock_project = self.connection_state == .connected and selected_project_known and !selected_is_locked,
-            .can_unlock_project = self.connection_state == .connected and selected_project_known and selected_is_locked,
+            .can_create_workspace = self.connection_state == .connected and self.settings_panel.project_create_name.items.len > 0,
+            .can_activate_workspace = self.connection_state == .connected and self.selectedProjectId() != null,
+            .can_attach_session = self.connection_state == .connected and self.selectedProjectId() != null,
+            .can_lock_workspace = self.connection_state == .connected and selected_project_known and !selected_is_locked,
+            .can_unlock_workspace = self.connection_state == .connected and selected_project_known and selected_is_locked,
         };
     }
 
-    fn handleProjectPanelError(self: *App, prefix: []const u8, err: anyerror) void {
+    fn handleWorkspacePanelError(self: *App, prefix: []const u8, err: anyerror) void {
         const msg = self.formatControlOpError(prefix, err);
         if (msg) |text| {
             defer self.allocator.free(text);
@@ -9349,25 +10499,31 @@ const App = struct {
         }
     }
 
-    const OwnedProjectPanelView = struct {
-        selected_project_button_label: ?[]u8 = null,
-        selected_project_line: ?[]u8 = null,
+    const OwnedWorkspacePanelView = struct {
+        selected_workspace_button_label: ?[]u8 = null,
+        session_status_line: ?[]u8 = null,
+        selected_workspace_line: ?[]u8 = null,
         setup_status_line: ?[]u8 = null,
         setup_vision_line: ?[]u8 = null,
+        template_line: ?[]u8 = null,
+        binds_line: ?[]u8 = null,
         workspace_summary_line: ?[]u8 = null,
         workspace_health_line: ?[]u8 = null,
         counts_line: ?[]u8 = null,
         project_lines: std.ArrayListUnmanaged([]u8) = .{},
-        projects: std.ArrayListUnmanaged(panels_bridge.ProjectListEntryView) = .{},
+        projects: std.ArrayListUnmanaged(panels_bridge.WorkspaceListEntryView) = .{},
         node_lines: std.ArrayListUnmanaged([]u8) = .{},
-        nodes: std.ArrayListUnmanaged(panels_bridge.ProjectNodeEntryView) = .{},
-        view: panels_bridge.ProjectPanelView = .{},
+        nodes: std.ArrayListUnmanaged(panels_bridge.WorkspaceNodeEntryView) = .{},
+        view: panels_bridge.WorkspacePanelView = .{},
 
-        fn deinit(self: *OwnedProjectPanelView, allocator: std.mem.Allocator) void {
-            if (self.selected_project_button_label) |value| allocator.free(value);
-            if (self.selected_project_line) |value| allocator.free(value);
+        fn deinit(self: *OwnedWorkspacePanelView, allocator: std.mem.Allocator) void {
+            if (self.selected_workspace_button_label) |value| allocator.free(value);
+            if (self.session_status_line) |value| allocator.free(value);
+            if (self.selected_workspace_line) |value| allocator.free(value);
             if (self.setup_status_line) |value| allocator.free(value);
             if (self.setup_vision_line) |value| allocator.free(value);
+            if (self.template_line) |value| allocator.free(value);
+            if (self.binds_line) |value| allocator.free(value);
             if (self.workspace_summary_line) |value| allocator.free(value);
             if (self.workspace_health_line) |value| allocator.free(value);
             if (self.counts_line) |value| allocator.free(value);
@@ -9381,12 +10537,13 @@ const App = struct {
         }
     };
 
-    fn buildProjectPanelView(self: *App) OwnedProjectPanelView {
-        var owned: OwnedProjectPanelView = .{};
+    fn buildWorkspacePanelView(self: *App) OwnedWorkspacePanelView {
+        var owned: OwnedWorkspacePanelView = .{};
         const selected_project_lock_state = self.selectedProjectTokenLocked();
+        const selected_summary = self.selectedProjectSummary();
 
-        const selected_project_button_label: []const u8 = blk: {
-            if (self.settings_panel.project_id.items.len == 0) break :blk "Select project";
+        const selected_workspace_button_label: []const u8 = blk: {
+            if (self.settings_panel.project_id.items.len == 0) break :blk "Select workspace";
             const selected_id = self.settings_panel.project_id.items;
             for (self.projects.items) |project| {
                 if (std.mem.eql(u8, project.id, selected_id)) {
@@ -9400,7 +10557,7 @@ const App = struct {
                         },
                     ) catch null;
                     if (formatted) |value| {
-                        owned.selected_project_button_label = value;
+                        owned.selected_workspace_button_label = value;
                         break :blk value;
                     }
                     break :blk selected_id;
@@ -9410,21 +10567,51 @@ const App = struct {
         };
 
         const lock_state_text: []const u8 = if (self.selectedProjectId() == null)
-            "Project lock state: select a project"
+            "Workspace lock state: select a workspace"
         else if (selected_project_lock_state) |locked|
             if (locked)
-                "Project lock state: locked (project token required for non-admin)"
+                "Workspace lock state: locked (workspace token required for non-admin)"
             else
-                "Project lock state: unlocked (project token optional)"
+                "Workspace lock state: unlocked (workspace token optional)"
         else
-            "Project lock state: unknown (project not in current list)";
+            "Workspace lock state: unknown (workspace not in current list)";
 
         const add_mount_validation = self.validateProjectMountAddInput();
         const remove_mount_validation = self.validateProjectMountRemoveInput();
+        const add_bind_validation = self.validateWorkspaceBindAddInput();
+        const remove_bind_validation = self.validateWorkspaceBindRemoveInput();
         const mount_hint = if (self.connection_state == .connected)
             (add_mount_validation orelse remove_mount_validation)
         else
             null;
+        const bind_hint = if (self.connection_state == .connected)
+            (add_bind_validation orelse remove_bind_validation)
+        else
+            null;
+
+        var session_status_warning = false;
+        owned.session_status_line = switch (self.session_attach_state) {
+            .ready => std.fmt.allocPrint(
+                self.allocator,
+                "Live session attached: {s}",
+                .{self.current_session_key orelse self.settings_panel.default_session.items},
+            ) catch null,
+            .err => blk: {
+                session_status_warning = true;
+                break :blk std.fmt.allocPrint(
+                    self.allocator,
+                    "Live chat unavailable: {s}",
+                    .{self.workspace_last_error orelse "session attach failed"},
+                ) catch null;
+            },
+            .unknown, .warming => blk: {
+                session_status_warning = true;
+                break :blk self.allocator.dupe(
+                    u8,
+                    "Live chat is off. Select a workspace, finish setup, then use Attach Session when you want a Spiderweb runtime.",
+                ) catch null;
+            },
+        };
 
         const selected_project_text = if (self.settings_panel.project_id.items.len > 0)
             self.settings_panel.project_id.items
@@ -9434,9 +10621,9 @@ const App = struct {
             if (locked) " [locked]" else " [open]"
         else
             "";
-        owned.selected_project_line = std.fmt.allocPrint(
+        owned.selected_workspace_line = std.fmt.allocPrint(
             self.allocator,
-            "Selected project: {s}{s}",
+            "Selected workspace: {s}{s}",
             .{ selected_project_text, selected_project_lock_suffix },
         ) catch null;
 
@@ -9445,17 +10632,41 @@ const App = struct {
             const setup_status = if (hint.required) "required" else "ready";
             owned.setup_status_line = std.fmt.allocPrint(
                 self.allocator,
-                "Project setup: {s}",
+                "Workspace setup: {s}",
                 .{setup_status},
             ) catch null;
             setup_status_warning = hint.required;
             if (hint.project_vision) |vision| {
                 owned.setup_vision_line = std.fmt.allocPrint(
                     self.allocator,
-                    "Project vision: {s}",
+                    "Workspace vision: {s}",
                     .{vision},
                 ) catch null;
             }
+        }
+
+        if (selected_summary) |summary| {
+            const template_text = summary.template_id orelse "dev";
+            owned.template_line = std.fmt.allocPrint(
+                self.allocator,
+                "Workspace template: {s}",
+                .{template_text},
+            ) catch null;
+            if (bind_hint) |hint| {
+                owned.binds_line = std.fmt.allocPrint(
+                    self.allocator,
+                    "Workspace binds: {d}. {s}",
+                    .{ summary.bind_count, hint },
+                ) catch null;
+            } else {
+                owned.binds_line = std.fmt.allocPrint(
+                    self.allocator,
+                    "Workspace binds: {d}",
+                    .{summary.bind_count},
+                ) catch null;
+            }
+        } else if (bind_hint) |hint| {
+            owned.binds_line = self.allocator.dupe(u8, hint) catch null;
         }
 
         var workspace_health_warning = false;
@@ -9494,19 +10705,21 @@ const App = struct {
 
         owned.counts_line = std.fmt.allocPrint(
             self.allocator,
-            "Projects: {d} | Nodes: {d}",
+            "Workspaces: {d} | Nodes: {d}",
             .{ self.projects.items.len, self.nodes.items.len },
         ) catch null;
 
         for (self.projects.items, 0..) |project, idx| {
             const line = std.fmt.allocPrint(
                 self.allocator,
-                "{s} [{s}] access={s} mounts={d}",
+                "{s} [{s}] access={s} template={s} mounts={d} binds={d}",
                 .{
                     project.id,
                     project.status,
                     if (project.token_locked) "locked" else "open",
+                    project.template_id orelse "dev",
                     project.mount_count,
+                    project.bind_count,
                 },
             ) catch continue;
             owned.project_lines.append(self.allocator, line) catch {
@@ -9541,69 +10754,85 @@ const App = struct {
         }
 
         owned.view = .{
-            .title = "Project Workspace",
-            .selected_project_button_label = selected_project_button_label,
+            .title = "Workspace Overview",
+            .selected_workspace_button_label = selected_workspace_button_label,
             .lock_state_text = lock_state_text,
-            .project_token = self.settings_panel.project_token.items,
+            .workspace_token = self.settings_panel.project_token.items,
             .create_name = self.settings_panel.project_create_name.items,
             .create_vision = self.settings_panel.project_create_vision.items,
+            .template_id = self.settings_panel.workspace_template_id.items,
             .operator_token = self.settings_panel.project_operator_token.items,
             .mount_path = self.settings_panel.project_mount_path.items,
             .mount_node_id = self.settings_panel.project_mount_node_id.items,
             .mount_export_name = self.settings_panel.project_mount_export_name.items,
+            .bind_path = self.settings_panel.workspace_bind_path.items,
+            .bind_target_path = self.settings_panel.workspace_bind_target_path.items,
             .mount_hint = mount_hint,
             .workspace_error_text = self.workspace_last_error,
-            .selected_project_line = owned.selected_project_line,
+            .session_status_line = owned.session_status_line,
+            .session_status_warning = session_status_warning,
+            .selected_workspace_line = owned.selected_workspace_line,
             .setup_status_line = owned.setup_status_line,
             .setup_status_warning = setup_status_warning,
             .setup_vision_line = owned.setup_vision_line,
+            .template_line = owned.template_line,
+            .binds_line = owned.binds_line,
             .workspace_summary_line = owned.workspace_summary_line,
             .workspace_health_line = owned.workspace_health_line,
             .workspace_health_warning = workspace_health_warning,
             .workspace_health_error = workspace_health_error,
             .counts_line = owned.counts_line,
-            .projects = owned.projects.items,
+            .help_line = if (self.session_attach_state == .ready)
+                "Open Filesystem, Debug, or Terminal panels from the Windows menu."
+            else
+                "External workers can use the workspace without live chat. Use Attach Session only when you want a Spiderweb runtime.",
+            .workspaces = owned.projects.items,
             .nodes = owned.nodes.items,
         };
         return owned;
     }
 
-    fn performProjectPanelAction(self: *App, action: panels_bridge.ProjectPanelAction) void {
+    fn performWorkspacePanelAction(self: *App, action: panels_bridge.WorkspacePanelAction) void {
         switch (action) {
-            .select_project_index => |project_index| {
+            .select_workspace_index => |project_index| {
                 if (project_index >= self.projects.items.len) return;
                 const project = self.projects.items[project_index];
                 self.selectProjectInSettings(project.id) catch |err| {
-                    const msg = std.fmt.allocPrint(self.allocator, "Project select failed: {s}", .{@errorName(err)}) catch null;
+                    const msg = std.fmt.allocPrint(self.allocator, "Workspace select failed: {s}", .{@errorName(err)}) catch null;
                     if (msg) |text| {
                         defer self.allocator.free(text);
                         self.setWorkspaceError(text);
                     }
                 };
             },
-            .create_project => {
+            .create_workspace => {
                 self.createProjectFromPanel() catch |err| {
-                    self.handleProjectPanelError("Project create failed", err);
+                    self.handleWorkspacePanelError("Workspace create failed", err);
                 };
             },
             .refresh_workspace => {
                 self.refreshWorkspaceData() catch |err| {
-                    self.handleProjectPanelError("Workspace refresh failed", err);
+                    self.handleWorkspacePanelError("Workspace refresh failed", err);
                 };
             },
-            .activate_project => {
+            .activate_workspace => {
                 self.activateSelectedProject() catch |err| {
-                    self.handleProjectPanelError("Project activate failed", err);
+                    self.handleWorkspacePanelError("Workspace activate failed", err);
                 };
             },
-            .lock_project => {
+            .attach_session => {
+                self.attachSelectedSessionFromPanel() catch |err| {
+                    self.handleWorkspacePanelError("Session attach failed", err);
+                };
+            },
+            .lock_workspace => {
                 self.lockSelectedProjectFromPanel() catch |err| {
-                    self.handleProjectPanelError("Project lock failed", err);
+                    self.handleWorkspacePanelError("Workspace lock failed", err);
                 };
             },
-            .unlock_project => {
+            .unlock_workspace => {
                 self.unlockSelectedProjectFromPanel() catch |err| {
-                    self.handleProjectPanelError("Project unlock failed", err);
+                    self.handleWorkspacePanelError("Workspace unlock failed", err);
                 };
             },
             .add_mount => {
@@ -9611,7 +10840,7 @@ const App = struct {
                     self.setWorkspaceError(message);
                 } else {
                     self.setProjectMountFromPanel() catch |err| {
-                        self.handleProjectPanelError("Mount set failed", err);
+                        self.handleWorkspacePanelError("Mount set failed", err);
                     };
                 }
             },
@@ -9620,43 +10849,61 @@ const App = struct {
                     self.setWorkspaceError(message);
                 } else {
                     self.removeProjectMountFromPanel() catch |err| {
-                        self.handleProjectPanelError("Mount remove failed", err);
+                        self.handleWorkspacePanelError("Mount remove failed", err);
+                    };
+                }
+            },
+            .add_bind => {
+                if (self.validateWorkspaceBindAddInput()) |message| {
+                    self.setWorkspaceError(message);
+                } else {
+                    self.setWorkspaceBindFromPanel() catch |err| {
+                        self.handleWorkspacePanelError("Bind set failed", err);
+                    };
+                }
+            },
+            .remove_bind => {
+                if (self.validateWorkspaceBindRemoveInput()) |message| {
+                    self.setWorkspaceError(message);
+                } else {
+                    self.removeWorkspaceBindFromPanel() catch |err| {
+                        self.handleWorkspacePanelError("Bind remove failed", err);
                     };
                 }
             },
             .auth_status => {
                 self.fetchAuthStatusFromPanel(false) catch |err| {
-                    self.handleProjectPanelError("Auth status failed", err);
+                    self.handleWorkspacePanelError("Auth status failed", err);
                 };
             },
             .rotate_auth_user => {
                 self.rotateAuthTokenFromPanel("user") catch |err| {
-                    self.handleProjectPanelError("Auth rotate(user) failed", err);
+                    self.handleWorkspacePanelError("Auth rotate(user) failed", err);
                 };
             },
             .rotate_auth_admin => {
                 self.rotateAuthTokenFromPanel("admin") catch |err| {
-                    self.handleProjectPanelError("Auth rotate(admin) failed", err);
+                    self.handleWorkspacePanelError("Auth rotate(admin) failed", err);
                 };
             },
             .reveal_auth_admin => {
                 self.revealAuthTokenFromPanel("admin") catch |err| {
-                    self.handleProjectPanelError("Reveal admin token failed", err);
+                    self.handleWorkspacePanelError("Reveal admin token failed", err);
                 };
             },
             .copy_auth_admin => {
                 self.copyAuthTokenFromPanel("admin") catch |err| {
-                    self.handleProjectPanelError("Copy admin token failed", err);
+                    self.handleWorkspacePanelError("Copy admin token failed", err);
                 };
             },
             .reveal_auth_user => {
                 self.revealAuthTokenFromPanel("user") catch |err| {
-                    self.handleProjectPanelError("Reveal user token failed", err);
+                    self.handleWorkspacePanelError("Reveal user token failed", err);
                 };
             },
             .copy_auth_user => {
                 self.copyAuthTokenFromPanel("user") catch |err| {
-                    self.handleProjectPanelError("Copy user token failed", err);
+                    self.handleWorkspacePanelError("Copy user token failed", err);
                 };
             },
         }
@@ -10334,7 +11581,7 @@ const App = struct {
 
         owned.perf_panel_stats = std.fmt.allocPrint(
             self.allocator,
-            "Panel draw ms: debug {d:.2} settings {d:.2} chat {d:.2} fs {d:.2} terminal {d:.2} projects {d:.2} other {d:.2}",
+            "Panel draw ms: debug {d:.2} settings {d:.2} chat {d:.2} fs {d:.2} terminal {d:.2} workspaces {d:.2} other {d:.2}",
             .{
                 self.perf_last_panel_debug_ms,
                 self.perf_last_panel_settings_ms,
@@ -10382,12 +11629,12 @@ const App = struct {
             const token_present = if (self.selectedProjectToken(project_id)) |token| token.len > 0 else false;
             break :blk std.fmt.allocPrint(
                 self.allocator,
-                "Node watch scope: role={s} project={s} token={s}",
+                "Node watch scope: role={s} workspace={s} token={s}",
                 .{ role_name, project_id, if (token_present) "set" else "none" },
             ) catch null;
         } else std.fmt.allocPrint(
             self.allocator,
-            "Node watch scope: role={s} project=(session default)",
+            "Node watch scope: role={s} workspace=(session default)",
             .{role_name},
         ) catch null;
 
@@ -10454,7 +11701,7 @@ const App = struct {
                 "Node service events: polling worldfs snapshot"
             else
                 "Node service events: paused",
-            .scope_preview = if (owned.scope_preview) |value| value else "Node watch scope: role/project unavailable",
+            .scope_preview = if (owned.scope_preview) |value| value else "Node watch scope: role/workspace unavailable",
             .show_user_scope_notice = self.config.active_role == .user,
             .node_watch_filter = self.node_service_watch_filter.items,
             .node_watch_replay_limit = self.node_service_watch_replay_limit.items,
@@ -12962,7 +14209,7 @@ const App = struct {
         if (project_id.len == 0) return null;
         if (isSystemProjectId(project_id)) return null;
         if (self.settings_panel.project_token.items.len > 0) return self.settings_panel.project_token.items;
-        return self.config.getProjectToken(project_id);
+        return self.config.getWorkspaceToken(project_id);
     }
 
     fn selectedAgentId(self: *App) ?[]const u8 {
@@ -13024,7 +14271,7 @@ const App = struct {
         {
             return self.settings_panel.project_token.items;
         }
-        return self.config.getProjectToken(pid);
+        return self.config.getWorkspaceToken(pid);
     }
 
     fn attachSessionBindingExplicit(
@@ -13393,7 +14640,7 @@ const App = struct {
         project_token: ?[]const u8,
     ) !void {
         std.log.info(
-            "[GUI] attachSessionBindingWithProject: session={s} project={s} token={} state={s}",
+            "[GUI] attachSessionBindingWithProject: session={s} workspace={s} token={} state={s}",
             .{
                 session_key,
                 project_id orelse "(none)",
@@ -13408,7 +14655,7 @@ const App = struct {
         );
         defer self.allocator.free(resolved_agent);
         std.log.info(
-            "[GUI] attachSessionBindingWithProject: resolved_agent={s} project={s}",
+            "[GUI] attachSessionBindingWithProject: resolved_agent={s} workspace={s}",
             .{ resolved_agent, project_id orelse "(none)" },
         );
 
@@ -13459,7 +14706,7 @@ const App = struct {
                 }
             }
             std.log.err(
-                "[GUI] attachSessionBindingWithProject failed: session={s} project={s} agent={s} err={s} detail={s}",
+                "[GUI] attachSessionBindingWithProject failed: session={s} workspace={s} agent={s} err={s} detail={s}",
                 .{
                     session_key,
                     project_id orelse "(none)",
@@ -13473,7 +14720,7 @@ const App = struct {
         defer self.allocator.free(response_payload);
 
         std.log.info(
-            "[GUI] attachSessionBindingWithProject ok: session={s} project={s} agent={s}",
+            "[GUI] attachSessionBindingWithProject ok: session={s} workspace={s} agent={s}",
             .{ session_key, project_id orelse "(none)", resolved_agent },
         );
         self.invalidateFsrpcAttachment();
@@ -13491,6 +14738,56 @@ const App = struct {
             project_id,
             project_token,
         );
+    }
+
+    fn attachSelectedSessionFromPanel(self: *App) !void {
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        const project_id = self.selectedProjectId() orelse return error.ProjectIdRequired;
+        const project_token = self.selectedProjectToken(project_id);
+        const session_key = try self.currentSessionOrDefault();
+
+        try self.ensureSessionExists(session_key, session_key);
+        try self.attachSessionBindingWithProject(
+            client,
+            session_key,
+            project_id,
+            project_token,
+        );
+        self.refreshSessionAttachStatusOnce(client, session_key);
+
+        var resolved_agent = self.selectedAgentId();
+        var fetched_agent: ?[]u8 = null;
+        defer if (fetched_agent) |value| self.allocator.free(value);
+        if (resolved_agent == null) {
+            fetched_agent = self.fetchDefaultAgentFromServer(client, session_key) catch null;
+            if (fetched_agent) |agent_id| {
+                resolved_agent = agent_id;
+                try self.setDefaultAgentInSettings(agent_id);
+            }
+        }
+
+        try self.startFilesystemWorker(
+            client.url_buf,
+            client.token_buf,
+            session_key,
+            resolved_agent,
+            project_id,
+            project_token,
+        );
+        self.clearFilesystemError();
+        self.requestDebugStreamSnapshot(true);
+        self.node_service_watch_enabled = true;
+        self.requestNodeServiceSnapshot(true);
+        self.clearWorkspaceError();
+        try self.syncSettingsToConfig();
+
+        const notice = try std.fmt.allocPrint(
+            self.allocator,
+            "Attached session {s} to workspace {s}.",
+            .{ session_key, project_id },
+        );
+        defer self.allocator.free(notice);
+        try self.appendMessage("system", notice, null);
     }
 
     fn tryConnect(self: *App, manager: *panel_manager.PanelManager) !void {
@@ -13553,15 +14850,6 @@ const App = struct {
             return;
         };
 
-        var attach_warning: ?[]u8 = null;
-        defer if (attach_warning) |value| self.allocator.free(value);
-        var worker_attach_session: ?[]const u8 = null;
-        var worker_attach_agent: ?[]const u8 = null;
-        var worker_attach_project_id: ?[]const u8 = null;
-        var worker_attach_project_token: ?[]const u8 = null;
-        var fetched_worker_agent: ?[]u8 = null;
-        defer if (fetched_worker_agent) |value| self.allocator.free(value);
-
         if (self.ws_client) |*client| {
             const connect_payload_json = control_plane.ensureUnifiedV2ConnectionPayloadJsonWithTimeout(
                 self.allocator,
@@ -13582,7 +14870,7 @@ const App = struct {
                             self.settings_panel.focused_field = .project_operator_token;
                             break :blk try std.fmt.allocPrint(
                                 self.allocator,
-                                "Handshake failed: {s}. Update token in Projects and reconnect.",
+                                "Handshake failed: {s}. Update the workspace operator token and reconnect.",
                                 .{remote},
                             );
                         }
@@ -13599,122 +14887,17 @@ const App = struct {
                 std.log.warn("Failed to parse connect setup hint payload: {s}", .{@errorName(err)});
                 self.clearConnectSetupHint();
             };
-
-            if (self.settings_panel.default_session.items.len == 0) {
-                if (self.config.default_session) |default_session| {
-                    const seed = if (default_session.len > 0) default_session else "main";
-                    try self.settings_panel.default_session.appendSlice(self.allocator, seed);
-                } else {
-                    try self.settings_panel.default_session.appendSlice(self.allocator, "main");
-                }
-            }
-            const raw_attach_session = self.settings_panel.default_session.items;
-            const attach_session_owned = try sanitizeSessionKey(self.allocator, raw_attach_session);
-            defer self.allocator.free(attach_session_owned);
-            if (!std.mem.eql(u8, attach_session_owned, raw_attach_session)) {
-                self.settings_panel.default_session.clearRetainingCapacity();
-                try self.settings_panel.default_session.appendSlice(self.allocator, attach_session_owned);
-            }
-            const attach_session = self.settings_panel.default_session.items;
-            try self.ensureSessionExists(attach_session, attach_session);
-            worker_attach_session = attach_session;
-            worker_attach_project_id = self.preferredAttachProjectId();
-            worker_attach_project_token = self.projectTokenForSessionProject(worker_attach_project_id);
-
-            self.attachSessionBinding(client, attach_session) catch |err| {
-                if (err == error.ProjectIdRequired) {
-                    attach_warning = try self.allocator.dupe(
-                        u8,
-                        "Session attach requires an explicit project. Select a project in Settings and reconnect.",
-                    );
-                    worker_attach_project_id = null;
-                    worker_attach_project_token = null;
-                } else if (err == error.NoProjectCompatibleAgent) {
-                    attach_warning = try self.allocator.dupe(
-                        u8,
-                        "No non-system agent is available for the selected project. Provision/select a project agent and reconnect.",
-                    );
-                    worker_attach_project_id = null;
-                    worker_attach_project_token = null;
-                } else {
-                    const primary_detail_owned = try self.allocator.dupe(
-                        u8,
-                        if (err == error.RemoteError)
-                            (control_plane.lastRemoteError() orelse @errorName(err))
-                        else
-                            @errorName(err),
-                    );
-                    defer self.allocator.free(primary_detail_owned);
-
-                    if (isProvisioningRemoteError(primary_detail_owned)) {
-                        std.log.err("Session attach blocked: {s}", .{primary_detail_owned});
-                        client.deinit();
-                        self.ws_client = null;
-                        const msg = self.formatControlRemoteMessage("Session attach failed", primary_detail_owned) orelse
-                            try std.fmt.allocPrint(self.allocator, "Session attach failed: {s}", .{primary_detail_owned});
-                        defer self.allocator.free(msg);
-                        self.setConnectionState(.error_state, msg);
-                        return;
-                    }
-
-                    std.log.err("Session attach failed: {s}", .{primary_detail_owned});
-                    worker_attach_project_id = null;
-                    worker_attach_project_token = null;
-                    attach_warning = try std.fmt.allocPrint(
-                        self.allocator,
-                        "Session attach failed ({s}). Select a project and reconnect.",
-                        .{primary_detail_owned},
-                    );
-                }
-            };
-
-            worker_attach_agent = self.selectedAgentId();
-            if (worker_attach_agent == null) {
-                fetched_worker_agent = self.fetchDefaultAgentFromServer(client, attach_session) catch null;
-                if (fetched_worker_agent) |agent_id| {
-                    worker_attach_agent = agent_id;
-                    self.setDefaultAgentInSettings(agent_id) catch {};
-                }
-            }
         }
 
-        if (worker_attach_project_id != null) {
-            self.startFilesystemWorker(
-                effective_url,
-                connect_token,
-                worker_attach_session,
-                worker_attach_agent,
-                worker_attach_project_id,
-                worker_attach_project_token,
-            ) catch |err| {
-                std.log.warn("Failed to ready filesystem transport: {s}", .{@errorName(err)});
-                const warning = std.fmt.allocPrint(
-                    self.allocator,
-                    "Filesystem transport unavailable: {s}",
-                    .{@errorName(err)},
-                ) catch null;
-                defer if (warning) |value| self.allocator.free(value);
-                if (warning) |value| self.setFilesystemError(value);
-            };
-        } else {
-            self.setFilesystemError("Filesystem transport unavailable until a project is selected and attached.");
-        }
-
+        self.setFilesystemError("Filesystem transport is idle until you attach a Spiderweb session to the selected workspace.");
         self.setConnectionState(.connected, "Connected");
         if (self.ui_stage == .launcher) {
-            self.setLauncherNotice("Connected. Select a project to open workspace.");
+            self.setLauncherNotice("Connected. Select a workspace to open.");
         }
         self.requestDebugStreamSnapshot(true);
         self.node_service_watch_enabled = true;
         self.requestNodeServiceSnapshot(true);
         self.settings_panel.focused_field = .none;
-        if (self.ws_client) |*client| {
-            const session_key_for_status = if (self.settings_panel.default_session.items.len > 0)
-                self.settings_panel.default_session.items
-            else
-                "main";
-            self.refreshSessionAttachStatusOnce(client, session_key_for_status);
-        }
         self.refreshWorkspaceData() catch |err| {
             if (self.formatControlOpError("Workspace refresh failed", err)) |msg| {
                 defer self.allocator.free(msg);
@@ -13739,20 +14922,16 @@ const App = struct {
             try self.setCurrentSessionKey(self.chat_sessions.items[0].key);
         }
 
-        if (attach_warning) |warning| {
-            self.setWorkspaceError(warning);
-            try self.appendMessage("system", warning, null);
-        }
         if (self.connect_setup_hint) |hint| {
             if (hint.required) {
-                const base = hint.message orelse "Project setup is required. Ask Mother to gather setup details.";
+                const base = hint.message orelse "Workspace setup is required. Ask Mother to gather setup details.";
                 const setup_notice = if (hint.project_vision) |vision|
-                    std.fmt.allocPrint(self.allocator, "{s} Project vision: {s}", .{ base, vision }) catch null
+                    std.fmt.allocPrint(self.allocator, "{s} Workspace vision: {s}", .{ base, vision }) catch null
                 else
                     self.allocator.dupe(u8, base) catch null;
                 defer if (setup_notice) |value| self.allocator.free(value);
                 if (setup_notice) |notice| {
-                    if (attach_warning == null) self.setWorkspaceError(notice);
+                    self.setWorkspaceError(notice);
                     try self.appendMessage("system", notice, null);
                 }
             }
@@ -13768,14 +14947,7 @@ const App = struct {
         } else {
             try self.appendMessage("system", "Connected to Spiderweb", null);
         }
-
-        // Switch to chat panel by focusing it
-        for (manager.workspace.panels.items) |*panel| {
-            if (panel.kind == .Chat) {
-                manager.focusPanel(panel.id);
-                break;
-            }
-        }
+        _ = try self.ensureWorkspacePanel(manager);
     }
 
     fn focusSettingsPanel(_: *App, manager: *panel_manager.PanelManager) void {
@@ -13787,7 +14959,7 @@ const App = struct {
         }
     }
 
-    fn ensureWorkspacePanel(self: *App, manager: *panel_manager.PanelManager) void {
+    fn ensureSettingsPanel(self: *App, manager: *panel_manager.PanelManager) void {
         for (manager.workspace.panels.items) |*panel| {
             if (panel.kind == .Settings or panel.kind == .Control) {
                 manager.focusPanel(panel.id);
@@ -13996,7 +15168,7 @@ const App = struct {
         defer self.allocator.free(layout_path);
 
         var next_workspace = zui.ui.workspace_store.loadOrDefault(self.allocator, layout_path) catch |err| blk: {
-            std.log.warn("Failed to load project layout, using canonical default: {s}", .{@errorName(err)});
+            std.log.warn("Failed to load workspace layout, using canonical default: {s}", .{@errorName(err)});
             break :blk try workspace.Workspace.initDefault(self.allocator);
         };
         errdefer next_workspace.deinit(self.allocator);
@@ -14012,7 +15184,7 @@ const App = struct {
         self.bindMainWindowManager();
         self.migrateLegacyHostPanels(&self.manager);
         self.removeWorkspaceSettingsPanels(&self.manager);
-        self.focusChatPanel(&self.manager);
+        _ = self.ensureWorkspacePanel(&self.manager) catch {};
     }
 
     fn openSelectedProjectFromLauncher(self: *App) !void {
@@ -14030,9 +15202,9 @@ const App = struct {
         self.ui_stage = .workspace;
         self.ide_menu_open = null;
         self.windows_menu_open_window_id = null;
-        self.setLauncherNotice("Project opened.");
+        self.setLauncherNotice("Workspace opened.");
         self.restoreWorkspaceLayout(profile_id, project_id) catch {};
-        self.config.recordRecentProject(profile_id, project_id, null) catch {};
+        self.config.recordRecentWorkspace(profile_id, project_id, null) catch {};
         self.config.save() catch {};
         _ = c.SDL_SetWindowTitle(self.window, "SpiderApp - Workspace");
     }
@@ -14053,7 +15225,7 @@ const App = struct {
         self.closeAllSecondaryWindows();
         _ = c.SDL_SetWindowTitle(self.window, "SpiderApp - Launcher");
         switch (reason) {
-            .switched_project => self.setLauncherNotice("Switched back to launcher. Select another project."),
+            .switched_project => self.setLauncherNotice("Switched back to launcher. Select another workspace."),
             .connection_lost => self.setLauncherNotice("Connection lost. Reconnect to continue."),
             .disconnected => self.setLauncherNotice("Disconnected from Spider Web."),
             .none => self.clearLauncherNotice(),
@@ -14061,7 +15233,7 @@ const App = struct {
 
         if (reason == .switched_project and self.connection_state == .connected and self.ws_client != null) {
             self.refreshWorkspaceData() catch |err| {
-                const msg = std.fmt.allocPrint(self.allocator, "Project refresh failed: {s}", .{@errorName(err)}) catch null;
+                const msg = std.fmt.allocPrint(self.allocator, "Workspace refresh failed: {s}", .{@errorName(err)}) catch null;
                 defer if (msg) |value| self.allocator.free(value);
                 if (msg) |value| self.setLauncherNotice(value);
             };
@@ -14202,63 +15374,19 @@ const App = struct {
         }
         const attach_project_id = self.preferredAttachProjectId();
         std.log.info(
-            "[GUI] sendChatMessageText: session={s} project={s} attach_state={s}",
+            "[GUI] sendChatMessageText: session={s} workspace={s} attach_state={s}",
             .{ session_key, attach_project_id orelse "(none)", @tagName(self.session_attach_state) },
         );
-        var attached_during_send = false;
-        if (self.session_attach_state == .unknown or self.session_attach_state == .err or self.session_attach_state == .warming) {
-            self.attachSessionBinding(client, session_key) catch |err| {
-                if (err == error.ProjectIdRequired) {
-                    const msg = "Session attach requires an explicit project. Select a project in Settings.";
-                    self.setWorkspaceError(msg);
-                    try self.appendMessage("system", msg, null);
-                    return err;
-                }
-                if (err == error.NoProjectCompatibleAgent) {
-                    const msg = "No non-system agent is available for the selected project. Provision/select a project agent first.";
-                    self.setWorkspaceError(msg);
-                    try self.appendMessage("system", msg, null);
-                    return err;
-                }
-                const primary_detail_owned = try self.allocator.dupe(
-                    u8,
-                    if (err == error.RemoteError)
-                        (control_plane.lastRemoteError() orelse @errorName(err))
-                    else
-                        @errorName(err),
-                );
-                defer self.allocator.free(primary_detail_owned);
-
-                if (isProvisioningRemoteError(primary_detail_owned)) {
-                    const err_text = self.formatControlRemoteMessage("Session attach failed", primary_detail_owned) orelse
-                        try std.fmt.allocPrint(self.allocator, "Session attach failed: {s}", .{primary_detail_owned});
-                    defer self.allocator.free(err_text);
-                    self.setWorkspaceError(err_text);
-                    try self.appendMessage("system", err_text, null);
-                    return err;
-                }
-
-                const err_text = try std.fmt.allocPrint(self.allocator, "Session attach failed: {s}", .{primary_detail_owned});
-                defer self.allocator.free(err_text);
-                self.setWorkspaceError(err_text);
-                try self.appendMessage("system", err_text, null);
-                return err;
-            };
-            attached_during_send = true;
-            self.refreshSessionAttachStatusOnce(client, session_key);
-            std.log.info(
-                "[GUI] sendChatMessageText: attach completed session={s} state={s}",
-                .{ session_key, @tagName(self.session_attach_state) },
-            );
-        }
         if (self.session_attach_state == .err) {
             const detail = self.workspace_last_error orelse "Sandbox runtime is unavailable for this session.";
             try self.appendMessage("system", detail, null);
             return error.RemoteError;
         }
-
-        if (attached_during_send and attach_project_id != null) {
-            self.clearFilesystemError();
+        if (self.session_attach_state != .ready) {
+            const msg = "Chat is disabled until you attach a Spiderweb session from Workspace Overview. External workers can keep using the mounted workspace without live chat.";
+            self.setWorkspaceError(msg);
+            try self.appendMessage("system", msg, null);
+            return error.ProjectIdRequired;
         }
 
         const user_msg_id = try self.nextMessageId("msg");
@@ -16680,32 +17808,26 @@ const App = struct {
         return panel_id;
     }
 
-    fn ensureProjectPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
-        if (self.project_panel_id) |panel_id| {
+    fn ensureWorkspacePanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
+        if (self.workspace_panel_id) |panel_id| {
             if (self.findPanelById(manager, panel_id) != null) {
                 manager.focusPanel(panel_id);
                 return panel_id;
             }
-            self.project_panel_id = null;
+            self.workspace_panel_id = null;
         }
 
         for (manager.workspace.panels.items) |*panel| {
-            if (panel.kind == .ProjectWorkspace) {
-                self.project_panel_id = panel.id;
-                manager.focusPanel(panel.id);
-                return panel.id;
-            }
-            if (panel.kind == .ToolOutput and std.mem.eql(u8, panel.title, "Projects")) {
-                self.promoteLegacyHostPanel(manager, panel);
-                self.project_panel_id = panel.id;
+            if (panel.kind == .WorkspaceOverview) {
+                self.workspace_panel_id = panel.id;
                 manager.focusPanel(panel.id);
                 return panel.id;
             }
         }
 
-        const panel_data = workspace.PanelData{ .ProjectWorkspace = {} };
-        const panel_id = try manager.openPanel(.ProjectWorkspace, "Projects", panel_data);
-        self.project_panel_id = panel_id;
+        const panel_data = workspace.PanelData{ .WorkspaceOverview = {} };
+        const panel_id = try manager.openPanel(.WorkspaceOverview, "Workspace Overview", panel_data);
+        self.workspace_panel_id = panel_id;
         if (manager.workspace.syncDockLayout() catch false) {
             manager.workspace.markDirty();
         }
@@ -17281,6 +18403,228 @@ const App = struct {
         self.drawText(x + width, y, ellipsis, color);
     }
 };
+
+fn dupRequiredStringField(allocator: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8) ![]u8 {
+    const value = obj.get(key) orelse return error.InvalidResponse;
+    if (value != .string) return error.InvalidResponse;
+    return allocator.dupe(u8, value.string);
+}
+
+fn dupOptionalStringField(allocator: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8) !?[]u8 {
+    const value = obj.get(key) orelse return null;
+    return switch (value) {
+        .string => try allocator.dupe(u8, value.string),
+        .null => null,
+        else => return error.InvalidResponse,
+    };
+}
+
+fn intFieldOrDefault(obj: std.json.ObjectMap, key: []const u8, default: i64) !i64 {
+    const value = obj.get(key) orelse return default;
+    return switch (value) {
+        .integer => @intCast(value.integer),
+        .float => @intFromFloat(value.float),
+        .null => default,
+        else => return error.InvalidResponse,
+    };
+}
+
+fn u64FieldOrDefault(obj: std.json.ObjectMap, key: []const u8, default: u64) !u64 {
+    const value = obj.get(key) orelse return default;
+    return switch (value) {
+        .integer => if (value.integer < 0) return error.InvalidResponse else @intCast(value.integer),
+        .float => if (value.float < 0) return error.InvalidResponse else @intFromFloat(value.float),
+        .null => default,
+        else => return error.InvalidResponse,
+    };
+}
+
+fn parseMissionActorView(allocator: std.mem.Allocator, value: std.json.Value) !MissionActorView {
+    if (value != .object) return error.InvalidResponse;
+    return .{
+        .actor_type = try dupRequiredStringField(allocator, value.object, "actor_type"),
+        .actor_id = try dupRequiredStringField(allocator, value.object, "actor_id"),
+    };
+}
+
+fn parseMissionArtifactView(allocator: std.mem.Allocator, value: std.json.Value) !MissionArtifactView {
+    if (value != .object) return error.InvalidResponse;
+    return .{
+        .kind = try dupRequiredStringField(allocator, value.object, "kind"),
+        .path = try dupOptionalStringField(allocator, value.object, "path"),
+        .summary = try dupOptionalStringField(allocator, value.object, "summary"),
+        .created_at_ms = try intFieldOrDefault(value.object, "created_at_ms", 0),
+    };
+}
+
+fn parseMissionEventView(allocator: std.mem.Allocator, value: std.json.Value) !MissionEventView {
+    if (value != .object) return error.InvalidResponse;
+    return .{
+        .seq = try u64FieldOrDefault(value.object, "seq", 0),
+        .event_type = try dupRequiredStringField(allocator, value.object, "event_type"),
+        .payload_json = blk: {
+            const payload = value.object.get("payload") orelse return error.InvalidResponse;
+            break :blk try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(payload, .{})});
+        },
+        .created_at_ms = try intFieldOrDefault(value.object, "created_at_ms", 0),
+    };
+}
+
+fn parseMissionApprovalView(allocator: std.mem.Allocator, value: std.json.Value) !MissionApprovalView {
+    if (value != .object) return error.InvalidResponse;
+    const obj = value.object;
+    return .{
+        .approval_id = try dupRequiredStringField(allocator, obj, "approval_id"),
+        .action_kind = try dupRequiredStringField(allocator, obj, "action_kind"),
+        .message = try dupRequiredStringField(allocator, obj, "message"),
+        .payload_json = blk: {
+            const payload = obj.get("payload") orelse break :blk null;
+            break :blk switch (payload) {
+                .null => null,
+                else => try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(payload, .{})}),
+            };
+        },
+        .requested_at_ms = try intFieldOrDefault(obj, "requested_at_ms", 0),
+        .requested_by = try parseMissionActorView(allocator, obj.get("requested_by") orelse return error.InvalidResponse),
+        .resolved_at_ms = try intFieldOrDefault(obj, "resolved_at_ms", 0),
+        .resolved_by = blk: {
+            const resolved = obj.get("resolved_by") orelse break :blk null;
+            if (resolved == .null) break :blk null;
+            break :blk try parseMissionActorView(allocator, resolved);
+        },
+        .resolution_note = try dupOptionalStringField(allocator, obj, "resolution_note"),
+        .resolution = try dupOptionalStringField(allocator, obj, "resolution"),
+    };
+}
+
+fn lookupMissionPersonaPack(agent_packs: []const MissionAgentPackView, agent_id: []const u8) ?[]const u8 {
+    for (agent_packs) |entry| {
+        if (std.mem.eql(u8, entry.agent_id, agent_id)) return entry.persona_pack;
+    }
+    return null;
+}
+
+fn missionResultErrorMessage(allocator: std.mem.Allocator, result_json: []const u8) !?[]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, result_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return null;
+    const root = parsed.value.object;
+    if (root.get("ok")) |value| {
+        if (value == .bool and value.bool) return null;
+    }
+    const err_val = root.get("error") orelse return try allocator.dupe(u8, "mission operation failed");
+    return switch (err_val) {
+        .string => try allocator.dupe(u8, err_val.string),
+        .object => blk: {
+            if (err_val.object.get("message")) |message| {
+                if (message == .string) break :blk try allocator.dupe(u8, message.string);
+            }
+            if (err_val.object.get("code")) |code| {
+                if (code == .string) break :blk try allocator.dupe(u8, code.string);
+            }
+            break :blk try allocator.dupe(u8, "mission operation failed");
+        },
+        .null => null,
+        else => try allocator.dupe(u8, "mission operation failed"),
+    };
+}
+
+fn deinitMissionRecordList(allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged(MissionRecordView)) void {
+    for (list.items) |*mission| mission.deinit(allocator);
+    list.deinit(allocator);
+    list.* = .{};
+}
+
+fn deinitMissionAgentPackList(allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged(MissionAgentPackView)) void {
+    for (list.items) |*entry| entry.deinit(allocator);
+    list.deinit(allocator);
+    list.* = .{};
+}
+
+fn freeOwnedExecApproval(allocator: std.mem.Allocator, approval: *zui.protocol.types.ExecApproval) void {
+    allocator.free(approval.id);
+    allocator.free(approval.payload_json);
+    if (approval.summary) |summary| allocator.free(summary);
+    if (approval.requested_by) |value| allocator.free(value);
+    if (approval.resolved_by) |value| allocator.free(value);
+    if (approval.decision) |value| allocator.free(value);
+    approval.* = undefined;
+}
+
+fn deinitExecApprovalList(allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged(zui.protocol.types.ExecApproval)) void {
+    for (list.items) |*approval| freeOwnedExecApproval(allocator, approval);
+    list.deinit(allocator);
+    list.* = .{};
+}
+
+fn freeOwnedWorkboardItem(allocator: std.mem.Allocator, item: *zui.protocol.types.WorkboardItem) void {
+    allocator.free(item.id);
+    if (item.kind) |value| allocator.free(value);
+    if (item.status) |value| allocator.free(value);
+    if (item.title) |value| allocator.free(value);
+    if (item.summary) |value| allocator.free(value);
+    if (item.owner) |value| allocator.free(value);
+    if (item.agent_id) |value| allocator.free(value);
+    if (item.parent_id) |value| allocator.free(value);
+    if (item.cron_key) |value| allocator.free(value);
+    if (item.payload_json) |value| allocator.free(value);
+    item.* = undefined;
+}
+
+fn deinitWorkboardItemOwnedSlice(allocator: std.mem.Allocator, items: []zui.protocol.types.WorkboardItem) void {
+    for (items) |*item| freeOwnedWorkboardItem(allocator, item);
+    allocator.free(items);
+}
+
+fn missionDisplayTitle(mission: *const MissionRecordView) []const u8 {
+    return mission.title orelse mission.summary orelse mission.mission_id;
+}
+
+fn normalizedMissionStateLabel(state: []const u8, buf: []u8) []const u8 {
+    if (std.ascii.eqlIgnoreCase(state, "waiting_for_approval")) return "waiting";
+    if (std.ascii.eqlIgnoreCase(state, "completed")) return "done";
+    if (std.ascii.eqlIgnoreCase(state, "cancelled")) return "cancelled";
+    if (std.ascii.eqlIgnoreCase(state, "recovering")) return "recovering";
+    return std.fmt.bufPrint(buf, "{s}", .{state}) catch state;
+}
+
+fn latestMissionArtifactByKind(mission: *const MissionRecordView, kind: []const u8) ?*const MissionArtifactView {
+    var index = mission.artifacts.items.len;
+    while (index > 0) {
+        index -= 1;
+        const artifact = &mission.artifacts.items[index];
+        if (std.mem.eql(u8, artifact.kind, kind)) return artifact;
+    }
+    return null;
+}
+
+fn missionStateColor(app: *App, state: []const u8) [4]f32 {
+    if (std.ascii.eqlIgnoreCase(state, "running")) return app.theme.colors.primary;
+    if (std.ascii.eqlIgnoreCase(state, "completed")) return app.theme.colors.success;
+    if (std.ascii.eqlIgnoreCase(state, "failed") or std.ascii.eqlIgnoreCase(state, "cancelled")) return app.theme.colors.danger;
+    if (std.ascii.eqlIgnoreCase(state, "waiting_for_approval") or
+        std.ascii.eqlIgnoreCase(state, "blocked") or
+        std.ascii.eqlIgnoreCase(state, "planning"))
+    {
+        return zcolors.rgba(236, 174, 36, 255);
+    }
+    if (std.ascii.eqlIgnoreCase(state, "recovering")) return zcolors.rgba(120, 180, 255, 255);
+    return app.theme.colors.border;
+}
+
+fn formatRelativeTimeLabel(now_ms: i64, ts_ms: i64, buf: []u8) []const u8 {
+    if (ts_ms <= 0) return "unknown";
+    const delta_ms_abs: i64 = if (now_ms >= ts_ms) now_ms - ts_ms else ts_ms - now_ms;
+    const minutes: i64 = @divTrunc(delta_ms_abs, 60_000);
+    if (minutes < 1) return "just now";
+    if (minutes < 60) return std.fmt.bufPrint(buf, "{d}m ago", .{minutes}) catch "recent";
+    const hours: i64 = @divTrunc(minutes, 60);
+    if (hours < 24) return std.fmt.bufPrint(buf, "{d}h ago", .{hours}) catch "today";
+    const days: i64 = @divTrunc(hours, 24);
+    if (days < 30) return std.fmt.bufPrint(buf, "{d}d ago", .{days}) catch "this month";
+    const months: i64 = @divTrunc(days, 30);
+    return std.fmt.bufPrint(buf, "{d}mo ago", .{months}) catch "older";
+}
 
 // Image loading stubs required by ziggy-ui
 pub export fn zsc_load_icon_rgba_from_memory(data: [*c]const u8, len: c_int, width: [*c]c_int, height: [*c]c_int) [*c]u8 {

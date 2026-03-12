@@ -4,11 +4,12 @@ Client for the Spiderweb AI agent system.
 
 ## Overview
 
-SpiderApp exposes a project-oriented view of a distributed Spiderweb:
+SpiderApp exposes a workspace-first view of a distributed Spiderweb:
 
 - connect to Spiderweb over WebSocket
-- select or create projects
-- activate project mounts
+- select or create workspaces
+- configure workspace mounts and binds
+- generate worker handoff commands
 - inspect Spider nodes topology
 
 ## Build
@@ -46,13 +47,15 @@ Terminal backend notes:
 
 ```bash
 # Connect
-spider connect --url ws://127.0.0.1:18790
+spider --url ws://127.0.0.1:18790 connect
 
-# Project control
-spider project list
-spider --operator-token op-secret project create "Distributed Workspace" "unified mounts"
-spider project use proj-1 proj-token-abc
-spider workspace status
+# Workspace control
+spider workspace list
+spider --operator-token op-secret workspace create --template dev "Distributed Workspace" "unified mounts"
+spider workspace use ws-demo ws-token-abc
+spider workspace template list
+spider workspace bind list
+spider workspace handoff show codex_app
 
 # Topology
 spider node list
@@ -69,27 +72,27 @@ spider chat send "summarize current mounts"
 # Session control
 spider session list
 spider session history --limit 5
-spider session attach review mother --project system
+spider session attach review mother --workspace system
 spider session resume review
 spider session restore
 ```
 
 Useful options:
 
-- `--project <project_id>`
-- `--project-token <token>`
+- `--workspace <workspace_id>`
+- `--workspace-token <token>`
 - `--operator-token <token>`
 - `--url <ws-url>`
 
 ## GUI Highlights
 
 - server connect/disconnect
-- project ID + project token selection
-- onboarding wizard (`connect -> project -> mounts -> activate`)
-- workspace refresh + activate project actions
-- live project/node/mount summary in settings
+- workspace ID + workspace token selection
+- onboarding wizard (`connect -> workspace -> mounts -> binds -> handoff`)
+- workspace refresh + activate workspace actions
+- live workspace/node/mount summary in settings
 - filesystem browser panel with path navigation and text preview
-- chat send/receive bound to selected project context
+- chat activation only after attaching a Spiderweb session to the selected workspace
 - debug stream panel
 
 ## Protocol Notes
@@ -97,10 +100,12 @@ Useful options:
 - unified-v2 only (no legacy compatibility path)
 - control handshake: `control.version` then `control.connect`
 - control-plane examples:
-  - `control.project_list`
-  - `control.project_get`
-  - `control.project_create`
-  - `control.project_activate`
+  - `control.workspace_list`
+  - `control.workspace_get`
+  - `control.workspace_create`
+  - `control.workspace_activate`
+  - `control.workspace_template_list`
+  - `control.workspace_bind_set`
   - `control.workspace_status`
   - `control.node_list`
   - `control.node_get`

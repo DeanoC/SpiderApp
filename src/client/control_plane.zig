@@ -101,16 +101,16 @@ pub fn requestControlPayloadJsonWithTimeout(
     return unified_v2.controlReplyPayloadJson(allocator, &response);
 }
 
-pub fn listProjects(
+pub fn listWorkspaces(
     allocator: std.mem.Allocator,
     client: anytype,
     message_counter: *u64,
-) !std.ArrayListUnmanaged(workspace_types.ProjectSummary) {
+) !std.ArrayListUnmanaged(workspace_types.WorkspaceSummary) {
     const payload_json = try requestControlPayloadJson(
         allocator,
         client,
         message_counter,
-        "control.project_list",
+        "control.workspace_list",
         null,
     );
     defer allocator.free(payload_json);
@@ -118,17 +118,52 @@ pub fn listProjects(
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidResponse;
-    const projects_val = parsed.value.object.get("projects") orelse return error.InvalidResponse;
-    if (projects_val != .array) return error.InvalidResponse;
+    const workspaces_val = parsed.value.object.get("workspaces") orelse parsed.value.object.get("projects") orelse return error.InvalidResponse;
+    if (workspaces_val != .array) return error.InvalidResponse;
 
-    var projects = std.ArrayListUnmanaged(workspace_types.ProjectSummary){};
-    errdefer workspace_types.deinitProjectList(allocator, &projects);
+    var workspaces = std.ArrayListUnmanaged(workspace_types.WorkspaceSummary){};
+    errdefer workspace_types.deinitWorkspaceList(allocator, &workspaces);
 
-    for (projects_val.array.items) |item| {
+    for (workspaces_val.array.items) |item| {
         if (item != .object) return error.InvalidResponse;
-        try projects.append(allocator, try parseProjectSummary(allocator, item.object));
+        try workspaces.append(allocator, try parseProjectSummary(allocator, item.object));
     }
-    return projects;
+    return workspaces;
+}
+
+pub fn listProjects(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+) !std.ArrayListUnmanaged(workspace_types.ProjectSummary) {
+    return listWorkspaces(allocator, client, message_counter);
+}
+
+pub fn getWorkspace(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+    workspace_id: []const u8,
+) !workspace_types.WorkspaceDetail {
+    const escaped_id = try unified_v2.jsonEscape(allocator, workspace_id);
+    defer allocator.free(escaped_id);
+    const payload_req = try std.fmt.allocPrint(allocator, "{{\"workspace_id\":\"{s}\"}}", .{escaped_id});
+    defer allocator.free(payload_req);
+
+    const payload_json = try requestControlPayloadJson(
+        allocator,
+        client,
+        message_counter,
+        "control.workspace_get",
+        payload_req,
+    );
+    defer allocator.free(payload_json);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResponse;
+
+    return parseProjectDetail(allocator, parsed.value.object);
 }
 
 pub fn getProject(
@@ -137,17 +172,59 @@ pub fn getProject(
     message_counter: *u64,
     project_id: []const u8,
 ) !workspace_types.ProjectDetail {
-    const escaped_id = try unified_v2.jsonEscape(allocator, project_id);
-    defer allocator.free(escaped_id);
-    const payload_req = try std.fmt.allocPrint(allocator, "{{\"project_id\":\"{s}\"}}", .{escaped_id});
-    defer allocator.free(payload_req);
+    return getWorkspace(allocator, client, message_counter, project_id);
+}
+
+pub fn createWorkspace(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+    name: []const u8,
+    vision: ?[]const u8,
+    template_id: ?[]const u8,
+    operator_token: ?[]const u8,
+) !workspace_types.WorkspaceDetail {
+    const escaped_name = try unified_v2.jsonEscape(allocator, name);
+    defer allocator.free(escaped_name);
+
+    const escaped_vision = if (vision) |value| blk: {
+        if (value.len == 0) break :blk null;
+        break :blk try unified_v2.jsonEscape(allocator, value);
+    } else null;
+    defer if (escaped_vision) |value| allocator.free(value);
+
+    const escaped_operator_token = if (operator_token) |value| blk: {
+        if (value.len == 0) break :blk null;
+        break :blk try unified_v2.jsonEscape(allocator, value);
+    } else null;
+    defer if (escaped_operator_token) |value| allocator.free(value);
+    const escaped_template_id = if (template_id) |value| blk: {
+        if (value.len == 0) break :blk null;
+        break :blk try unified_v2.jsonEscape(allocator, value);
+    } else null;
+    defer if (escaped_template_id) |value| allocator.free(value);
+
+    var payload = std.ArrayListUnmanaged(u8){};
+    defer payload.deinit(allocator);
+    try payload.append(allocator, '{');
+    try payload.writer(allocator).print("\"name\":\"{s}\"", .{escaped_name});
+    if (escaped_vision) |value| {
+        try payload.writer(allocator).print(",\"vision\":\"{s}\"", .{value});
+    }
+    if (escaped_template_id) |value| {
+        try payload.writer(allocator).print(",\"template_id\":\"{s}\"", .{value});
+    }
+    if (escaped_operator_token) |value| {
+        try payload.writer(allocator).print(",\"operator_token\":\"{s}\"", .{value});
+    }
+    try payload.append(allocator, '}');
 
     const payload_json = try requestControlPayloadJson(
         allocator,
         client,
         message_counter,
-        "control.project_get",
-        payload_req,
+        "control.workspace_create",
+        payload.items,
     );
     defer allocator.free(payload_json);
 
@@ -166,47 +243,17 @@ pub fn createProject(
     vision: ?[]const u8,
     operator_token: ?[]const u8,
 ) !workspace_types.ProjectDetail {
-    const escaped_name = try unified_v2.jsonEscape(allocator, name);
-    defer allocator.free(escaped_name);
+    return createWorkspace(allocator, client, message_counter, name, vision, "dev", operator_token);
+}
 
-    const escaped_vision = if (vision) |value| blk: {
-        if (value.len == 0) break :blk null;
-        break :blk try unified_v2.jsonEscape(allocator, value);
-    } else null;
-    defer if (escaped_vision) |value| allocator.free(value);
-
-    const escaped_operator_token = if (operator_token) |value| blk: {
-        if (value.len == 0) break :blk null;
-        break :blk try unified_v2.jsonEscape(allocator, value);
-    } else null;
-    defer if (escaped_operator_token) |value| allocator.free(value);
-
-    var payload = std.ArrayListUnmanaged(u8){};
-    defer payload.deinit(allocator);
-    try payload.append(allocator, '{');
-    try payload.writer(allocator).print("\"name\":\"{s}\"", .{escaped_name});
-    if (escaped_vision) |value| {
-        try payload.writer(allocator).print(",\"vision\":\"{s}\"", .{value});
-    }
-    if (escaped_operator_token) |value| {
-        try payload.writer(allocator).print(",\"operator_token\":\"{s}\"", .{value});
-    }
-    try payload.append(allocator, '}');
-
-    const payload_json = try requestControlPayloadJson(
-        allocator,
-        client,
-        message_counter,
-        "control.project_create",
-        payload.items,
-    );
-    defer allocator.free(payload_json);
-
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
-    defer parsed.deinit();
-    if (parsed.value != .object) return error.InvalidResponse;
-
-    return parseProjectDetail(allocator, parsed.value.object);
+pub fn activateWorkspace(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+    workspace_id: []const u8,
+    workspace_token: ?[]const u8,
+) !workspace_types.WorkspaceStatus {
+    return activateProject(allocator, client, message_counter, workspace_id, workspace_token);
 }
 
 pub fn activateProject(
@@ -224,12 +271,12 @@ pub fn activateProject(
         defer allocator.free(escaped_token);
         break :blk try std.fmt.allocPrint(
             allocator,
-            "{{\"project_id\":\"{s}\",\"project_token\":\"{s}\"}}",
+            "{{\"workspace_id\":\"{s}\",\"workspace_token\":\"{s}\"}}",
             .{ escaped_project, escaped_token },
         );
     } else try std.fmt.allocPrint(
         allocator,
-        "{{\"project_id\":\"{s}\"}}",
+        "{{\"workspace_id\":\"{s}\"}}",
         .{escaped_project},
     );
     defer allocator.free(payload_req);
@@ -238,7 +285,7 @@ pub fn activateProject(
         allocator,
         client,
         message_counter,
-        "control.project_activate",
+        "control.workspace_activate",
         payload_req,
     );
     defer allocator.free(payload_json);
@@ -279,11 +326,11 @@ pub fn setProjectMount(
     defer payload.deinit(allocator);
     try payload.append(allocator, '{');
     try payload.writer(allocator).print(
-        "\"project_id\":\"{s}\",\"node_id\":\"{s}\",\"export_name\":\"{s}\",\"mount_path\":\"{s}\"",
+        "\"workspace_id\":\"{s}\",\"node_id\":\"{s}\",\"export_name\":\"{s}\",\"mount_path\":\"{s}\"",
         .{ escaped_project, escaped_node, escaped_export, escaped_mount },
     );
     if (escaped_token) |value| {
-        try payload.writer(allocator).print(",\"project_token\":\"{s}\"", .{value});
+        try payload.writer(allocator).print(",\"workspace_token\":\"{s}\"", .{value});
     }
     try payload.append(allocator, '}');
 
@@ -291,7 +338,7 @@ pub fn setProjectMount(
         allocator,
         client,
         message_counter,
-        "control.project_mount_set",
+        "control.workspace_mount_set",
         payload.items,
     );
     defer allocator.free(payload_json);
@@ -300,6 +347,28 @@ pub fn setProjectMount(
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidResponse;
     return parseProjectDetail(allocator, parsed.value.object);
+}
+
+pub fn setWorkspaceMount(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+    workspace_id: []const u8,
+    workspace_token: ?[]const u8,
+    node_id: []const u8,
+    export_name: []const u8,
+    mount_path: []const u8,
+) !workspace_types.WorkspaceDetail {
+    return setProjectMount(
+        allocator,
+        client,
+        message_counter,
+        workspace_id,
+        workspace_token,
+        node_id,
+        export_name,
+        mount_path,
+    );
 }
 
 pub fn removeProjectMount(
@@ -329,11 +398,11 @@ pub fn removeProjectMount(
     defer payload.deinit(allocator);
     try payload.append(allocator, '{');
     try payload.writer(allocator).print(
-        "\"project_id\":\"{s}\",\"mount_path\":\"{s}\"",
+        "\"workspace_id\":\"{s}\",\"mount_path\":\"{s}\"",
         .{ escaped_project, escaped_mount },
     );
     if (escaped_token) |value| {
-        try payload.writer(allocator).print(",\"project_token\":\"{s}\"", .{value});
+        try payload.writer(allocator).print(",\"workspace_token\":\"{s}\"", .{value});
     }
     if (node_id_filter) |node_id| {
         const escaped_node = try unified_v2.jsonEscape(allocator, node_id);
@@ -351,7 +420,7 @@ pub fn removeProjectMount(
         allocator,
         client,
         message_counter,
-        "control.project_mount_remove",
+        "control.workspace_mount_remove",
         payload.items,
     );
     defer allocator.free(payload_json);
@@ -362,19 +431,216 @@ pub fn removeProjectMount(
     return parseProjectDetail(allocator, parsed.value.object);
 }
 
-pub const ProjectTokenMutation = struct {
+pub fn removeWorkspaceMount(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+    workspace_id: []const u8,
+    workspace_token: ?[]const u8,
+    mount_path: []const u8,
+    node_id_filter: ?[]const u8,
+    export_name_filter: ?[]const u8,
+) !workspace_types.WorkspaceDetail {
+    return removeProjectMount(
+        allocator,
+        client,
+        message_counter,
+        workspace_id,
+        workspace_token,
+        mount_path,
+        node_id_filter,
+        export_name_filter,
+    );
+}
+
+pub fn listWorkspaceTemplates(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+) !std.ArrayListUnmanaged(workspace_types.WorkspaceTemplate) {
+    const payload_json = try requestControlPayloadJson(
+        allocator,
+        client,
+        message_counter,
+        "control.workspace_template_list",
+        null,
+    );
+    defer allocator.free(payload_json);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResponse;
+    const templates_val = parsed.value.object.get("templates") orelse return error.InvalidResponse;
+    if (templates_val != .array) return error.InvalidResponse;
+
+    var templates = std.ArrayListUnmanaged(workspace_types.WorkspaceTemplate){};
+    errdefer workspace_types.deinitWorkspaceTemplateList(allocator, &templates);
+
+    for (templates_val.array.items) |item| {
+        if (item != .object) return error.InvalidResponse;
+        try templates.append(allocator, try parseWorkspaceTemplate(allocator, item.object));
+    }
+    return templates;
+}
+
+pub fn getWorkspaceTemplate(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+    template_id: []const u8,
+) !workspace_types.WorkspaceTemplate {
+    const escaped_template = try unified_v2.jsonEscape(allocator, template_id);
+    defer allocator.free(escaped_template);
+    const payload_req = try std.fmt.allocPrint(allocator, "{{\"template_id\":\"{s}\"}}", .{escaped_template});
+    defer allocator.free(payload_req);
+
+    const payload_json = try requestControlPayloadJson(
+        allocator,
+        client,
+        message_counter,
+        "control.workspace_template_get",
+        payload_req,
+    );
+    defer allocator.free(payload_json);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResponse;
+    const template_val = parsed.value.object.get("template") orelse return error.InvalidResponse;
+    if (template_val != .object) return error.InvalidResponse;
+    return parseWorkspaceTemplate(allocator, template_val.object);
+}
+
+pub fn setWorkspaceBind(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+    workspace_id: []const u8,
+    workspace_token: ?[]const u8,
+    bind_path: []const u8,
+    target_path: []const u8,
+) !workspace_types.WorkspaceDetail {
+    const normalized_workspace_token = normalizeProjectToken(workspace_token);
+    const escaped_workspace = try unified_v2.jsonEscape(allocator, workspace_id);
+    defer allocator.free(escaped_workspace);
+    const escaped_token = if (normalized_workspace_token) |value|
+        try unified_v2.jsonEscape(allocator, value)
+    else
+        null;
+    defer if (escaped_token) |value| allocator.free(value);
+    const escaped_bind = try unified_v2.jsonEscape(allocator, bind_path);
+    defer allocator.free(escaped_bind);
+    const escaped_target = try unified_v2.jsonEscape(allocator, target_path);
+    defer allocator.free(escaped_target);
+
+    var payload = std.ArrayListUnmanaged(u8){};
+    defer payload.deinit(allocator);
+    try payload.append(allocator, '{');
+    try payload.writer(allocator).print(
+        "\"workspace_id\":\"{s}\",\"bind_path\":\"{s}\",\"target_path\":\"{s}\"",
+        .{ escaped_workspace, escaped_bind, escaped_target },
+    );
+    if (escaped_token) |value| {
+        try payload.writer(allocator).print(",\"workspace_token\":\"{s}\"", .{value});
+    }
+    try payload.append(allocator, '}');
+
+    const payload_json = try requestControlPayloadJson(
+        allocator,
+        client,
+        message_counter,
+        "control.workspace_bind_set",
+        payload.items,
+    );
+    defer allocator.free(payload_json);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResponse;
+    return parseProjectDetail(allocator, parsed.value.object);
+}
+
+pub fn removeWorkspaceBind(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+    workspace_id: []const u8,
+    workspace_token: ?[]const u8,
+    bind_path: []const u8,
+) !workspace_types.WorkspaceDetail {
+    const normalized_workspace_token = normalizeProjectToken(workspace_token);
+    const escaped_workspace = try unified_v2.jsonEscape(allocator, workspace_id);
+    defer allocator.free(escaped_workspace);
+    const escaped_token = if (normalized_workspace_token) |value|
+        try unified_v2.jsonEscape(allocator, value)
+    else
+        null;
+    defer if (escaped_token) |value| allocator.free(value);
+    const escaped_bind = try unified_v2.jsonEscape(allocator, bind_path);
+    defer allocator.free(escaped_bind);
+
+    var payload = std.ArrayListUnmanaged(u8){};
+    defer payload.deinit(allocator);
+    try payload.append(allocator, '{');
+    try payload.writer(allocator).print(
+        "\"workspace_id\":\"{s}\",\"bind_path\":\"{s}\"",
+        .{ escaped_workspace, escaped_bind },
+    );
+    if (escaped_token) |value| {
+        try payload.writer(allocator).print(",\"workspace_token\":\"{s}\"", .{value});
+    }
+    try payload.append(allocator, '}');
+
+    const payload_json = try requestControlPayloadJson(
+        allocator,
+        client,
+        message_counter,
+        "control.workspace_bind_remove",
+        payload.items,
+    );
+    defer allocator.free(payload_json);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResponse;
+    return parseProjectDetail(allocator, parsed.value.object);
+}
+
+pub const WorkspaceTokenMutation = struct {
     project_id: []u8,
     project_token: ?[]u8 = null,
     updated_at_ms: i64 = 0,
     rotated: bool = false,
     revoked: bool = false,
 
-    pub fn deinit(self: *ProjectTokenMutation, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *WorkspaceTokenMutation, allocator: std.mem.Allocator) void {
         allocator.free(self.project_id);
         if (self.project_token) |value| allocator.free(value);
         self.* = undefined;
     }
 };
+
+pub const ProjectTokenMutation = WorkspaceTokenMutation;
+
+pub fn rotateWorkspaceToken(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+    workspace_id: []const u8,
+    current_workspace_token: ?[]const u8,
+) !WorkspaceTokenMutation {
+    return rotateProjectToken(allocator, client, message_counter, workspace_id, current_workspace_token);
+}
+
+pub fn revokeWorkspaceToken(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+    workspace_id: []const u8,
+    current_workspace_token: ?[]const u8,
+) !WorkspaceTokenMutation {
+    return revokeProjectToken(allocator, client, message_counter, workspace_id, current_workspace_token);
+}
 
 pub fn rotateProjectToken(
     allocator: std.mem.Allocator,
@@ -395,9 +661,9 @@ pub fn rotateProjectToken(
     var payload = std.ArrayListUnmanaged(u8){};
     defer payload.deinit(allocator);
     try payload.append(allocator, '{');
-    try payload.writer(allocator).print("\"project_id\":\"{s}\"", .{escaped_project});
+    try payload.writer(allocator).print("\"workspace_id\":\"{s}\"", .{escaped_project});
     if (escaped_token) |value| {
-        try payload.writer(allocator).print(",\"project_token\":\"{s}\"", .{value});
+        try payload.writer(allocator).print(",\"workspace_token\":\"{s}\"", .{value});
     }
     try payload.append(allocator, '}');
 
@@ -405,7 +671,7 @@ pub fn rotateProjectToken(
         allocator,
         client,
         message_counter,
-        "control.project_token_rotate",
+        "control.workspace_token_rotate",
         payload.items,
     );
     defer allocator.free(payload_json);
@@ -435,9 +701,9 @@ pub fn revokeProjectToken(
     var payload = std.ArrayListUnmanaged(u8){};
     defer payload.deinit(allocator);
     try payload.append(allocator, '{');
-    try payload.writer(allocator).print("\"project_id\":\"{s}\"", .{escaped_project});
+    try payload.writer(allocator).print("\"workspace_id\":\"{s}\"", .{escaped_project});
     if (escaped_token) |value| {
-        try payload.writer(allocator).print(",\"project_token\":\"{s}\"", .{value});
+        try payload.writer(allocator).print(",\"workspace_token\":\"{s}\"", .{value});
     }
     try payload.append(allocator, '}');
 
@@ -445,7 +711,7 @@ pub fn revokeProjectToken(
         allocator,
         client,
         message_counter,
-        "control.project_token_revoke",
+        "control.workspace_token_revoke",
         payload.items,
     );
     defer allocator.free(payload_json);
@@ -684,11 +950,11 @@ pub fn workspaceStatus(
             defer allocator.free(escaped_token);
             payload_req = try std.fmt.allocPrint(
                 allocator,
-                "{{\"project_id\":\"{s}\",\"project_token\":\"{s}\"}}",
+                "{{\"workspace_id\":\"{s}\",\"workspace_token\":\"{s}\"}}",
                 .{ escaped_project, escaped_token },
             );
         } else {
-            payload_req = try std.fmt.allocPrint(allocator, "{{\"project_id\":\"{s}\"}}", .{escaped_project});
+            payload_req = try std.fmt.allocPrint(allocator, "{{\"workspace_id\":\"{s}\"}}", .{escaped_project});
         }
     }
 
@@ -977,7 +1243,7 @@ pub fn reconcileStatus(
     if (project_id) |value| {
         const escaped_project = try unified_v2.jsonEscape(allocator, value);
         defer allocator.free(escaped_project);
-        payload_req = try std.fmt.allocPrint(allocator, "{{\"project_id\":\"{s}\"}}", .{escaped_project});
+        payload_req = try std.fmt.allocPrint(allocator, "{{\"workspace_id\":\"{s}\"}}", .{escaped_project});
     }
 
     const payload_json = try requestControlPayloadJson(
@@ -1001,14 +1267,16 @@ fn parseProjectSummary(
     obj: std.json.ObjectMap,
 ) !workspace_types.ProjectSummary {
     return .{
-        .id = try dupRequiredStringAny(allocator, obj, &.{ "id", "project_id" }),
+        .id = try dupRequiredStringAny(allocator, obj, &.{ "id", "workspace_id", "project_id" }),
         .name = try dupRequiredString(allocator, obj, "name"),
         .vision = try dupOptionalString(allocator, obj, "vision") orelse try allocator.dupe(u8, ""),
         .status = try dupOptionalString(allocator, obj, "status") orelse try allocator.dupe(u8, "active"),
+        .template_id = try dupOptionalString(allocator, obj, "template_id"),
         .kind = try dupOptionalString(allocator, obj, "kind"),
         .is_delete_protected = try getOptionalBool(obj, "is_delete_protected", false),
         .token_locked = try getOptionalBool(obj, "token_locked", false),
         .mount_count = @intCast(try getOptionalU64(obj, "mount_count", 0)),
+        .bind_count = @intCast(try getOptionalU64(obj, "bind_count", 0)),
         .created_at_ms = try getOptionalI64(obj, "created_at_ms", 0),
         .updated_at_ms = try getOptionalI64(obj, "updated_at_ms", 0),
     };
@@ -1019,24 +1287,34 @@ fn parseProjectDetail(
     obj: std.json.ObjectMap,
 ) !workspace_types.ProjectDetail {
     var detail = workspace_types.ProjectDetail{
-        .id = try dupRequiredStringAny(allocator, obj, &.{ "id", "project_id" }),
+        .id = try dupRequiredStringAny(allocator, obj, &.{ "id", "workspace_id", "project_id" }),
         .name = try dupRequiredString(allocator, obj, "name"),
         .vision = try dupOptionalString(allocator, obj, "vision") orelse try allocator.dupe(u8, ""),
         .status = try dupOptionalString(allocator, obj, "status") orelse try allocator.dupe(u8, "active"),
+        .template_id = try dupOptionalString(allocator, obj, "template_id"),
         .kind = try dupOptionalString(allocator, obj, "kind"),
         .is_delete_protected = try getOptionalBool(obj, "is_delete_protected", false),
         .token_locked = try getOptionalBool(obj, "token_locked", false),
         .created_at_ms = try getOptionalI64(obj, "created_at_ms", 0),
         .updated_at_ms = try getOptionalI64(obj, "updated_at_ms", 0),
-        .project_token = try dupOptionalString(allocator, obj, "project_token"),
+        .project_token = try dupOptionalStringAny(allocator, obj, &.{ "workspace_token", "project_token" }),
     };
     errdefer detail.deinit(allocator);
 
-    const mounts_val = obj.get("mounts") orelse return detail;
-    if (mounts_val != .array) return error.InvalidResponse;
-    for (mounts_val.array.items) |item| {
-        if (item != .object) return error.InvalidResponse;
-        try detail.mounts.append(allocator, try parseMount(allocator, item.object));
+    if (obj.get("mounts")) |mounts_val| {
+        if (mounts_val != .array) return error.InvalidResponse;
+        for (mounts_val.array.items) |item| {
+            if (item != .object) return error.InvalidResponse;
+            try detail.mounts.append(allocator, try parseMount(allocator, item.object));
+        }
+    }
+
+    if (obj.get("binds")) |binds_val| {
+        if (binds_val != .array) return error.InvalidResponse;
+        for (binds_val.array.items) |item| {
+            if (item != .object) return error.InvalidResponse;
+            try detail.binds.append(allocator, try parseWorkspaceBind(allocator, item.object));
+        }
     }
 
     return detail;
@@ -1047,8 +1325,8 @@ fn parseProjectTokenMutation(
     obj: std.json.ObjectMap,
 ) !ProjectTokenMutation {
     return .{
-        .project_id = try dupRequiredStringAny(allocator, obj, &.{ "project_id", "id" }),
-        .project_token = try dupOptionalNullableString(allocator, obj, "project_token"),
+        .project_id = try dupRequiredStringAny(allocator, obj, &.{ "workspace_id", "project_id", "id" }),
+        .project_token = try dupOptionalNullableStringAny(allocator, obj, &.{ "workspace_token", "project_token" }),
         .updated_at_ms = try getOptionalI64(obj, "updated_at_ms", 0),
         .rotated = try getOptionalBool(obj, "rotated", false),
         .revoked = try getOptionalBool(obj, "revoked", false),
@@ -1099,7 +1377,7 @@ fn parseWorkspaceStatus(
 ) !workspace_types.WorkspaceStatus {
     var status = workspace_types.WorkspaceStatus{
         .agent_id = try dupRequiredString(allocator, obj, "agent_id"),
-        .project_id = try dupOptionalNullableString(allocator, obj, "project_id"),
+        .project_id = try dupOptionalNullableStringAny(allocator, obj, &.{ "workspace_id", "project_id" }),
         .workspace_root = try dupOptionalNullableString(allocator, obj, "workspace_root"),
     };
     errdefer status.deinit(allocator);
@@ -1315,6 +1593,39 @@ fn parseMount(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !workspace_
     };
 }
 
+fn parseWorkspaceBind(
+    allocator: std.mem.Allocator,
+    obj: std.json.ObjectMap,
+) !workspace_types.WorkspaceBindView {
+    return .{
+        .bind_path = try dupRequiredString(allocator, obj, "bind_path"),
+        .target_path = try dupRequiredString(allocator, obj, "target_path"),
+    };
+}
+
+fn parseWorkspaceTemplate(
+    allocator: std.mem.Allocator,
+    obj: std.json.ObjectMap,
+) !workspace_types.WorkspaceTemplate {
+    var template = workspace_types.WorkspaceTemplate{
+        .id = try dupRequiredStringAny(allocator, obj, &.{ "template_id", "id" }),
+        .description = try dupOptionalString(allocator, obj, "description") orelse try allocator.dupe(u8, ""),
+    };
+    errdefer template.deinit(allocator);
+
+    const binds_val = obj.get("binds") orelse return template;
+    if (binds_val != .array) return error.InvalidResponse;
+    for (binds_val.array.items) |item| {
+        if (item != .object) return error.InvalidResponse;
+        try template.binds.append(allocator, .{
+            .bind_path = try dupRequiredString(allocator, item.object, "bind_path"),
+            .venom_id = try dupRequiredString(allocator, item.object, "venom_id"),
+            .provider_scope = try dupOptionalString(allocator, item.object, "provider_scope") orelse try allocator.dupe(u8, "host_local"),
+        });
+    }
+    return template;
+}
+
 fn parseDriftItem(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !workspace_types.DriftItem {
     return .{
         .mount_path = try dupOptionalNullableString(allocator, obj, "mount_path"),
@@ -1360,6 +1671,20 @@ fn dupOptionalString(
     return @as(?[]u8, copied);
 }
 
+fn dupOptionalStringAny(
+    allocator: std.mem.Allocator,
+    obj: std.json.ObjectMap,
+    names: []const []const u8,
+) !?[]u8 {
+    for (names) |name| {
+        const value = obj.get(name) orelse continue;
+        if (value != .string) return error.InvalidResponse;
+        const copied = try allocator.dupe(u8, value.string);
+        return @as(?[]u8, copied);
+    }
+    return null;
+}
+
 fn dupOptionalNullableString(
     allocator: std.mem.Allocator,
     obj: std.json.ObjectMap,
@@ -1370,6 +1695,21 @@ fn dupOptionalNullableString(
     if (value != .string) return error.InvalidResponse;
     const copied = try allocator.dupe(u8, value.string);
     return @as(?[]u8, copied);
+}
+
+fn dupOptionalNullableStringAny(
+    allocator: std.mem.Allocator,
+    obj: std.json.ObjectMap,
+    names: []const []const u8,
+) !?[]u8 {
+    for (names) |name| {
+        const value = obj.get(name) orelse continue;
+        if (value == .null) return null;
+        if (value != .string) return error.InvalidResponse;
+        const copied = try allocator.dupe(u8, value.string);
+        return @as(?[]u8, copied);
+    }
+    return null;
 }
 
 fn getOptionalU64(obj: std.json.ObjectMap, name: []const u8, default_value: u64) !u64 {

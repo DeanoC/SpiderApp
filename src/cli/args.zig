@@ -20,7 +20,6 @@ pub const Noun = enum {
     fs,
     agent,
     session,
-    project,
     node,
     pairing,
     workspace,
@@ -66,6 +65,13 @@ pub const Verb = enum {
     complete,
     logs,
     restore,
+    template,
+    bind,
+    mount,
+    handoff,
+    add,
+    remove,
+    show,
     none,
 };
 
@@ -77,8 +83,8 @@ pub const Options = struct {
 
     url: []const u8 = default_server_url,
     url_explicitly_provided: bool = false,
-    project: ?[]const u8 = null,
-    project_token: ?[]const u8 = null,
+    workspace: ?[]const u8 = null,
+    workspace_token: ?[]const u8 = null,
     operator_token: ?[]const u8 = null,
     role: ?Role = null,
     interactive: bool = false,
@@ -94,11 +100,10 @@ pub const Options = struct {
             allocator.free(self.url);
         }
 
-        // Free project name
-        if (self.project) |p| {
+        if (self.workspace) |p| {
             allocator.free(p);
         }
-        if (self.project_token) |token| {
+        if (self.workspace_token) |token| {
             allocator.free(token);
         }
         if (self.operator_token) |token| {
@@ -119,7 +124,6 @@ pub const Options = struct {
 const help_overview = @embedFile("docs/01-overview.md");
 const help_options = @embedFile("docs/02-options.md");
 const help_chat = @embedFile("docs/10-chat.md");
-const help_project = @embedFile("docs/11-project.md");
 const help_goal = @embedFile("docs/12-goal.md");
 const help_task = @embedFile("docs/13-task.md");
 const help_worker = @embedFile("docs/14-worker.md");
@@ -142,7 +146,6 @@ pub fn printHelpForNoun(noun: Noun) void {
         .chat => help_chat,
         .agent => help_agent,
         .session => help_session,
-        .project => help_project,
         .node => help_node,
         .pairing => help_pairing,
         .workspace => help_workspace,
@@ -178,7 +181,6 @@ fn parseNoun(arg: []const u8) ?Noun {
     if (std.mem.eql(u8, arg, "fs")) return .fs;
     if (std.mem.eql(u8, arg, "agent")) return .agent;
     if (std.mem.eql(u8, arg, "session")) return .session;
-    if (std.mem.eql(u8, arg, "project")) return .project;
     if (std.mem.eql(u8, arg, "node")) return .node;
     if (std.mem.eql(u8, arg, "pairing")) return .pairing;
     if (std.mem.eql(u8, arg, "workspace")) return .workspace;
@@ -206,14 +208,6 @@ fn parseVerb(noun: Noun, arg: []const u8) ?Verb {
             if (std.mem.eql(u8, arg, "write")) return .write;
             if (std.mem.eql(u8, arg, "stat")) return .stat;
             if (std.mem.eql(u8, arg, "tree")) return .tree;
-        },
-        .project => {
-            if (std.mem.eql(u8, arg, "list")) return .list;
-            if (std.mem.eql(u8, arg, "use")) return .use;
-            if (std.mem.eql(u8, arg, "create")) return .create;
-            if (std.mem.eql(u8, arg, "up")) return .up;
-            if (std.mem.eql(u8, arg, "doctor")) return .doctor;
-            if (std.mem.eql(u8, arg, "info")) return .info;
         },
         .agent => {
             if (std.mem.eql(u8, arg, "list")) return .list;
@@ -250,7 +244,17 @@ fn parseVerb(noun: Noun, arg: []const u8) ?Verb {
             if (std.mem.eql(u8, arg, "refresh")) return .refresh;
         },
         .workspace => {
+            if (std.mem.eql(u8, arg, "list")) return .list;
+            if (std.mem.eql(u8, arg, "use")) return .use;
+            if (std.mem.eql(u8, arg, "create")) return .create;
+            if (std.mem.eql(u8, arg, "up")) return .up;
+            if (std.mem.eql(u8, arg, "doctor")) return .doctor;
+            if (std.mem.eql(u8, arg, "info")) return .info;
             if (std.mem.eql(u8, arg, "status")) return .status;
+            if (std.mem.eql(u8, arg, "template")) return .template;
+            if (std.mem.eql(u8, arg, "bind")) return .bind;
+            if (std.mem.eql(u8, arg, "mount")) return .mount;
+            if (std.mem.eql(u8, arg, "handoff")) return .handoff;
         },
         .auth => {
             if (std.mem.eql(u8, arg, "status")) return .status;
@@ -323,23 +327,23 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Options {
             options.url_explicitly_provided = true;
             continue;
         }
-        if (std.mem.eql(u8, arg, "--project")) {
+        if (std.mem.eql(u8, arg, "--workspace")) {
             i += 1;
             if (i >= args.len) {
                 std.process.argsFree(allocator, args);
                 return error.InvalidArguments;
             }
-            // Copy the project string
-            options.project = try allocator.dupe(u8, args[i]);
+            // Copy the workspace string
+            options.workspace = try allocator.dupe(u8, args[i]);
             continue;
         }
-        if (std.mem.eql(u8, arg, "--project-token")) {
+        if (std.mem.eql(u8, arg, "--workspace-token")) {
             i += 1;
             if (i >= args.len) {
                 std.process.argsFree(allocator, args);
                 return error.InvalidArguments;
             }
-            options.project_token = try allocator.dupe(u8, args[i]);
+            options.workspace_token = try allocator.dupe(u8, args[i]);
             continue;
         }
         if (std.mem.eql(u8, arg, "--operator-token")) {

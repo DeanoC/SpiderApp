@@ -134,8 +134,8 @@ pub fn run(allocator: std.mem.Allocator) !void {
         logger.info("SpiderApp v{s} ({s})", .{ args.appVersion(), args.gitRevision() });
     }
     logger.info("Server: {s}", .{options.url});
-    if (options.project) |p| {
-        logger.info("Project: {s}", .{p});
+    if (options.workspace) |p| {
+        logger.info("Workspace: {s}", .{p});
     }
 
     // Handle commands or interactive mode
@@ -384,20 +384,6 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
                 },
             }
         },
-        .project => {
-            switch (cmd.verb) {
-                .list => try executeProjectList(allocator, options, cmd),
-                .use => try executeProjectUse(allocator, options, cmd),
-                .create => try executeProjectCreate(allocator, options, cmd),
-                .up => try executeProjectUp(allocator, options, cmd),
-                .doctor => try executeProjectDoctor(allocator, options, cmd),
-                .info => try executeProjectInfo(allocator, options, cmd),
-                else => {
-                    logger.err("Unknown project verb", .{});
-                    return error.InvalidArguments;
-                },
-            }
-        },
         .agent => {
             switch (cmd.verb) {
                 .list => try executeAgentList(allocator, options, cmd),
@@ -457,7 +443,17 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
         },
         .workspace => {
             switch (cmd.verb) {
+                .list => try executeWorkspaceList(allocator, options, cmd),
+                .use => try executeWorkspaceUse(allocator, options, cmd),
+                .create => try executeWorkspaceCreate(allocator, options, cmd),
+                .up => try executeWorkspaceUp(allocator, options, cmd),
+                .doctor => try executeWorkspaceDoctor(allocator, options, cmd),
+                .info => try executeWorkspaceInfo(allocator, options, cmd),
                 .status => try executeWorkspaceStatus(allocator, options, cmd),
+                .template => try executeWorkspaceTemplateCommand(allocator, options, cmd),
+                .bind => try executeWorkspaceBindCommand(allocator, options, cmd),
+                .mount => try executeWorkspaceMountCommand(allocator, options, cmd),
+                .handoff => try executeWorkspaceHandoffCommand(allocator, options, cmd),
                 else => {
                     logger.err("Unknown workspace verb", .{});
                     return error.InvalidArguments;
@@ -631,9 +627,9 @@ fn loadCliConfig(allocator: std.mem.Allocator) !Config {
     return Config.load(allocator) catch try Config.init(allocator);
 }
 
-fn resolveProjectSelection(options: args.Options, cfg: *const Config) ?[]const u8 {
-    if (options.project) |project_id| return project_id;
-    return cfg.selectedProject();
+fn resolveWorkspaceSelection(options: args.Options, cfg: *const Config) ?[]const u8 {
+    if (options.workspace) |project_id| return project_id;
+    return cfg.selectedWorkspace();
 }
 
 fn effectiveRole(options: args.Options, cfg: *const Config) Config.TokenRole {
@@ -826,9 +822,9 @@ fn waitForSessionReady(
 fn printWorkspaceStatus(stdout: anytype, status: *const workspace_types.WorkspaceStatus, verbose: bool) !void {
     try stdout.print("Agent: {s}\n", .{status.agent_id});
     if (status.project_id) |project_id| {
-        try stdout.print("Project: {s}\n", .{project_id});
+        try stdout.print("Workspace: {s}\n", .{project_id});
     } else {
-        try stdout.print("Project: (none)\n", .{});
+        try stdout.print("Workspace: (none)\n", .{});
     }
     if (status.workspace_root) |workspace_root| {
         try stdout.print("Workspace root: {s}\n", .{workspace_root});
@@ -885,7 +881,7 @@ fn printWorkspaceStatus(stdout: anytype, status: *const workspace_types.Workspac
     }
 }
 
-fn maybeApplyProjectContext(
+fn maybeApplyWorkspaceContext(
     allocator: std.mem.Allocator,
     options: args.Options,
     client: *WebSocketClient,
@@ -893,10 +889,10 @@ fn maybeApplyProjectContext(
     var cfg = try loadCliConfig(allocator);
     defer cfg.deinit();
 
-    const project_id = resolveProjectSelection(options, &cfg) orelse return;
+    const project_id = resolveWorkspaceSelection(options, &cfg) orelse return;
     try ensureUnifiedV2Control(allocator, client);
 
-    const token = if (options.project_token) |value| value else cfg.getProjectToken(project_id);
+    const token = if (options.workspace_token) |value| value else cfg.getWorkspaceToken(project_id);
     const session_key = resolveSessionKey(&cfg);
     const attach_agent = resolveAttachAgentForProject(
         allocator,
@@ -907,9 +903,9 @@ fn maybeApplyProjectContext(
         project_id,
     ) catch |err| {
         if (err == error.UserRoleCannotAttachSystemProject) {
-            logger.err("user role cannot attach to the system project; choose a non-system project", .{});
+            logger.err("user role cannot attach to the system workspace; choose a non-system workspace", .{});
         } else if (err == error.NoProjectCompatibleAgent) {
-            logger.err("no non-system agent is available for project {s}", .{project_id});
+            logger.err("no non-system agent is available for workspace {s}", .{project_id});
         }
         return err;
     };
@@ -996,12 +992,12 @@ fn maybeApplyProjectContext(
     cfg.save() catch {};
 
     logger.info(
-        "Project context active: project={s} session={s} agent={s} state={s}",
+        "Workspace context active: workspace={s} session={s} agent={s} state={s}",
         .{ project_id, session_key, active_agent, attach_state },
     );
 }
 
-fn executeProjectList(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+fn executeWorkspaceList(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     _ = cmd;
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const client = try getOrCreateClient(allocator, options);
@@ -1009,29 +1005,37 @@ fn executeProjectList(allocator: std.mem.Allocator, options: args.Options, cmd: 
 
     var cfg = try loadCliConfig(allocator);
     defer cfg.deinit();
-    const selected_project = resolveProjectSelection(options, &cfg);
+    const selected_project = resolveWorkspaceSelection(options, &cfg);
 
-    var projects = try control_plane.listProjects(allocator, client, &g_control_request_counter);
-    defer workspace_types.deinitProjectList(allocator, &projects);
+    var projects = try control_plane.listWorkspaces(allocator, client, &g_control_request_counter);
+    defer workspace_types.deinitWorkspaceList(allocator, &projects);
 
     if (projects.items.len == 0) {
-        try stdout.print("(no projects)\n", .{});
+        try stdout.print("(no workspaces)\n", .{});
         return;
     }
 
-    try stdout.print("Projects:\n", .{});
+    try stdout.print("Workspaces:\n", .{});
     for (projects.items) |project| {
         const marker = if (selected_project != null and std.mem.eql(u8, selected_project.?, project.id)) "*" else " ";
         try stdout.print(
-            "{s} {s}  [{s}]  mounts={d}  name={s}\n",
-            .{ marker, project.id, project.status, project.mount_count, project.name },
+            "{s} {s}  [{s}]  mounts={d}  binds={d}  template={s}  name={s}\n",
+            .{
+                marker,
+                project.id,
+                project.status,
+                project.mount_count,
+                project.bind_count,
+                project.template_id orelse "dev",
+                project.name,
+            },
         );
     }
 }
 
-fn executeProjectInfo(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+fn executeWorkspaceInfo(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     if (cmd.args.len == 0) {
-        logger.err("project info requires a project ID", .{});
+        logger.err("workspace info requires a workspace ID", .{});
         return error.InvalidArguments;
     }
 
@@ -1039,21 +1043,26 @@ fn executeProjectInfo(allocator: std.mem.Allocator, options: args.Options, cmd: 
     const client = try getOrCreateClient(allocator, options);
     try ensureUnifiedV2Control(allocator, client);
 
-    var detail = try control_plane.getProject(allocator, client, &g_control_request_counter, cmd.args[0]);
+    var detail = try control_plane.getWorkspace(allocator, client, &g_control_request_counter, cmd.args[0]);
     defer detail.deinit(allocator);
 
-    try stdout.print("Project {s}\n", .{detail.id});
+    try stdout.print("Workspace {s}\n", .{detail.id});
     try stdout.print("  Name: {s}\n", .{detail.name});
     try stdout.print("  Vision: {s}\n", .{detail.vision});
     try stdout.print("  Status: {s}\n", .{detail.status});
+    try stdout.print("  Template: {s}\n", .{detail.template_id orelse "dev"});
     try stdout.print("  Created: {d}\n", .{detail.created_at_ms});
     try stdout.print("  Updated: {d}\n", .{detail.updated_at_ms});
     if (detail.project_token) |token| {
-        try stdout.print("  Project token: {s}\n", .{token});
+        try stdout.print("  Workspace token: {s}\n", .{token});
     }
     try stdout.print("  Mounts ({d}):\n", .{detail.mounts.items.len});
     for (detail.mounts.items) |mount| {
         try stdout.print("    - {s} <= {s}:{s}\n", .{ mount.mount_path, mount.node_id, mount.export_name });
+    }
+    try stdout.print("  Binds ({d}):\n", .{detail.binds.items.len});
+    for (detail.binds.items) |bind| {
+        try stdout.print("    - {s} <= {s}\n", .{ bind.bind_path, bind.target_path });
     }
 }
 
@@ -1065,15 +1074,35 @@ fn resolveOperatorToken(options: args.Options, cfg: *const Config) ?[]const u8 {
     return null;
 }
 
-fn executeProjectCreate(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+fn executeWorkspaceCreate(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     if (cmd.args.len == 0) {
-        logger.err("project create requires a name", .{});
+        logger.err("workspace create requires a name", .{});
         return error.InvalidArguments;
     }
 
-    const name = cmd.args[0];
-    const vision = if (cmd.args.len > 1)
-        try std.mem.join(allocator, " ", cmd.args[1..])
+    var template_id: ?[]const u8 = "dev";
+    var name: ?[]const u8 = null;
+    var vision_parts = std.ArrayListUnmanaged([]const u8){};
+    defer vision_parts.deinit(allocator);
+    var i: usize = 0;
+    while (i < cmd.args.len) : (i += 1) {
+        const arg = cmd.args[i];
+        if (std.mem.eql(u8, arg, "--template")) {
+            i += 1;
+            if (i >= cmd.args.len) return error.InvalidArguments;
+            template_id = cmd.args[i];
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--")) return error.InvalidArguments;
+        if (name == null) {
+            name = arg;
+        } else {
+            try vision_parts.append(allocator, arg);
+        }
+    }
+    if (name == null) return error.InvalidArguments;
+    const vision = if (vision_parts.items.len > 0)
+        try std.mem.join(allocator, " ", vision_parts.items)
     else
         null;
     defer if (vision) |value| allocator.free(value);
@@ -1085,41 +1114,43 @@ fn executeProjectCreate(allocator: std.mem.Allocator, options: args.Options, cmd
     const client = try getOrCreateClient(allocator, options);
     try ensureUnifiedV2Control(allocator, client);
 
-    var created = try control_plane.createProject(
+    var created = try control_plane.createWorkspace(
         allocator,
         client,
         &g_control_request_counter,
-        name,
+        name.?,
         vision,
+        template_id,
         resolveOperatorToken(options, &cfg),
     );
     defer created.deinit(allocator);
 
-    try cfg.setSelectedProject(created.id);
+    try cfg.setSelectedWorkspace(created.id);
     if (created.project_token) |token| {
-        try cfg.setProjectToken(created.id, token);
+        try cfg.setWorkspaceToken(created.id, token);
     }
     try cfg.save();
 
-    try stdout.print("Created project {s}\n", .{created.id});
+    try stdout.print("Created workspace {s}\n", .{created.id});
     try stdout.print("  Name: {s}\n", .{created.name});
     try stdout.print("  Vision: {s}\n", .{created.vision});
     try stdout.print("  Status: {s}\n", .{created.status});
+    try stdout.print("  Template: {s}\n", .{created.template_id orelse "dev"});
     try stdout.print("  Created: {d}\n", .{created.created_at_ms});
     if (created.project_token) |token| {
-        try stdout.print("  Project token: {s}\n", .{token});
+        try stdout.print("  Workspace token: {s}\n", .{token});
     }
-    try stdout.print("  Saved as selected project in local config\n", .{});
+    try stdout.print("  Saved as selected workspace in local config\n", .{});
 
     if (created.project_token) |token| {
-        var status = control_plane.activateProject(
+        var status = control_plane.activateWorkspace(
             allocator,
             client,
             &g_control_request_counter,
             created.id,
             token,
         ) catch |err| {
-            logger.warn("project created but activation failed: {s}", .{@errorName(err)});
+            logger.warn("workspace created but activation failed: {s}", .{@errorName(err)});
             return;
         };
         defer status.deinit(allocator);
@@ -1129,14 +1160,14 @@ fn executeProjectCreate(allocator: std.mem.Allocator, options: args.Options, cmd
     }
 }
 
-fn executeProjectUse(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+fn executeWorkspaceUse(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     if (cmd.args.len == 0) {
-        logger.err("project use requires a project ID", .{});
+        logger.err("workspace use requires a workspace ID", .{});
         return error.InvalidArguments;
     }
 
     const project_id = cmd.args[0];
-    const cli_token = if (options.project_token) |token|
+    const cli_token = if (options.workspace_token) |token|
         token
     else if (cmd.args.len > 1)
         cmd.args[1]
@@ -1146,16 +1177,16 @@ fn executeProjectUse(allocator: std.mem.Allocator, options: args.Options, cmd: a
     var cfg = try loadCliConfig(allocator);
     defer cfg.deinit();
     if (cli_token) |token| {
-        try cfg.setProjectToken(project_id, token);
+        try cfg.setWorkspaceToken(project_id, token);
     }
-    try cfg.setSelectedProject(project_id);
+    try cfg.setSelectedWorkspace(project_id);
 
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const client = try getOrCreateClient(allocator, options);
     try ensureUnifiedV2Control(allocator, client);
 
-    const effective_token = if (cli_token) |token| token else cfg.getProjectToken(project_id);
-    var status = try control_plane.activateProject(
+    const effective_token = if (cli_token) |token| token else cfg.getWorkspaceToken(project_id);
+    var status = try control_plane.activateWorkspace(
         allocator,
         client,
         &g_control_request_counter,
@@ -1163,7 +1194,7 @@ fn executeProjectUse(allocator: std.mem.Allocator, options: args.Options, cmd: a
         effective_token,
     );
     defer status.deinit(allocator);
-    try stdout.print("Selected and activated project: {s}\n", .{project_id});
+    try stdout.print("Selected and activated workspace: {s}\n", .{project_id});
     if (status.workspace_root) |workspace_root| {
         try stdout.print("Workspace root: {s}\n", .{workspace_root});
     }
@@ -1171,13 +1202,18 @@ fn executeProjectUse(allocator: std.mem.Allocator, options: args.Options, cmd: a
     try cfg.save();
 }
 
-const ProjectUpMountSpec = struct {
+const WorkspaceUpMountSpec = struct {
     mount_path: []const u8,
     node_id: []const u8,
     export_name: []const u8,
 };
 
-fn parseProjectUpMountSpec(raw: []const u8) !ProjectUpMountSpec {
+const WorkspaceBindSpec = struct {
+    bind_path: []const u8,
+    target_path: []const u8,
+};
+
+fn parseWorkspaceUpMountSpec(raw: []const u8) !WorkspaceUpMountSpec {
     const eq_idx = std.mem.indexOfScalar(u8, raw, '=') orelse return error.InvalidArguments;
     const colon_idx = std.mem.lastIndexOfScalar(u8, raw, ':') orelse return error.InvalidArguments;
     if (eq_idx == 0 or colon_idx <= eq_idx + 1 or colon_idx + 1 >= raw.len) return error.InvalidArguments;
@@ -1188,7 +1224,20 @@ fn parseProjectUpMountSpec(raw: []const u8) !ProjectUpMountSpec {
     };
 }
 
-fn executeProjectUp(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+fn parseWorkspaceBindSpec(raw: []const u8) !WorkspaceBindSpec {
+    const eq_idx = std.mem.indexOfScalar(u8, raw, '=') orelse return error.InvalidArguments;
+    if (eq_idx == 0 or eq_idx + 1 >= raw.len) return error.InvalidArguments;
+    return .{
+        .bind_path = raw[0..eq_idx],
+        .target_path = raw[eq_idx + 1 ..],
+    };
+}
+
+fn effectiveWorkspaceUpTemplateId(workspace_id: ?[]const u8, requested_template_id: ?[]const u8) ?[]const u8 {
+    return requested_template_id orelse if (workspace_id == null) "dev" else null;
+}
+
+fn executeWorkspaceUp(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const client = try getOrCreateClient(allocator, options);
     try ensureUnifiedV2Control(allocator, client);
@@ -1197,10 +1246,13 @@ fn executeProjectUp(allocator: std.mem.Allocator, options: args.Options, cmd: ar
     defer cfg.deinit();
 
     var positional_project_name: ?[]const u8 = null;
-    var explicit_project_id: ?[]const u8 = options.project;
+    var explicit_project_id: ?[]const u8 = options.workspace;
+    var requested_template_id: ?[]const u8 = null;
     var activate = true;
-    var mounts = std.ArrayListUnmanaged(ProjectUpMountSpec){};
+    var mounts = std.ArrayListUnmanaged(WorkspaceUpMountSpec){};
     defer mounts.deinit(allocator);
+    var binds = std.ArrayListUnmanaged(WorkspaceBindSpec){};
+    defer binds.deinit(allocator);
 
     var i: usize = 0;
     while (i < cmd.args.len) : (i += 1) {
@@ -1208,10 +1260,16 @@ fn executeProjectUp(allocator: std.mem.Allocator, options: args.Options, cmd: ar
         if (std.mem.eql(u8, arg, "--mount")) {
             i += 1;
             if (i >= cmd.args.len) return error.InvalidArguments;
-            try mounts.append(allocator, try parseProjectUpMountSpec(cmd.args[i]));
+            try mounts.append(allocator, try parseWorkspaceUpMountSpec(cmd.args[i]));
             continue;
         }
-        if (std.mem.eql(u8, arg, "--project-id")) {
+        if (std.mem.eql(u8, arg, "--bind")) {
+            i += 1;
+            if (i >= cmd.args.len) return error.InvalidArguments;
+            try binds.append(allocator, try parseWorkspaceBindSpec(cmd.args[i]));
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--workspace-id")) {
             i += 1;
             if (i >= cmd.args.len) return error.InvalidArguments;
             explicit_project_id = cmd.args[i];
@@ -1225,6 +1283,12 @@ fn executeProjectUp(allocator: std.mem.Allocator, options: args.Options, cmd: ar
             activate = true;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--template")) {
+            i += 1;
+            if (i >= cmd.args.len) return error.InvalidArguments;
+            requested_template_id = cmd.args[i];
+            continue;
+        }
         if (std.mem.startsWith(u8, arg, "--")) return error.InvalidArguments;
         if (positional_project_name == null) {
             positional_project_name = arg;
@@ -1236,17 +1300,17 @@ fn executeProjectUp(allocator: std.mem.Allocator, options: args.Options, cmd: ar
     if (mounts.items.len == 0) {
         var default_fs_mount = discoverDefaultFsMount(allocator, client, .{
             .agent_id = cfg.selectedAgent(),
-            .project_id = explicit_project_id orelse cfg.selectedProject(),
+            .project_id = explicit_project_id orelse cfg.selectedWorkspace(),
         }) catch |err| {
             if (err == error.ServiceNotFound) {
-                logger.err("project up requires at least one registered fs Venom (or explicit --mount)", .{});
+                logger.err("workspace up requires at least one registered fs Venom (or explicit --mount)", .{});
                 return error.InvalidArguments;
             }
             return err;
         };
         defer default_fs_mount.deinit(allocator);
         if (default_fs_mount.mount_path.len == 0) {
-            logger.err("project up requires at least one registered node (or explicit --mount)", .{});
+            logger.err("workspace up requires at least one registered node (or explicit --mount)", .{});
             return error.InvalidArguments;
         }
         try mounts.append(allocator, .{
@@ -1256,7 +1320,8 @@ fn executeProjectUp(allocator: std.mem.Allocator, options: args.Options, cmd: ar
         });
     }
 
-    const project_id = explicit_project_id orelse cfg.selectedProject();
+    const project_id = explicit_project_id orelse cfg.selectedWorkspace();
+    const template_id = effectiveWorkspaceUpTemplateId(project_id, requested_template_id);
     const project_name: ?[]const u8 = if (positional_project_name) |value|
         value
     else if (project_id == null)
@@ -1272,7 +1337,7 @@ fn executeProjectUp(allocator: std.mem.Allocator, options: args.Options, cmd: ar
     if (project_id) |value| {
         const escaped = try unified.jsonEscape(allocator, value);
         defer allocator.free(escaped);
-        try payload.writer(allocator).print("\"project_id\":\"{s}\"", .{escaped});
+        try payload.writer(allocator).print("\"workspace_id\":\"{s}\"", .{escaped});
         appended = true;
     }
     if (project_name) |value| {
@@ -1280,6 +1345,13 @@ fn executeProjectUp(allocator: std.mem.Allocator, options: args.Options, cmd: ar
         defer allocator.free(escaped);
         if (appended) try payload.append(allocator, ',');
         try payload.writer(allocator).print("\"name\":\"{s}\"", .{escaped});
+        appended = true;
+    }
+    if (template_id) |value| {
+        const escaped = try unified.jsonEscape(allocator, value);
+        defer allocator.free(escaped);
+        if (appended) try payload.append(allocator, ',');
+        try payload.writer(allocator).print("\"template_id\":\"{s}\"", .{escaped});
         appended = true;
     }
     if (appended) try payload.append(allocator, ',');
@@ -1298,13 +1370,29 @@ fn executeProjectUp(allocator: std.mem.Allocator, options: args.Options, cmd: ar
             .{ escaped_path, escaped_node, escaped_export },
         );
     }
-    try payload.appendSlice(allocator, "]}");
+    try payload.append(allocator, ']');
+    if (binds.items.len > 0) {
+        try payload.appendSlice(allocator, ",\"desired_binds\":[");
+        for (binds.items, 0..) |bind, idx| {
+            if (idx != 0) try payload.append(allocator, ',');
+            const escaped_bind = try unified.jsonEscape(allocator, bind.bind_path);
+            defer allocator.free(escaped_bind);
+            const escaped_target = try unified.jsonEscape(allocator, bind.target_path);
+            defer allocator.free(escaped_target);
+            try payload.writer(allocator).print(
+                "{{\"bind_path\":\"{s}\",\"target_path\":\"{s}\"}}",
+                .{ escaped_bind, escaped_target },
+            );
+        }
+        try payload.append(allocator, ']');
+    }
+    try payload.append(allocator, '}');
 
     const payload_json = try control_plane.requestControlPayloadJson(
         allocator,
         client,
         &g_control_request_counter,
-        "control.project_up",
+        "control.workspace_up",
         payload.items,
     );
     defer allocator.free(payload_json);
@@ -1313,23 +1401,25 @@ fn executeProjectUp(allocator: std.mem.Allocator, options: args.Options, cmd: ar
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidResponse;
 
-    const response_project_id_val = parsed.value.object.get("project_id") orelse return error.InvalidResponse;
+    const response_project_id_val = parsed.value.object.get("workspace_id") orelse parsed.value.object.get("project_id") orelse return error.InvalidResponse;
     if (response_project_id_val != .string) return error.InvalidResponse;
     const response_project_id = response_project_id_val.string;
 
-    const response_token = if (parsed.value.object.get("project_token")) |value|
+    const response_token = if (parsed.value.object.get("workspace_token")) |value|
+        if (value == .string) value.string else null
+    else if (parsed.value.object.get("project_token")) |value|
         if (value == .string) value.string else null
     else
         null;
 
-    try cfg.setSelectedProject(response_project_id);
+    try cfg.setSelectedWorkspace(response_project_id);
     if (response_token) |token| {
-        try cfg.setProjectToken(response_project_id, token);
+        try cfg.setWorkspaceToken(response_project_id, token);
     }
     try cfg.save();
 
-    try stdout.print("project up complete\n", .{});
-    try stdout.print("  project_id: {s}\n", .{response_project_id});
+    try stdout.print("workspace up complete\n", .{});
+    try stdout.print("  workspace_id: {s}\n", .{response_project_id});
     try stdout.print(
         "  created: {s}\n",
         .{if (parsed.value.object.get("created")) |value|
@@ -1338,7 +1428,9 @@ fn executeProjectUp(allocator: std.mem.Allocator, options: args.Options, cmd: ar
             "false"},
     );
     try stdout.print("  activate: {s}\n", .{if (activate) "true" else "false"});
+    try stdout.print("  template: {s}\n", .{template_id orelse "unchanged"});
     try stdout.print("  mounts requested: {d}\n", .{mounts.items.len});
+    try stdout.print("  binds requested: {d}\n", .{binds.items.len});
 
     var status = try control_plane.workspaceStatus(
         allocator,
@@ -1351,7 +1443,14 @@ fn executeProjectUp(allocator: std.mem.Allocator, options: args.Options, cmd: ar
     try printWorkspaceStatus(stdout, &status, false);
 }
 
-fn executeProjectDoctor(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+test "effectiveWorkspaceUpTemplateId defaults only on create paths" {
+    try std.testing.expectEqualStrings("dev", effectiveWorkspaceUpTemplateId(null, null).?);
+    try std.testing.expectEqualStrings("custom", effectiveWorkspaceUpTemplateId(null, "custom").?);
+    try std.testing.expect(effectiveWorkspaceUpTemplateId("ws-123", null) == null);
+    try std.testing.expectEqualStrings("custom", effectiveWorkspaceUpTemplateId("ws-123", "custom").?);
+}
+
+fn executeWorkspaceDoctor(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     _ = cmd;
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const client = try getOrCreateClient(allocator, options);
@@ -1359,7 +1458,7 @@ fn executeProjectDoctor(allocator: std.mem.Allocator, options: args.Options, cmd
 
     var cfg = try loadCliConfig(allocator);
     defer cfg.deinit();
-    const project_id = resolveProjectSelection(options, &cfg);
+    const project_id = resolveWorkspaceSelection(options, &cfg);
 
     var failures: usize = 0;
 
@@ -1372,18 +1471,18 @@ fn executeProjectDoctor(allocator: std.mem.Allocator, options: args.Options, cmd
         try stdout.print("[OK] Registered nodes: {d}\n", .{nodes.items.len});
     }
 
-    var projects = try control_plane.listProjects(allocator, client, &g_control_request_counter);
-    defer workspace_types.deinitProjectList(allocator, &projects);
+    var projects = try control_plane.listWorkspaces(allocator, client, &g_control_request_counter);
+    defer workspace_types.deinitWorkspaceList(allocator, &projects);
     if (projects.items.len == 0) {
         failures += 1;
-        try stdout.print("[FAIL] No projects exist. Run `project up <name>`.\n", .{});
+        try stdout.print("[FAIL] No workspaces exist. Run `workspace up <name>`.\n", .{});
     } else {
-        try stdout.print("[OK] Projects: {d}\n", .{projects.items.len});
+        try stdout.print("[OK] Workspaces: {d}\n", .{projects.items.len});
     }
 
     if (project_id == null) {
         failures += 1;
-        try stdout.print("[FAIL] No project selected. Use `--project` or `project use`.\n", .{});
+        try stdout.print("[FAIL] No workspace selected. Use `--workspace` or `workspace use`.\n", .{});
     } else {
         var status = try control_plane.workspaceStatus(
             allocator,
@@ -1391,17 +1490,17 @@ fn executeProjectDoctor(allocator: std.mem.Allocator, options: args.Options, cmd
             &g_control_request_counter,
             project_id,
             if (project_id) |id|
-                if (options.project_token) |token|
+                if (options.workspace_token) |token|
                     token
                 else
-                    cfg.getProjectToken(id)
+                    cfg.getWorkspaceToken(id)
             else
                 null,
         );
         defer status.deinit(allocator);
         if (status.mounts.items.len == 0 and status.actual_mounts.items.len == 0) {
             failures += 1;
-            try stdout.print("[FAIL] Selected project has no active mounts.\n", .{});
+            try stdout.print("[FAIL] Selected workspace has no active mounts.\n", .{});
         } else {
             try stdout.print("[OK] Active mounts: {d}\n", .{if (status.actual_mounts.items.len > 0) status.actual_mounts.items.len else status.mounts.items.len});
         }
@@ -1432,10 +1531,334 @@ fn executeProjectDoctor(allocator: std.mem.Allocator, options: args.Options, cmd
     }
 
     if (failures == 0) {
-        try stdout.print("project doctor: ready\n", .{});
+        try stdout.print("workspace doctor: ready\n", .{});
     } else {
-        try stdout.print("project doctor: {d} issue(s) detected\n", .{failures});
+        try stdout.print("workspace doctor: {d} issue(s) detected\n", .{failures});
         return error.InvalidResponse;
+    }
+}
+
+fn executeWorkspaceTemplateCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    const action = if (cmd.args.len > 0) cmd.args[0] else "list";
+    if (std.mem.eql(u8, action, "list")) {
+        var templates = try control_plane.listWorkspaceTemplates(allocator, client, &g_control_request_counter);
+        defer workspace_types.deinitWorkspaceTemplateList(allocator, &templates);
+
+        if (templates.items.len == 0) {
+            try stdout.print("(no workspace templates)\n", .{});
+            return;
+        }
+
+        try stdout.print("Workspace templates:\n", .{});
+        for (templates.items) |template| {
+            try stdout.print(
+                "  - {s}  binds={d}  {s}\n",
+                .{ template.id, template.binds.items.len, template.description },
+            );
+        }
+        return;
+    }
+
+    if (std.mem.eql(u8, action, "info")) {
+        if (cmd.args.len < 2) {
+            logger.err("workspace template info requires a template ID", .{});
+            return error.InvalidArguments;
+        }
+        var template = try control_plane.getWorkspaceTemplate(allocator, client, &g_control_request_counter, cmd.args[1]);
+        defer template.deinit(allocator);
+
+        try stdout.print("Workspace template {s}\n", .{template.id});
+        try stdout.print("  Description: {s}\n", .{template.description});
+        try stdout.print("  Binds ({d}):\n", .{template.binds.items.len});
+        for (template.binds.items) |bind| {
+            try stdout.print(
+                "    - {s} <= venom:{s} scope={s}\n",
+                .{ bind.bind_path, bind.venom_id, bind.provider_scope },
+            );
+        }
+        return;
+    }
+
+    logger.err("workspace template supports only list|info", .{});
+    return error.InvalidArguments;
+}
+
+fn executeWorkspaceBindCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len == 0) {
+        logger.err("workspace bind requires add|remove|list", .{});
+        return error.InvalidArguments;
+    }
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var cfg = try loadCliConfig(allocator);
+    defer cfg.deinit();
+
+    const action = cmd.args[0];
+    if (std.mem.eql(u8, action, "list")) {
+        const workspace_id = if (cmd.args.len > 1)
+            cmd.args[1]
+        else
+            resolveWorkspaceSelection(options, &cfg) orelse {
+                logger.err("workspace bind list requires a workspace ID or selected workspace", .{});
+                return error.InvalidArguments;
+            };
+        var detail = try control_plane.getWorkspace(allocator, client, &g_control_request_counter, workspace_id);
+        defer detail.deinit(allocator);
+
+        if (detail.binds.items.len == 0) {
+            try stdout.print("(no workspace binds)\n", .{});
+            return;
+        }
+        try stdout.print("Workspace binds for {s}:\n", .{workspace_id});
+        for (detail.binds.items) |bind| {
+            try stdout.print("  - {s} <= {s}\n", .{ bind.bind_path, bind.target_path });
+        }
+        return;
+    }
+
+    const workspace_id = resolveWorkspaceSelection(options, &cfg) orelse {
+        logger.err("select a workspace first with --workspace or workspace use", .{});
+        return error.InvalidArguments;
+    };
+    const workspace_token = if (options.workspace_token) |token| token else cfg.getWorkspaceToken(workspace_id);
+
+    if (std.mem.eql(u8, action, "add")) {
+        if (cmd.args.len < 3) {
+            logger.err("workspace bind add requires <bind_path> <target_path>", .{});
+            return error.InvalidArguments;
+        }
+        var detail = try control_plane.setWorkspaceBind(
+            allocator,
+            client,
+            &g_control_request_counter,
+            workspace_id,
+            workspace_token,
+            cmd.args[1],
+            cmd.args[2],
+        );
+        defer detail.deinit(allocator);
+        try stdout.print("Added bind to workspace {s}: {s} <= {s}\n", .{ workspace_id, cmd.args[1], cmd.args[2] });
+        return;
+    }
+
+    if (std.mem.eql(u8, action, "remove")) {
+        if (cmd.args.len < 2) {
+            logger.err("workspace bind remove requires <bind_path>", .{});
+            return error.InvalidArguments;
+        }
+        var detail = try control_plane.removeWorkspaceBind(
+            allocator,
+            client,
+            &g_control_request_counter,
+            workspace_id,
+            workspace_token,
+            cmd.args[1],
+        );
+        defer detail.deinit(allocator);
+        try stdout.print("Removed bind from workspace {s}: {s}\n", .{ workspace_id, cmd.args[1] });
+        return;
+    }
+
+    logger.err("workspace bind supports only add|remove|list", .{});
+    return error.InvalidArguments;
+}
+
+fn executeWorkspaceMountCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len == 0) {
+        logger.err("workspace mount requires add|remove|list", .{});
+        return error.InvalidArguments;
+    }
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var cfg = try loadCliConfig(allocator);
+    defer cfg.deinit();
+
+    const action = cmd.args[0];
+    if (std.mem.eql(u8, action, "list")) {
+        const workspace_id = if (cmd.args.len > 1)
+            cmd.args[1]
+        else
+            resolveWorkspaceSelection(options, &cfg) orelse {
+                logger.err("workspace mount list requires a workspace ID or selected workspace", .{});
+                return error.InvalidArguments;
+            };
+        var detail = try control_plane.getWorkspace(allocator, client, &g_control_request_counter, workspace_id);
+        defer detail.deinit(allocator);
+
+        if (detail.mounts.items.len == 0) {
+            try stdout.print("(no workspace mounts)\n", .{});
+            return;
+        }
+        try stdout.print("Workspace mounts for {s}:\n", .{workspace_id});
+        for (detail.mounts.items) |mount| {
+            try stdout.print("  - {s} <= {s}:{s}\n", .{ mount.mount_path, mount.node_id, mount.export_name });
+        }
+        return;
+    }
+
+    const workspace_id = resolveWorkspaceSelection(options, &cfg) orelse {
+        logger.err("select a workspace first with --workspace or workspace use", .{});
+        return error.InvalidArguments;
+    };
+    const workspace_token = if (options.workspace_token) |token| token else cfg.getWorkspaceToken(workspace_id);
+
+    if (std.mem.eql(u8, action, "add")) {
+        if (cmd.args.len < 4) {
+            logger.err("workspace mount add requires <mount_path> <node_id> <export_name>", .{});
+            return error.InvalidArguments;
+        }
+        var detail = try control_plane.setWorkspaceMount(
+            allocator,
+            client,
+            &g_control_request_counter,
+            workspace_id,
+            workspace_token,
+            cmd.args[2],
+            cmd.args[3],
+            cmd.args[1],
+        );
+        defer detail.deinit(allocator);
+        try stdout.print("Added mount to workspace {s}: {s} <= {s}:{s}\n", .{ workspace_id, cmd.args[1], cmd.args[2], cmd.args[3] });
+        return;
+    }
+
+    if (std.mem.eql(u8, action, "remove")) {
+        if (cmd.args.len < 2) {
+            logger.err("workspace mount remove requires <mount_path> [node_id export_name]", .{});
+            return error.InvalidArguments;
+        }
+        const node_id_filter: ?[]const u8 = if (cmd.args.len >= 4) cmd.args[2] else null;
+        const export_name_filter: ?[]const u8 = if (cmd.args.len >= 4) cmd.args[3] else null;
+        if (cmd.args.len == 3 or cmd.args.len > 4) return error.InvalidArguments;
+        var detail = try control_plane.removeWorkspaceMount(
+            allocator,
+            client,
+            &g_control_request_counter,
+            workspace_id,
+            workspace_token,
+            cmd.args[1],
+            node_id_filter,
+            export_name_filter,
+        );
+        defer detail.deinit(allocator);
+        try stdout.print("Removed mount from workspace {s}: {s}\n", .{ workspace_id, cmd.args[1] });
+        return;
+    }
+
+    logger.err("workspace mount supports only add|remove|list", .{});
+    return error.InvalidArguments;
+}
+
+fn executeWorkspaceHandoffCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    const action = if (cmd.args.len > 0) cmd.args[0] else "show";
+    if (!std.mem.eql(u8, action, "show")) {
+        logger.err("workspace handoff supports only show", .{});
+        return error.InvalidArguments;
+    }
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var cfg = try loadCliConfig(allocator);
+    defer cfg.deinit();
+
+    var profile: []const u8 = "generic";
+    var mount_path: []const u8 = "./workspace";
+    var explicit_workspace_id: ?[]const u8 = null;
+    var i: usize = 1;
+    while (i < cmd.args.len) : (i += 1) {
+        const arg = cmd.args[i];
+        if (std.mem.eql(u8, arg, "--mount-path")) {
+            i += 1;
+            if (i >= cmd.args.len) return error.InvalidArguments;
+            mount_path = cmd.args[i];
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--")) return error.InvalidArguments;
+        if (std.mem.eql(u8, arg, "generic") or std.mem.eql(u8, arg, "codex_app") or std.mem.eql(u8, arg, "spider_monkey")) {
+            profile = arg;
+            continue;
+        }
+        if (explicit_workspace_id != null) return error.InvalidArguments;
+        explicit_workspace_id = arg;
+    }
+    const workspace_id = explicit_workspace_id orelse resolveWorkspaceSelection(options, &cfg) orelse {
+        logger.err("workspace handoff show requires a workspace ID or selected workspace", .{});
+        return error.InvalidArguments;
+    };
+    const workspace_token = if (options.workspace_token) |token| token else cfg.getWorkspaceToken(workspace_id);
+    const auth_token = cfg.activeRoleToken();
+
+    var detail = try control_plane.getWorkspace(allocator, client, &g_control_request_counter, workspace_id);
+    defer detail.deinit(allocator);
+    var status = try control_plane.workspaceStatus(
+        allocator,
+        client,
+        &g_control_request_counter,
+        workspace_id,
+        workspace_token,
+    );
+    defer status.deinit(allocator);
+
+    try stdout.print("Workspace handoff for {s}\n", .{workspace_id});
+    try stdout.print("  Profile: {s}\n", .{profile});
+    try stdout.print("  Template: {s}\n", .{detail.template_id orelse "dev"});
+    try stdout.print("  Mounts: {d}\n", .{detail.mounts.items.len});
+    try stdout.print("  Binds: {d}\n", .{detail.binds.items.len});
+    if (status.workspace_root) |workspace_root| {
+        try stdout.print("  Workspace root: {s}\n", .{workspace_root});
+    }
+    try stdout.print("  Local mount path: {s}\n", .{mount_path});
+
+    try stdout.print("\nWorkspace mount:\n", .{});
+    try stdout.print(
+        "  spiderweb-fs-mount --workspace-url {s} --auth-token {s} --workspace-id {s} mount {s}\n",
+        .{
+            client.url,
+            if (auth_token.len > 0) auth_token else "<auth-token>",
+            workspace_id,
+            mount_path,
+        },
+    );
+    if (workspace_token) |token| {
+        try stdout.print(
+            "  spiderweb-fs-mount --workspace-url {s} --workspace-id {s} --workspace-token {s} mount {s}\n",
+            .{ client.url, workspace_id, token, mount_path },
+        );
+    } else {
+        try stdout.print(
+            "  spiderweb-fs-mount --workspace-url {s} --workspace-id {s} --workspace-token <workspace-token> mount {s}\n",
+            .{ client.url, workspace_id, mount_path },
+        );
+    }
+
+    try stdout.print("\nNamespace fallback:\n", .{});
+    try stdout.print(
+        "  spiderweb-fs-mount --namespace-url {s} --workspace-id {s} mount {s}\n",
+        .{ client.url, workspace_id, mount_path },
+    );
+
+    if (std.mem.eql(u8, profile, "codex_app")) {
+        try stdout.print("\nCodex App:\n", .{});
+        try stdout.print("  1. Mount the workspace using one of the commands above.\n", .{});
+        try stdout.print("  2. Open {s} in Codex App.\n", .{mount_path});
+    } else if (std.mem.eql(u8, profile, "spider_monkey")) {
+        try stdout.print("\nSpiderMonkey:\n", .{});
+        try stdout.print("  spider-monkey run --workspace-root {s}\n", .{mount_path});
+    } else {
+        try stdout.print("\nGeneric external worker:\n", .{});
+        try stdout.print("  Open {s} in your external worker after the mount is ready.\n", .{mount_path});
     }
 }
 
@@ -1496,9 +1919,9 @@ fn printSessionAttachStatus(stdout: anytype, status: *const workspace_types.Sess
     try stdout.print("Session: {s}\n", .{status.session_key});
     try stdout.print("  Agent: {s}\n", .{status.agent_id});
     if (status.project_id) |project_id| {
-        try stdout.print("  Project: {s}\n", .{project_id});
+        try stdout.print("  Workspace: {s}\n", .{project_id});
     } else {
-        try stdout.print("  Project: (none)\n", .{});
+        try stdout.print("  Workspace: (none)\n", .{});
     }
     try stdout.print(
         "  Attach state: {s} (runtime_ready={s}, mount_ready={s})\n",
@@ -1541,12 +1964,12 @@ fn executeSessionList(allocator: std.mem.Allocator, options: args.Options, cmd: 
         const marker = if (std.mem.eql(u8, session.session_key, list.active_session)) "*" else " ";
         if (session.project_id) |project_id| {
             try stdout.print(
-                "{s} {s}  agent={s}  project={s}\n",
+                "{s} {s}  agent={s}  workspace={s}\n",
                 .{ marker, session.session_key, session.agent_id, project_id },
             );
         } else {
             try stdout.print(
-                "{s} {s}  agent={s}  project=(none)\n",
+                "{s} {s}  agent={s}  workspace=(none)\n",
                 .{ marker, session.session_key, session.agent_id },
             );
         }
@@ -1606,7 +2029,7 @@ fn executeSessionHistory(allocator: std.mem.Allocator, options: args.Options, cm
     try stdout.print("Persisted sessions:\n", .{});
     for (sessions.items) |session| {
         try stdout.print(
-            "  - {s}  agent={s}  project={s}  last_active_ms={d}  messages={d}",
+            "  - {s}  agent={s}  workspace={s}  last_active_ms={d}  messages={d}",
             .{
                 session.session_key,
                 session.agent_id,
@@ -1653,8 +2076,8 @@ fn parseSessionAttachArgs(options: args.Options, cmd: args.Command) !SessionAtta
     var parsed = SessionAttachArgs{
         .session_key = undefined,
         .agent_id = undefined,
-        .project_id = options.project,
-        .project_token = options.project_token,
+        .project_id = options.workspace,
+        .project_token = options.workspace_token,
     };
 
     var positional: [2][]const u8 = undefined;
@@ -1662,13 +2085,13 @@ fn parseSessionAttachArgs(options: args.Options, cmd: args.Command) !SessionAtta
     var i: usize = 0;
     while (i < cmd.args.len) : (i += 1) {
         const arg = cmd.args[i];
-        if (std.mem.eql(u8, arg, "--project")) {
+        if (std.mem.eql(u8, arg, "--workspace")) {
             i += 1;
             if (i >= cmd.args.len) return error.InvalidArguments;
             parsed.project_id = cmd.args[i];
             continue;
         }
-        if (std.mem.eql(u8, arg, "--project-token")) {
+        if (std.mem.eql(u8, arg, "--workspace-token")) {
             i += 1;
             if (i >= cmd.args.len) return error.InvalidArguments;
             parsed.project_token = cmd.args[i];
@@ -1688,11 +2111,11 @@ fn parseSessionAttachArgs(options: args.Options, cmd: args.Command) !SessionAtta
 
 fn executeSessionAttach(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     const parsed = parseSessionAttachArgs(options, cmd) catch {
-        logger.err("session attach usage: session attach <session_key> <agent_id> --project <project_id> [--project-token <token>]", .{});
+        logger.err("session attach usage: session attach <session_key> <agent_id> --workspace <workspace_id> [--workspace-token <token>]", .{});
         return error.InvalidArguments;
     };
     const project_id = parsed.project_id orelse {
-        logger.err("session attach requires --project <project_id>", .{});
+        logger.err("session attach requires --workspace <workspace_id>", .{});
         return error.InvalidArguments;
     };
 
@@ -1773,17 +2196,17 @@ fn executeSessionRestore(allocator: std.mem.Allocator, options: args.Options, cm
     const session = restored.session.?;
     const attach_project_id = session.project_id orelse {
         logger.err(
-            "restored session has no project_id; choose a project and run: session attach {s} {s} --project <project_id>",
+            "restored session has no workspace_id; choose a workspace and run: session attach {s} {s} --workspace <workspace_id>",
             .{ session.session_key, session.agent_id },
         );
         return error.InvalidResponse;
     };
-    const project_token = if (options.project_token) |token|
+    const project_token = if (options.workspace_token) |token|
         token
     else
-        cfg.getProjectToken(attach_project_id);
+        cfg.getWorkspaceToken(attach_project_id);
     try stdout.print(
-        "Restoring session {s} (agent={s}, project={s})\n",
+        "Restoring session {s} (agent={s}, workspace={s})\n",
         .{ session.session_key, session.agent_id, session.project_id orelse "(none)" },
     );
 
@@ -1799,9 +2222,9 @@ fn executeSessionRestore(allocator: std.mem.Allocator, options: args.Options, cm
             attach_project_id,
         ) catch |err| {
             if (err == error.UserRoleCannotAttachSystemProject) {
-                logger.err("user role cannot attach to the system project; choose a non-system project", .{});
+                logger.err("user role cannot attach to the system workspace; choose a non-system workspace", .{});
             } else if (err == error.NoProjectCompatibleAgent) {
-                logger.err("no non-system agent is available for project {s}", .{attach_project_id});
+                logger.err("no non-system agent is available for workspace {s}", .{attach_project_id});
             }
             return err;
         }
@@ -2124,7 +2547,7 @@ fn executeNodeServiceWatch(allocator: std.mem.Allocator, options: args.Options, 
 
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const client = try getOrCreateClient(allocator, options);
-    try maybeApplyProjectContext(allocator, options, client);
+    try maybeApplyWorkspaceContext(allocator, options, client);
     try fsrpcBootstrap(allocator, client);
 
     if (node_filter) |node_id| {
@@ -3059,7 +3482,7 @@ fn resolveAttachedVenomBindingScope(
     if (cfg.selectedAgent()) |agent_id| {
         scope.agent_id = try allocator.dupe(u8, agent_id);
     }
-    if (cfg.selectedProject()) |project_id| {
+    if (cfg.selectedWorkspace()) |project_id| {
         scope.project_id = try allocator.dupe(u8, project_id);
     }
     return scope;
@@ -3607,7 +4030,7 @@ fn executeWorkspaceStatus(allocator: std.mem.Allocator, options: args.Options, c
     const project_id = if (cmd.args.len > 0)
         cmd.args[0]
     else
-        resolveProjectSelection(options, &cfg);
+        resolveWorkspaceSelection(options, &cfg);
 
     var status = try control_plane.workspaceStatus(
         allocator,
@@ -3615,10 +4038,10 @@ fn executeWorkspaceStatus(allocator: std.mem.Allocator, options: args.Options, c
         &g_control_request_counter,
         project_id,
         if (project_id) |id|
-            if (options.project_token) |token|
+            if (options.workspace_token) |token|
                 token
             else
-                cfg.getProjectToken(id)
+                cfg.getWorkspaceToken(id)
         else
             null,
     );
@@ -3818,7 +4241,7 @@ fn executeChatSend(allocator: std.mem.Allocator, options: args.Options, cmd: arg
     defer allocator.free(message);
 
     const client = try getOrCreateClient(allocator, options);
-    try maybeApplyProjectContext(allocator, options, client);
+    try maybeApplyWorkspaceContext(allocator, options, client);
     logger.info("Negotiating FS-RPC session...", .{});
     try fsrpcBootstrap(allocator, client);
     var binding_scope = try resolveAttachedVenomBindingScope(allocator, client);
@@ -3986,7 +4409,7 @@ fn executeChatResume(allocator: std.mem.Allocator, options: args.Options, cmd: a
 
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const client = try getOrCreateClient(allocator, options);
-    try maybeApplyProjectContext(allocator, options, client);
+    try maybeApplyWorkspaceContext(allocator, options, client);
     try fsrpcBootstrap(allocator, client);
     var binding_scope = try resolveAttachedVenomBindingScope(allocator, client);
     defer binding_scope.deinit(allocator);
@@ -4068,7 +4491,7 @@ fn executeChatResume(allocator: std.mem.Allocator, options: args.Options, cmd: a
 fn executeFsLs(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const client = try getOrCreateClient(allocator, options);
-    try maybeApplyProjectContext(allocator, options, client);
+    try maybeApplyWorkspaceContext(allocator, options, client);
     try fsrpcBootstrap(allocator, client);
 
     const path = if (cmd.args.len > 0) cmd.args[0] else "/";
@@ -4094,7 +4517,7 @@ fn executeFsRead(allocator: std.mem.Allocator, options: args.Options, cmd: args.
 
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const client = try getOrCreateClient(allocator, options);
-    try maybeApplyProjectContext(allocator, options, client);
+    try maybeApplyWorkspaceContext(allocator, options, client);
     try fsrpcBootstrap(allocator, client);
 
     const fid = try fsrpcWalkPath(allocator, client, cmd.args[0]);
@@ -4114,7 +4537,7 @@ fn executeFsWrite(allocator: std.mem.Allocator, options: args.Options, cmd: args
 
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const client = try getOrCreateClient(allocator, options);
-    try maybeApplyProjectContext(allocator, options, client);
+    try maybeApplyWorkspaceContext(allocator, options, client);
     try fsrpcBootstrap(allocator, client);
 
     const fid = try fsrpcWalkPath(allocator, client, cmd.args[0]);
@@ -4137,7 +4560,7 @@ fn executeFsStat(allocator: std.mem.Allocator, options: args.Options, cmd: args.
 
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const client = try getOrCreateClient(allocator, options);
-    try maybeApplyProjectContext(allocator, options, client);
+    try maybeApplyWorkspaceContext(allocator, options, client);
     try fsrpcBootstrap(allocator, client);
 
     const fid = try fsrpcWalkPath(allocator, client, cmd.args[0]);
@@ -4151,7 +4574,7 @@ fn executeFsStat(allocator: std.mem.Allocator, options: args.Options, cmd: args.
 fn executeFsTree(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const client = try getOrCreateClient(allocator, options);
-    try maybeApplyProjectContext(allocator, options, client);
+    try maybeApplyWorkspaceContext(allocator, options, client);
     try fsrpcBootstrap(allocator, client);
 
     var tree_opts = FsTreeOptions{};
