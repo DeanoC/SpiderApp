@@ -94,9 +94,9 @@ pub const protocol = struct {
         pub const AppSettings = struct {
             server_url: []const u8,
             auth_token: []const u8,
-            ui_theme: ?[]const u8 = null,
-            ui_theme_pack: ?[]const u8 = null,
-            ui_profile: ?[]const u8 = null,
+            theme_mode: ?[]const u8 = null,
+            theme_pack: ?[]const u8 = null,
+            theme_profile: ?[]const u8 = null,
             auto_connect_on_launch: bool = true,
         };
     };

@@ -77,6 +77,20 @@ pub const Config = struct {
 
     pub const current_schema_version: u32 = 2;
 
+    pub const ThemeMode = enum {
+        pack_default,
+        light,
+        dark,
+    };
+
+    pub const ThemeProfile = enum {
+        auto,
+        desktop,
+        phone,
+        tablet,
+        fullscreen,
+    };
+
     allocator: std.mem.Allocator,
 
     // Connection settings
@@ -101,11 +115,11 @@ pub const Config = struct {
 
     // Update + theme settings
     update_manifest_url: []const u8,
-    ui_theme: ?[]const u8 = null,
-    ui_theme_pack: ?[]const u8 = null,
-    ui_watch_theme_pack: bool = false,
-    ui_theme_pack_recent: ?[]const []const u8 = null,
-    ui_profile: ?[]const u8 = null,
+    theme_mode: ThemeMode = .pack_default,
+    theme_pack: ?[]const u8 = null,
+    watch_theme_pack: bool = false,
+    theme_pack_recent: ?[]const []const u8 = null,
+    theme_profile: ThemeProfile = .auto,
     terminal_backend: ?[]const u8 = null,
     gui_verbose_ws_logs: bool = false,
     window_x: ?i32 = null,
@@ -205,22 +219,14 @@ pub const Config = struct {
             self.allocator.free(value);
             self.default_session = null;
         }
-        if (self.ui_theme) |value| {
+        if (self.theme_pack) |value| {
             self.allocator.free(value);
-            self.ui_theme = null;
+            self.theme_pack = null;
         }
-        if (self.ui_theme_pack) |value| {
-            self.allocator.free(value);
-            self.ui_theme_pack = null;
-        }
-        if (self.ui_theme_pack_recent) |values| {
+        if (self.theme_pack_recent) |values| {
             for (values) |value| self.allocator.free(value);
             self.allocator.free(values);
-            self.ui_theme_pack_recent = null;
-        }
-        if (self.ui_profile) |value| {
-            self.allocator.free(value);
-            self.ui_profile = null;
+            self.theme_pack_recent = null;
         }
         if (self.terminal_backend) |value| {
             self.allocator.free(value);
@@ -687,26 +693,22 @@ pub const Config = struct {
         self.workspace_tokens = compacted;
     }
 
-    pub fn setTheme(self: *Config, value: ?[]const u8) !void {
-        const next = if (value) |theme| try self.allocator.dupe(u8, theme) else null;
-        if (self.ui_theme) |theme| self.allocator.free(theme);
-        self.ui_theme = next;
+    pub fn setThemeMode(self: *Config, value: ThemeMode) void {
+        self.theme_mode = value;
     }
 
     pub fn setThemePack(self: *Config, value: ?[]const u8) !void {
         const next = if (value) |pack| try self.allocator.dupe(u8, pack) else null;
-        if (self.ui_theme_pack) |pack| self.allocator.free(pack);
-        self.ui_theme_pack = next;
+        if (self.theme_pack) |pack| self.allocator.free(pack);
+        self.theme_pack = next;
     }
 
-    pub fn setProfile(self: *Config, value: ?[]const u8) !void {
-        const next = if (value) |profile| try self.allocator.dupe(u8, profile) else null;
-        if (self.ui_profile) |profile| self.allocator.free(profile);
-        self.ui_profile = next;
+    pub fn setThemeProfile(self: *Config, value: ThemeProfile) void {
+        self.theme_profile = value;
     }
 
     pub fn setWatchThemePack(self: *Config, enabled: bool) void {
-        self.ui_watch_theme_pack = enabled;
+        self.watch_theme_pack = enabled;
     }
 
     pub fn setTerminalBackend(self: *Config, value: ?[]const u8) !void {
@@ -720,6 +722,49 @@ pub const Config = struct {
 
     pub fn selectedTerminalBackend(self: *const Config) ?[]const u8 {
         return self.terminal_backend;
+    }
+
+    pub fn rememberThemePack(self: *Config, pack_path: []const u8) bool {
+        if (pack_path.len == 0) return false;
+
+        const max_items: usize = 8;
+        const current = self.theme_pack_recent orelse &[_][]const u8{};
+        if (current.len > 0 and std.mem.eql(u8, current[0], pack_path)) return false;
+
+        var new_len: usize = 1;
+        for (current) |item| {
+            if (new_len >= max_items) break;
+            if (std.mem.eql(u8, item, pack_path)) continue;
+            new_len += 1;
+        }
+
+        var out = self.allocator.alloc([]const u8, new_len) catch return false;
+        var written: usize = 0;
+
+        out[written] = self.allocator.dupe(u8, pack_path) catch {
+            self.allocator.free(out);
+            return false;
+        };
+        written += 1;
+
+        for (current) |item| {
+            if (written >= new_len) break;
+            if (std.mem.eql(u8, item, pack_path)) continue;
+            out[written] = self.allocator.dupe(u8, item) catch {
+                var i: usize = 0;
+                while (i < written) : (i += 1) self.allocator.free(out[i]);
+                self.allocator.free(out);
+                return false;
+            };
+            written += 1;
+        }
+
+        if (self.theme_pack_recent) |list| {
+            for (list) |item| self.allocator.free(item);
+            self.allocator.free(list);
+        }
+        self.theme_pack_recent = out;
+        return true;
     }
 
     fn duplicateOptionalString(
@@ -1022,11 +1067,11 @@ pub const Config = struct {
             .app_local_nodes = loaded_app_local_nodes,
             .update_manifest_url = try duplicateOptionalString(allocator, json.update_manifest_url) orelse
                 try allocator.dupe(u8, "https://github.com/DeanoC/SpiderApp/releases/latest/download/update.json"),
-            .ui_theme = try duplicateOptionalString(allocator, json.ui_theme),
-            .ui_theme_pack = try duplicateOptionalString(allocator, json.ui_theme_pack),
-            .ui_watch_theme_pack = json.ui_watch_theme_pack orelse false,
-            .ui_theme_pack_recent = try duplicateOptionalList(allocator, json.ui_theme_pack_recent),
-            .ui_profile = try duplicateOptionalString(allocator, json.ui_profile),
+            .theme_mode = parseThemeMode(json.theme_mode),
+            .theme_pack = try duplicateOptionalString(allocator, json.theme_pack),
+            .watch_theme_pack = json.watch_theme_pack orelse false,
+            .theme_pack_recent = try duplicateOptionalList(allocator, json.theme_pack_recent),
+            .theme_profile = parseThemeProfile(json.theme_profile),
             .terminal_backend = try duplicateOptionalString(allocator, json.terminal_backend),
             .gui_verbose_ws_logs = json.gui_verbose_ws_logs orelse false,
             .window_x = json.window_x,
@@ -1092,11 +1137,11 @@ pub const Config = struct {
             .workspace_layout_index = try makeWorkspaceLayoutJsonSlice(self.allocator, mutable_self.workspace_layout_index),
             .app_local_nodes = try makeAppLocalNodeJsonSlice(self.allocator, mutable_self.app_local_nodes),
             .update_manifest_url = mutable_self.update_manifest_url,
-            .ui_theme = mutable_self.ui_theme,
-            .ui_theme_pack = mutable_self.ui_theme_pack,
-            .ui_watch_theme_pack = mutable_self.ui_watch_theme_pack,
-            .ui_theme_pack_recent = mutable_self.ui_theme_pack_recent,
-            .ui_profile = mutable_self.ui_profile,
+            .theme_mode = themeModeName(mutable_self.theme_mode),
+            .theme_pack = mutable_self.theme_pack,
+            .watch_theme_pack = mutable_self.watch_theme_pack,
+            .theme_pack_recent = mutable_self.theme_pack_recent,
+            .theme_profile = themeProfileName(mutable_self.theme_profile),
             .terminal_backend = mutable_self.terminal_backend,
             .gui_verbose_ws_logs = mutable_self.gui_verbose_ws_logs,
             .window_x = mutable_self.window_x,
@@ -1140,11 +1185,11 @@ const ConfigJson = struct {
     workspace_layout_index: ?[]const WorkspaceLayoutJson = null,
     app_local_nodes: ?[]const AppLocalNodeJson = null,
     update_manifest_url: ?[]const u8 = null,
-    ui_theme: ?[]const u8 = null,
-    ui_theme_pack: ?[]const u8 = null,
-    ui_watch_theme_pack: ?bool = null,
-    ui_theme_pack_recent: ?[]const []const u8 = null,
-    ui_profile: ?[]const u8 = null,
+    theme_mode: ?[]const u8 = null,
+    theme_pack: ?[]const u8 = null,
+    watch_theme_pack: ?bool = null,
+    theme_pack_recent: ?[]const []const u8 = null,
+    theme_profile: ?[]const u8 = null,
     terminal_backend: ?[]const u8 = null,
     gui_verbose_ws_logs: ?bool = null,
     window_x: ?i32 = null,
@@ -1298,6 +1343,88 @@ test "config rejects missing schema version" {
     ;
 
     try std.testing.expectError(error.UnsupportedConfigSchema, Config.loadFromJsonSlice(std.testing.allocator, legacy_json));
+}
+
+fn parseThemeMode(value: ?[]const u8) Config.ThemeMode {
+    if (value) |raw| {
+        if (std.ascii.eqlIgnoreCase(raw, "light")) return .light;
+        if (std.ascii.eqlIgnoreCase(raw, "dark")) return .dark;
+    }
+    return .pack_default;
+}
+
+fn themeModeName(mode: Config.ThemeMode) []const u8 {
+    return switch (mode) {
+        .pack_default => "pack_default",
+        .light => "light",
+        .dark => "dark",
+    };
+}
+
+fn parseThemeProfile(value: ?[]const u8) Config.ThemeProfile {
+    if (value) |raw| {
+        if (std.ascii.eqlIgnoreCase(raw, "desktop")) return .desktop;
+        if (std.ascii.eqlIgnoreCase(raw, "phone")) return .phone;
+        if (std.ascii.eqlIgnoreCase(raw, "tablet")) return .tablet;
+        if (std.ascii.eqlIgnoreCase(raw, "fullscreen")) return .fullscreen;
+    }
+    return .auto;
+}
+
+fn themeProfileName(profile: Config.ThemeProfile) []const u8 {
+    return switch (profile) {
+        .auto => "auto",
+        .desktop => "desktop",
+        .phone => "phone",
+        .tablet => "tablet",
+        .fullscreen => "fullscreen",
+    };
+}
+
+test "theme config uses modern keys and round-trips" {
+    var config = try Config.init(std.testing.allocator);
+    defer config.deinit();
+
+    config.setThemeMode(.dark);
+    try config.setThemePack("themes/custom_pack");
+    config.setWatchThemePack(true);
+    config.setThemeProfile(.tablet);
+    try std.testing.expect(config.rememberThemePack("themes/custom_pack"));
+    try std.testing.expect(config.rememberThemePack("themes/secondary_pack"));
+
+    const payload = ConfigJson{
+        .theme_mode = themeModeName(config.theme_mode),
+        .theme_pack = config.theme_pack,
+        .watch_theme_pack = config.watch_theme_pack,
+        .theme_pack_recent = config.theme_pack_recent,
+        .theme_profile = themeProfileName(config.theme_profile),
+    };
+    const bytes = try std.json.Stringify.valueAlloc(std.testing.allocator, payload, .{
+        .emit_null_optional_fields = false,
+    });
+    defer std.testing.allocator.free(bytes);
+
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"theme_mode\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"theme_pack\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"watch_theme_pack\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"theme_pack_recent\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"theme_profile\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"ui_theme\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"ui_theme_pack\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"ui_profile\"") == null);
+
+    var loaded = try Config.loadFromJsonSlice(std.testing.allocator, bytes);
+    defer loaded.deinit();
+
+    try std.testing.expectEqual(Config.ThemeMode.dark, loaded.theme_mode);
+    try std.testing.expectEqual(Config.ThemeProfile.tablet, loaded.theme_profile);
+    try std.testing.expect(loaded.watch_theme_pack);
+    try std.testing.expect(loaded.theme_pack != null);
+    try std.testing.expectEqualStrings("themes/custom_pack", loaded.theme_pack.?);
+    try std.testing.expect(loaded.theme_pack_recent != null);
+    try std.testing.expectEqual(@as(usize, 2), loaded.theme_pack_recent.?.len);
+    try std.testing.expectEqualStrings("themes/secondary_pack", loaded.theme_pack_recent.?[0]);
+    try std.testing.expectEqualStrings("themes/custom_pack", loaded.theme_pack_recent.?[1]);
 }
 
 test "unsupported config backup path stays alongside config file" {
