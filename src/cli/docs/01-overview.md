@@ -17,12 +17,21 @@ spider --help
 - `fs read <path>` - Read a virtual filesystem file
 - `fs write <path> <content>` - Write text to a virtual filesystem file
 - `fs stat <path>` - Show file metadata for a virtual filesystem path
-- `project list` - List all projects
-- `project use <project_id> [project_token]` - Select/activate a project
-- `project info <project_id>` - Show project details
-- `project create <name> [vision]` - Create a project and store selection/token locally
-- `project up <name>` - One-shot project + mount bootstrap
-- `project doctor` - Readiness checks with actionable failures
+- `workspace list` - List all workspaces
+- `workspace use <workspace_id> [workspace_token]` - Select/activate a workspace
+- `workspace info <workspace_id>` - Show workspace details
+- `workspace create <name> [vision]` - Create a workspace and store selection/token locally
+- `workspace up <name>` - One-shot workspace + mount bootstrap
+- `workspace doctor` - Readiness checks with actionable failures
+- `workspace template list` - List available workspace templates
+- `workspace template info <template_id>` - Show one template and its binds
+- `workspace bind list [workspace_id]` - List workspace binds
+- `workspace bind add <bind_path> <target_path>` - Add a workspace bind
+- `workspace bind remove <bind_path>` - Remove a workspace bind
+- `workspace mount list [workspace_id]` - List workspace mounts
+- `workspace mount add <mount_path> <node_id> <export_name>` - Add a workspace mount
+- `workspace mount remove <mount_path> [node_id export_name]` - Remove a workspace mount
+- `workspace handoff show [generic|codex_app|spider_monkey]` - Print worker handoff commands
 - `agent list` - List discoverable agents
 - `agent info <agent_id>` - Show one agent's metadata
 - `session list` - List known sessions for this connection
@@ -47,10 +56,10 @@ spider --help
 - `pairing list` - Refresh and list active pairing invites
 - `pairing create [--expires-in-ms <ms>]` - Create a new pairing invite
 - `pairing refresh [pending|invites|all]` - Refresh pairing snapshots and print results
-- `workspace status [project_id]` - Show active workspace mounts
+- `workspace status [workspace_id]` - Show active workspace mounts
 - `auth status` - Show Spiderweb auth token status (admin only)
 - `auth rotate <admin|user>` - Rotate Spiderweb auth token (admin only)
-- `goal list` - List goals for current project
+- `goal list` - List goals for current workspace
 - `goal create <description>` - Create a new goal
 - `task list` - List active tasks
 - `worker list` - Show running workers
@@ -60,9 +69,9 @@ spider --help
 ## Global Options
 
 - `--url <url>` - Spiderweb server URL (default: ws://127.0.0.1:18790)
-- `--project <project_id>` - Set current project
-- `--project-token <token>` - Token used to activate project context
-- `--operator-token <token>` - Token for operator-scoped control mutations (for example `project create`)
+- `--workspace <workspace_id>` - Set current workspace
+- `--workspace-token <token>` - Token used to activate workspace context
+- `--operator-token <token>` - Token for operator-scoped control mutations (for example `workspace create`)
 - `--role <admin|user>` - Select saved auth role token for this command
 - `--interactive` - Start interactive REPL mode
 - `--verbose` - Enable verbose logging
@@ -85,7 +94,7 @@ Use command mode for now.
 ## Design Philosophy
 
 ZSS uses a noun-verb command structure:
-- **Noun** = What you're acting on (chat, project, goal, task)
+- **Noun** = What you're acting on (chat, workspace, goal, task)
 - **Verb** = What you're doing (send, list, create, use)
 
 This makes commands discoverable and consistent.

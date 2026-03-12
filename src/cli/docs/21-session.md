@@ -31,14 +31,14 @@ spider session status
 spider session status main
 ```
 
-## session attach <session_key> <agent_id> [--project <project_id>] [--project-token <token>]
+## session attach <session_key> <agent_id> [--workspace <workspace_id>] [--workspace-token <token>]
 
-Create or rebind a session to an agent (and optional project context).
+Create or rebind a session to an agent and workspace context.
 
 **Examples:**
 ```bash
-spider session attach review mother --project system
-spider session attach work bob --project proj-2 --project-token proj-secret
+spider session attach review mother --workspace system
+spider session attach work bob --workspace proj-2 --workspace-token proj-secret
 ```
 
 ## session resume <session_key>

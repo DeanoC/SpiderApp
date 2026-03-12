@@ -10,31 +10,31 @@ Spiderweb server WebSocket URL.
 **Examples:**
 ```bash
 spider --url ws://100.101.192.123:18790 chat send "Hello"
-spider --url ws://localhost:18790 project list
+spider --url ws://localhost:18790 workspace list
 ```
 
-### `--project <project_id>`
-Set the current project for this session.
+### `--workspace <workspace_id>`
+Set the current workspace for this session.
 
 **Examples:**
 ```bash
-spider --project spiderweb goal list
-spider --project mygame chat send "What's next?"
+spider --workspace spiderweb goal list
+spider --workspace mygame chat send "What's next?"
 ```
 
-### `--project-token <token>`
-Project token used for `control.project_activate`.
+### `--workspace-token <token>`
+Workspace token used for `control.workspace_activate`.
 
-If provided with `project use`, the token is also persisted in local config for that project.
+If provided with `workspace use`, the token is also persisted in local config for that workspace.
 
 **Examples:**
 ```bash
-spider --project proj-1 --project-token proj-abc workspace status
-spider --project-token proj-abc project use proj-1
+spider --workspace proj-1 --workspace-token proj-abc workspace status
+spider --workspace-token proj-abc workspace use proj-1
 ```
 
 ### `--operator-token <token>`
-Operator token used for protected control mutations (for example `control.project_create`).
+Operator token used for protected control mutations (for example `control.workspace_create`).
 
 If omitted, ZSS uses the saved admin role token when available.
 
@@ -45,8 +45,8 @@ If omitted, ZSS uses the locally saved active role.
 
 **Examples:**
 ```bash
-spider --operator-token op-secret project create demo "Distributed workspace"
-spider --operator-token op-secret project create "Game AI"
+spider --operator-token op-secret workspace create demo "Distributed workspace"
+spider --operator-token op-secret workspace create "Game AI"
 ```
 
 ## Mode Options

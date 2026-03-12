@@ -13,7 +13,7 @@ Connection uses unified-v2 control negotiation:
 **Examples:**
 ```bash
 spider connect
-spider connect --url ws://100.101.192.123:18790
+spider --url ws://100.101.192.123:18790 connect
 ```
 
 ## disconnect
@@ -38,6 +38,6 @@ spider status
 ```
 Connected: Yes
 Server: ws://100.101.192.123:18790
-Project: spiderweb
+Workspace: spiderweb
 Uptime: 45 minutes
 ```

@@ -86,11 +86,11 @@ Persistent local state:
 2. FS-RPC filesystem operations (`fs`)
 3. FS-RPC chat flow discovered from the bound `chat` Venom plus its companion jobs root
 
-Project context handling:
+Workspace context handling:
 
-- project id from `--project` or saved config
-- project token from `--project-token` or saved per-project token
-- activation via `control.project_activate` when token is available
+- workspace id from `--workspace` or saved config
+- workspace token from `--workspace-token` or saved per-workspace token
+- activation via `control.workspace_activate` when token is available
 
 ## GUI Architecture
 

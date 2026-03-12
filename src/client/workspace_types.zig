@@ -70,33 +70,48 @@ pub const ReconcileStatus = struct {
     }
 };
 
-pub const ProjectSummary = struct {
+pub const WorkspaceSummary = struct {
     id: []u8,
     name: []u8,
     vision: []u8,
     status: []u8,
+    template_id: ?[]u8 = null,
     kind: ?[]u8 = null,
     is_delete_protected: bool = false,
     token_locked: bool = false,
     mount_count: usize,
+    bind_count: usize = 0,
     created_at_ms: i64,
     updated_at_ms: i64,
 
-    pub fn deinit(self: *ProjectSummary, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *WorkspaceSummary, allocator: std.mem.Allocator) void {
         allocator.free(self.id);
         allocator.free(self.name);
         allocator.free(self.vision);
         allocator.free(self.status);
+        if (self.template_id) |value| allocator.free(value);
         if (self.kind) |value| allocator.free(value);
         self.* = undefined;
     }
 };
 
-pub const ProjectDetail = struct {
+pub const WorkspaceBindView = struct {
+    bind_path: []u8,
+    target_path: []u8,
+
+    pub fn deinit(self: *WorkspaceBindView, allocator: std.mem.Allocator) void {
+        allocator.free(self.bind_path);
+        allocator.free(self.target_path);
+        self.* = undefined;
+    }
+};
+
+pub const WorkspaceDetail = struct {
     id: []u8,
     name: []u8,
     vision: []u8,
     status: []u8,
+    template_id: ?[]u8 = null,
     kind: ?[]u8 = null,
     is_delete_protected: bool = false,
     token_locked: bool = false,
@@ -104,16 +119,47 @@ pub const ProjectDetail = struct {
     updated_at_ms: i64,
     project_token: ?[]u8 = null,
     mounts: std.ArrayListUnmanaged(MountView) = .{},
+    binds: std.ArrayListUnmanaged(WorkspaceBindView) = .{},
 
-    pub fn deinit(self: *ProjectDetail, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *WorkspaceDetail, allocator: std.mem.Allocator) void {
         allocator.free(self.id);
         allocator.free(self.name);
         allocator.free(self.vision);
         allocator.free(self.status);
+        if (self.template_id) |value| allocator.free(value);
         if (self.kind) |value| allocator.free(value);
         if (self.project_token) |value| allocator.free(value);
         for (self.mounts.items) |*mount| mount.deinit(allocator);
         self.mounts.deinit(allocator);
+        for (self.binds.items) |*bind| bind.deinit(allocator);
+        self.binds.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const WorkspaceTemplateBindView = struct {
+    bind_path: []u8,
+    venom_id: []u8,
+    provider_scope: []u8,
+
+    pub fn deinit(self: *WorkspaceTemplateBindView, allocator: std.mem.Allocator) void {
+        allocator.free(self.bind_path);
+        allocator.free(self.venom_id);
+        allocator.free(self.provider_scope);
+        self.* = undefined;
+    }
+};
+
+pub const WorkspaceTemplate = struct {
+    id: []u8,
+    description: []u8,
+    binds: std.ArrayListUnmanaged(WorkspaceTemplateBindView) = .{},
+
+    pub fn deinit(self: *WorkspaceTemplate, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.description);
+        for (self.binds.items) |*bind| bind.deinit(allocator);
+        self.binds.deinit(allocator);
         self.* = undefined;
     }
 };
@@ -263,10 +309,26 @@ pub const SessionRestoreResult = struct {
     }
 };
 
+pub const ProjectSummary = WorkspaceSummary;
+pub const ProjectDetail = WorkspaceDetail;
+
+pub fn deinitWorkspaceList(allocator: std.mem.Allocator, workspaces: *std.ArrayListUnmanaged(WorkspaceSummary)) void {
+    for (workspaces.items) |*workspace| workspace.deinit(allocator);
+    workspaces.deinit(allocator);
+    workspaces.* = .{};
+}
+
 pub fn deinitProjectList(allocator: std.mem.Allocator, projects: *std.ArrayListUnmanaged(ProjectSummary)) void {
-    for (projects.items) |*project| project.deinit(allocator);
-    projects.deinit(allocator);
-    projects.* = .{};
+    deinitWorkspaceList(allocator, projects);
+}
+
+pub fn deinitWorkspaceTemplateList(
+    allocator: std.mem.Allocator,
+    templates: *std.ArrayListUnmanaged(WorkspaceTemplate),
+) void {
+    for (templates.items) |*template| template.deinit(allocator);
+    templates.deinit(allocator);
+    templates.* = .{};
 }
 
 pub fn deinitNodeList(allocator: std.mem.Allocator, nodes: *std.ArrayListUnmanaged(NodeInfo)) void {
