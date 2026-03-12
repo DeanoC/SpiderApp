@@ -14,7 +14,7 @@ Send a message to the AI assistant.
 **Examples:**
 ```bash
 spider chat send "Hello!"
-spider chat send "What's the status of the project?"
+spider chat send "What's the status of the workspace?"
 spider chat send --no-thoughts "Summarize the latest changes"
 ```
 

@@ -60,12 +60,12 @@ pub const SettingsTerminalBackend = if (has_panel_interfaces) zui.ui.panel_inter
 pub const LauncherSettingsModel = if (has_panel_interfaces) zui.ui.panel_interfaces.LauncherSettingsModel else struct {};
 pub const LauncherSettingsAction = if (has_panel_interfaces) zui.ui.panel_interfaces.LauncherSettingsAction else enum { connect };
 
-// Project panel contracts.
-pub const ProjectPanelModel = if (has_panel_interfaces) zui.ui.panel_interfaces.ProjectPanelModel else struct {};
-pub const ProjectPanelView = if (has_panel_interfaces) zui.ui.panel_interfaces.ProjectPanelView else struct {};
-pub const ProjectListEntryView = if (has_panel_interfaces) zui.ui.panel_interfaces.ProjectListEntryView else struct {};
-pub const ProjectNodeEntryView = if (has_panel_interfaces) zui.ui.panel_interfaces.ProjectNodeEntryView else struct {};
-pub const ProjectPanelAction = if (has_panel_interfaces) zui.ui.panel_interfaces.ProjectPanelAction else enum { refresh_workspace };
+// Workspace panel contracts.
+pub const WorkspacePanelModel = if (has_panel_interfaces) zui.ui.panel_interfaces.WorkspacePanelModel else struct {};
+pub const WorkspacePanelView = if (has_panel_interfaces) zui.ui.panel_interfaces.WorkspacePanelView else struct {};
+pub const WorkspaceListEntryView = if (has_panel_interfaces) zui.ui.panel_interfaces.WorkspaceListEntryView else struct {};
+pub const WorkspaceNodeEntryView = if (has_panel_interfaces) zui.ui.panel_interfaces.WorkspaceNodeEntryView else struct {};
+pub const WorkspacePanelAction = if (has_panel_interfaces) zui.ui.panel_interfaces.WorkspacePanelAction else enum { refresh_workspace };
 
 // Terminal panel contracts.
 pub const TerminalPanelModel = if (has_panel_interfaces) zui.ui.panel_interfaces.TerminalPanelModel else struct {};
@@ -103,11 +103,11 @@ pub fn assertAvailable() void {
     _ = SettingsTerminalBackend;
     _ = LauncherSettingsModel;
     _ = LauncherSettingsAction;
-    _ = ProjectPanelModel;
-    _ = ProjectPanelView;
-    _ = ProjectListEntryView;
-    _ = ProjectNodeEntryView;
-    _ = ProjectPanelAction;
+    _ = WorkspacePanelModel;
+    _ = WorkspacePanelView;
+    _ = WorkspaceListEntryView;
+    _ = WorkspaceNodeEntryView;
+    _ = WorkspacePanelAction;
     _ = TerminalPanelModel;
     _ = TerminalPanelView;
     _ = TerminalOutputView;

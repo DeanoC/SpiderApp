@@ -1,10 +1,10 @@
 # Goal Commands
 
-Goals represent objectives within a project. They break down into tasks.
+Goals represent objectives within a workspace. They break down into tasks.
 
 ## goal list
 
-List goals for the current project.
+List goals for the current workspace.
 
 **Examples:**
 ```bash
@@ -13,10 +13,10 @@ spider goal list
 
 **Output:**
 ```
-Goals for project 'spiderweb':
+Goals for workspace 'spiderweb':
   [1] Implement worker spawn      | Open       | High
   [2] Add virtual filesystem      | In Progress| Medium
-  [3] Create project data model   | Completed  | High
+  [3] Create workspace data model | Completed  | High
 ```
 
 ## goal create <description>

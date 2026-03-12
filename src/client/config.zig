@@ -2,8 +2,8 @@ const std = @import("std");
 
 // Client configuration for SpiderApp
 
-pub const ProjectTokenEntry = struct {
-    project_id: []const u8,
+pub const WorkspaceTokenEntry = struct {
+    workspace_id: []const u8,
     token: []const u8,
 };
 
@@ -26,29 +26,29 @@ pub const ConnectionProfile = struct {
     }
 };
 
-pub const RecentProjectEntry = struct {
+pub const RecentWorkspaceEntry = struct {
     profile_id: []const u8,
-    project_id: []const u8,
-    project_name: ?[]const u8 = null,
+    workspace_id: []const u8,
+    workspace_name: ?[]const u8 = null,
     opened_at_ms: i64 = 0,
 
-    pub fn deinit(self: *RecentProjectEntry, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *RecentWorkspaceEntry, allocator: std.mem.Allocator) void {
         allocator.free(self.profile_id);
-        allocator.free(self.project_id);
-        if (self.project_name) |value| allocator.free(value);
+        allocator.free(self.workspace_id);
+        if (self.workspace_name) |value| allocator.free(value);
         self.* = undefined;
     }
 };
 
-pub const ProjectWorkspaceLayoutEntry = struct {
+pub const WorkspaceLayoutEntry = struct {
     profile_id: []const u8,
-    project_id: []const u8,
+    workspace_id: []const u8,
     layout_path: []const u8,
     updated_at_ms: i64 = 0,
 
-    pub fn deinit(self: *ProjectWorkspaceLayoutEntry, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *WorkspaceLayoutEntry, allocator: std.mem.Allocator) void {
         allocator.free(self.profile_id);
-        allocator.free(self.project_id);
+        allocator.free(self.workspace_id);
         allocator.free(self.layout_path);
         self.* = undefined;
     }
@@ -75,6 +75,8 @@ pub const Config = struct {
         user,
     };
 
+    pub const current_schema_version: u32 = 2;
+
     allocator: std.mem.Allocator,
 
     // Connection settings
@@ -87,14 +89,14 @@ pub const Config = struct {
     // UI and workflow defaults
     auto_connect_on_launch: bool = true,
     connect_host_override: ?[]const u8 = null,
-    default_project: ?[]const u8 = null,
+    default_workspace: ?[]const u8 = null,
     default_agent: ?[]const u8 = null,
-    project_tokens: ?[]ProjectTokenEntry = null,
+    workspace_tokens: ?[]WorkspaceTokenEntry = null,
     default_session: ?[]const u8 = null,
     connection_profiles: []ConnectionProfile,
     selected_profile_id: ?[]const u8 = null,
-    recent_projects: ?[]RecentProjectEntry = null,
-    project_workspace_layout_index: ?[]ProjectWorkspaceLayoutEntry = null,
+    recent_workspaces: ?[]RecentWorkspaceEntry = null,
+    workspace_layout_index: ?[]WorkspaceLayoutEntry = null,
     app_local_nodes: ?[]AppLocalNodeEntry = null,
 
     // Update + theme settings
@@ -164,15 +166,15 @@ pub const Config = struct {
             self.allocator.free(value);
             self.selected_profile_id = null;
         }
-        if (self.recent_projects) |entries| {
+        if (self.recent_workspaces) |entries| {
             for (entries) |*entry| entry.deinit(self.allocator);
             self.allocator.free(entries);
-            self.recent_projects = null;
+            self.recent_workspaces = null;
         }
-        if (self.project_workspace_layout_index) |entries| {
+        if (self.workspace_layout_index) |entries| {
             for (entries) |*entry| entry.deinit(self.allocator);
             self.allocator.free(entries);
-            self.project_workspace_layout_index = null;
+            self.workspace_layout_index = null;
         }
         if (self.app_local_nodes) |entries| {
             for (entries) |*entry| entry.deinit(self.allocator);
@@ -183,21 +185,21 @@ pub const Config = struct {
             self.allocator.free(value);
             self.connect_host_override = null;
         }
-        if (self.default_project) |value| {
+        if (self.default_workspace) |value| {
             self.allocator.free(value);
-            self.default_project = null;
+            self.default_workspace = null;
         }
         if (self.default_agent) |value| {
             self.allocator.free(value);
             self.default_agent = null;
         }
-        if (self.project_tokens) |entries| {
+        if (self.workspace_tokens) |entries| {
             for (entries) |entry| {
-                self.allocator.free(entry.project_id);
+                self.allocator.free(entry.workspace_id);
                 self.allocator.free(entry.token);
             }
             self.allocator.free(entries);
-            self.project_tokens = null;
+            self.workspace_tokens = null;
         }
         if (self.default_session) |value| {
             self.allocator.free(value);
@@ -375,26 +377,26 @@ pub const Config = struct {
     pub fn setWorkspaceLayoutPath(
         self: *Config,
         profile_id: []const u8,
-        project_id: []const u8,
+        workspace_id: []const u8,
         layout_path: []const u8,
     ) !void {
-        if (profile_id.len == 0 or project_id.len == 0) return;
-        if (self.project_workspace_layout_index == null) {
-            const created = try self.allocator.alloc(ProjectWorkspaceLayoutEntry, 1);
+        if (profile_id.len == 0 or workspace_id.len == 0) return;
+        if (self.workspace_layout_index == null) {
+            const created = try self.allocator.alloc(WorkspaceLayoutEntry, 1);
             created[0] = .{
                 .profile_id = try self.allocator.dupe(u8, profile_id),
-                .project_id = try self.allocator.dupe(u8, project_id),
+                .workspace_id = try self.allocator.dupe(u8, workspace_id),
                 .layout_path = try self.allocator.dupe(u8, layout_path),
                 .updated_at_ms = std.time.milliTimestamp(),
             };
-            self.project_workspace_layout_index = created;
+            self.workspace_layout_index = created;
             return;
         }
-        const entries = self.project_workspace_layout_index.?;
+        const entries = self.workspace_layout_index.?;
 
         for (entries) |*entry| {
             if (!std.mem.eql(u8, entry.profile_id, profile_id)) continue;
-            if (!std.mem.eql(u8, entry.project_id, project_id)) continue;
+            if (!std.mem.eql(u8, entry.workspace_id, workspace_id)) continue;
             const next_path = try self.allocator.dupe(u8, layout_path);
             self.allocator.free(entry.layout_path);
             entry.layout_path = next_path;
@@ -402,27 +404,27 @@ pub const Config = struct {
             return;
         }
 
-        const expanded = try self.allocator.alloc(ProjectWorkspaceLayoutEntry, entries.len + 1);
+        const expanded = try self.allocator.alloc(WorkspaceLayoutEntry, entries.len + 1);
         @memcpy(expanded[0..entries.len], entries);
         expanded[entries.len] = .{
             .profile_id = try self.allocator.dupe(u8, profile_id),
-            .project_id = try self.allocator.dupe(u8, project_id),
+            .workspace_id = try self.allocator.dupe(u8, workspace_id),
             .layout_path = try self.allocator.dupe(u8, layout_path),
             .updated_at_ms = std.time.milliTimestamp(),
         };
         self.allocator.free(entries);
-        self.project_workspace_layout_index = expanded;
+        self.workspace_layout_index = expanded;
     }
 
     pub fn workspaceLayoutPath(
         self: *const Config,
         profile_id: []const u8,
-        project_id: []const u8,
+        workspace_id: []const u8,
     ) ?[]const u8 {
-        const entries = self.project_workspace_layout_index orelse return null;
+        const entries = self.workspace_layout_index orelse return null;
         for (entries) |entry| {
             if (!std.mem.eql(u8, entry.profile_id, profile_id)) continue;
-            if (!std.mem.eql(u8, entry.project_id, project_id)) continue;
+            if (!std.mem.eql(u8, entry.workspace_id, workspace_id)) continue;
             return entry.layout_path;
         }
         return null;
@@ -485,20 +487,20 @@ pub const Config = struct {
         self.app_local_nodes = entries;
     }
 
-    pub fn recordRecentProject(
+    pub fn recordRecentWorkspace(
         self: *Config,
         profile_id: []const u8,
-        project_id: []const u8,
-        project_name: ?[]const u8,
+        workspace_id: []const u8,
+        workspace_name: ?[]const u8,
     ) !void {
-        if (profile_id.len == 0 or project_id.len == 0) return;
+        if (profile_id.len == 0 or workspace_id.len == 0) return;
         const now_ms = std.time.milliTimestamp();
 
-        if (self.recent_projects) |entries| {
+        if (self.recent_workspaces) |entries| {
             var found: ?usize = null;
             for (entries, 0..) |entry, idx| {
                 if (std.mem.eql(u8, entry.profile_id, profile_id) and
-                    std.mem.eql(u8, entry.project_id, project_id))
+                    std.mem.eql(u8, entry.workspace_id, workspace_id))
                 {
                     found = idx;
                     break;
@@ -506,35 +508,35 @@ pub const Config = struct {
             }
             if (found) |idx| {
                 entries[idx].opened_at_ms = now_ms;
-                if (project_name) |name| {
+                if (workspace_name) |name| {
                     const copy = try self.allocator.dupe(u8, name);
-                    if (entries[idx].project_name) |existing| self.allocator.free(existing);
-                    entries[idx].project_name = copy;
+                    if (entries[idx].workspace_name) |existing| self.allocator.free(existing);
+                    entries[idx].workspace_name = copy;
                 }
                 return;
             }
 
-            const expanded = try self.allocator.alloc(RecentProjectEntry, entries.len + 1);
+            const expanded = try self.allocator.alloc(RecentWorkspaceEntry, entries.len + 1);
             @memcpy(expanded[0..entries.len], entries);
             expanded[entries.len] = .{
                 .profile_id = try self.allocator.dupe(u8, profile_id),
-                .project_id = try self.allocator.dupe(u8, project_id),
-                .project_name = if (project_name) |name| try self.allocator.dupe(u8, name) else null,
+                .workspace_id = try self.allocator.dupe(u8, workspace_id),
+                .workspace_name = if (workspace_name) |name| try self.allocator.dupe(u8, name) else null,
                 .opened_at_ms = now_ms,
             };
             self.allocator.free(entries);
-            self.recent_projects = expanded;
+            self.recent_workspaces = expanded;
             return;
         }
 
-        const entries = try self.allocator.alloc(RecentProjectEntry, 1);
+        const entries = try self.allocator.alloc(RecentWorkspaceEntry, 1);
         entries[0] = .{
             .profile_id = try self.allocator.dupe(u8, profile_id),
-            .project_id = try self.allocator.dupe(u8, project_id),
-            .project_name = if (project_name) |name| try self.allocator.dupe(u8, name) else null,
+            .workspace_id = try self.allocator.dupe(u8, workspace_id),
+            .workspace_name = if (workspace_name) |name| try self.allocator.dupe(u8, name) else null,
             .opened_at_ms = now_ms,
         };
-        self.recent_projects = entries;
+        self.recent_workspaces = entries;
     }
 
     pub fn getRoleToken(self: *const Config, role: TokenRole) []const u8 {
@@ -582,17 +584,17 @@ pub const Config = struct {
         self.default_session = current;
     }
 
-    pub fn setSelectedProject(self: *Config, project_id: ?[]const u8) !void {
-        const next = if (project_id) |value| blk: {
+    pub fn setSelectedWorkspace(self: *Config, workspace_id: ?[]const u8) !void {
+        const next = if (workspace_id) |value| blk: {
             if (value.len == 0) break :blk null;
             break :blk try self.allocator.dupe(u8, value);
         } else null;
-        if (self.default_project) |value| self.allocator.free(value);
-        self.default_project = next;
+        if (self.default_workspace) |value| self.allocator.free(value);
+        self.default_workspace = next;
     }
 
-    pub fn selectedProject(self: *const Config) ?[]const u8 {
-        return self.default_project;
+    pub fn selectedWorkspace(self: *const Config) ?[]const u8 {
+        return self.default_workspace;
     }
 
     pub fn setDefaultAgent(self: *Config, agent_id: ?[]const u8) !void {
@@ -608,72 +610,72 @@ pub const Config = struct {
         return self.default_agent;
     }
 
-    pub fn getProjectToken(self: *const Config, project_id: []const u8) ?[]const u8 {
-        const entries = self.project_tokens orelse return null;
+    pub fn getWorkspaceToken(self: *const Config, workspace_id: []const u8) ?[]const u8 {
+        const entries = self.workspace_tokens orelse return null;
         for (entries) |entry| {
-            if (std.mem.eql(u8, entry.project_id, project_id)) return entry.token;
+            if (std.mem.eql(u8, entry.workspace_id, workspace_id)) return entry.token;
         }
         return null;
     }
 
-    pub fn setProjectToken(self: *Config, project_id: []const u8, token: []const u8) !void {
-        if (project_id.len == 0) return;
+    pub fn setWorkspaceToken(self: *Config, workspace_id: []const u8, token: []const u8) !void {
+        if (workspace_id.len == 0) return;
         if (token.len == 0) {
-            try self.clearProjectToken(project_id);
+            try self.clearWorkspaceToken(workspace_id);
             return;
         }
 
-        if (self.project_tokens) |entries| {
+        if (self.workspace_tokens) |entries| {
             for (entries) |*entry| {
-                if (!std.mem.eql(u8, entry.project_id, project_id)) continue;
+                if (!std.mem.eql(u8, entry.workspace_id, workspace_id)) continue;
                 const token_copy = try self.allocator.dupe(u8, token);
                 self.allocator.free(entry.token);
                 entry.token = token_copy;
                 return;
             }
 
-            const expanded = try self.allocator.alloc(ProjectTokenEntry, entries.len + 1);
+            const expanded = try self.allocator.alloc(WorkspaceTokenEntry, entries.len + 1);
             @memcpy(expanded[0..entries.len], entries);
             expanded[entries.len] = .{
-                .project_id = try self.allocator.dupe(u8, project_id),
+                .workspace_id = try self.allocator.dupe(u8, workspace_id),
                 .token = try self.allocator.dupe(u8, token),
             };
             self.allocator.free(entries);
-            self.project_tokens = expanded;
+            self.workspace_tokens = expanded;
             return;
         }
 
-        const entries = try self.allocator.alloc(ProjectTokenEntry, 1);
+        const entries = try self.allocator.alloc(WorkspaceTokenEntry, 1);
         entries[0] = .{
-            .project_id = try self.allocator.dupe(u8, project_id),
+            .workspace_id = try self.allocator.dupe(u8, workspace_id),
             .token = try self.allocator.dupe(u8, token),
         };
-        self.project_tokens = entries;
+        self.workspace_tokens = entries;
     }
 
-    pub fn clearProjectToken(self: *Config, project_id: []const u8) !void {
-        if (project_id.len == 0) return;
-        const entries = self.project_tokens orelse return;
+    pub fn clearWorkspaceToken(self: *Config, workspace_id: []const u8) !void {
+        if (workspace_id.len == 0) return;
+        const entries = self.workspace_tokens orelse return;
 
         var remove_idx: ?usize = null;
         for (entries, 0..) |entry, idx| {
-            if (std.mem.eql(u8, entry.project_id, project_id)) {
+            if (std.mem.eql(u8, entry.workspace_id, workspace_id)) {
                 remove_idx = idx;
                 break;
             }
         }
         const idx = remove_idx orelse return;
 
-        self.allocator.free(entries[idx].project_id);
+        self.allocator.free(entries[idx].workspace_id);
         self.allocator.free(entries[idx].token);
 
         if (entries.len == 1) {
             self.allocator.free(entries);
-            self.project_tokens = null;
+            self.workspace_tokens = null;
             return;
         }
 
-        const compacted = try self.allocator.alloc(ProjectTokenEntry, entries.len - 1);
+        const compacted = try self.allocator.alloc(WorkspaceTokenEntry, entries.len - 1);
         var out_idx: usize = 0;
         for (entries, 0..) |entry, entry_idx| {
             if (entry_idx == idx) continue;
@@ -682,7 +684,7 @@ pub const Config = struct {
         }
 
         self.allocator.free(entries);
-        self.project_tokens = compacted;
+        self.workspace_tokens = compacted;
     }
 
     pub fn setTheme(self: *Config, value: ?[]const u8) !void {
@@ -749,19 +751,19 @@ pub const Config = struct {
         return out;
     }
 
-    fn duplicateOptionalProjectTokens(
+    fn duplicateOptionalWorkspaceTokens(
         allocator: std.mem.Allocator,
-        values: ?[]const ProjectTokenEntry,
-    ) !?[]ProjectTokenEntry {
+        values: ?[]const WorkspaceTokenEntry,
+    ) !?[]WorkspaceTokenEntry {
         if (values == null) return null;
         const list = values.?;
-        if (list.len == 0) return try allocator.alloc(ProjectTokenEntry, 0);
+        if (list.len == 0) return try allocator.alloc(WorkspaceTokenEntry, 0);
 
-        const out = try allocator.alloc(ProjectTokenEntry, list.len);
+        const out = try allocator.alloc(WorkspaceTokenEntry, list.len);
         var written: usize = 0;
         errdefer {
             for (0..written) |i| {
-                allocator.free(out[i].project_id);
+                allocator.free(out[i].workspace_id);
                 allocator.free(out[i].token);
             }
             allocator.free(out);
@@ -769,7 +771,7 @@ pub const Config = struct {
 
         for (list) |entry| {
             out[written] = .{
-                .project_id = try allocator.dupe(u8, entry.project_id),
+                .workspace_id = try allocator.dupe(u8, entry.workspace_id),
                 .token = try allocator.dupe(u8, entry.token),
             };
             written += 1;
@@ -834,15 +836,15 @@ pub const Config = struct {
         return out;
     }
 
-    fn duplicateOptionalRecentProjects(
+    fn duplicateOptionalRecentWorkspaces(
         allocator: std.mem.Allocator,
-        values: ?[]const RecentProjectJson,
-    ) !?[]RecentProjectEntry {
+        values: ?[]const RecentWorkspaceJson,
+    ) !?[]RecentWorkspaceEntry {
         if (values == null) return null;
         const list = values.?;
-        if (list.len == 0) return try allocator.alloc(RecentProjectEntry, 0);
+        if (list.len == 0) return try allocator.alloc(RecentWorkspaceEntry, 0);
 
-        const out = try allocator.alloc(RecentProjectEntry, list.len);
+        const out = try allocator.alloc(RecentWorkspaceEntry, list.len);
         var written: usize = 0;
         errdefer {
             for (0..written) |i| out[i].deinit(allocator);
@@ -852,8 +854,8 @@ pub const Config = struct {
         for (list) |entry| {
             out[written] = .{
                 .profile_id = try allocator.dupe(u8, entry.profile_id),
-                .project_id = try allocator.dupe(u8, entry.project_id),
-                .project_name = try duplicateOptionalString(allocator, entry.project_name),
+                .workspace_id = try allocator.dupe(u8, entry.workspace_id),
+                .workspace_name = try duplicateOptionalString(allocator, entry.workspace_name),
                 .opened_at_ms = entry.opened_at_ms orelse 0,
             };
             written += 1;
@@ -861,15 +863,15 @@ pub const Config = struct {
         return out;
     }
 
-    fn duplicateOptionalProjectWorkspaceLayoutIndex(
+    fn duplicateOptionalWorkspaceLayoutIndex(
         allocator: std.mem.Allocator,
-        values: ?[]const ProjectWorkspaceLayoutJson,
-    ) !?[]ProjectWorkspaceLayoutEntry {
+        values: ?[]const WorkspaceLayoutJson,
+    ) !?[]WorkspaceLayoutEntry {
         if (values == null) return null;
         const list = values.?;
-        if (list.len == 0) return try allocator.alloc(ProjectWorkspaceLayoutEntry, 0);
+        if (list.len == 0) return try allocator.alloc(WorkspaceLayoutEntry, 0);
 
-        const out = try allocator.alloc(ProjectWorkspaceLayoutEntry, list.len);
+        const out = try allocator.alloc(WorkspaceLayoutEntry, list.len);
         var written: usize = 0;
         errdefer {
             for (0..written) |i| out[i].deinit(allocator);
@@ -878,7 +880,7 @@ pub const Config = struct {
         for (list) |entry| {
             out[written] = .{
                 .profile_id = try allocator.dupe(u8, entry.profile_id),
-                .project_id = try allocator.dupe(u8, entry.project_id),
+                .workspace_id = try allocator.dupe(u8, entry.workspace_id),
                 .layout_path = try allocator.dupe(u8, entry.layout_path),
                 .updated_at_ms = entry.updated_at_ms orelse 0,
             };
@@ -927,6 +929,27 @@ pub const Config = struct {
         return std.fs.path.join(allocator, &.{ home, ".config", "spider" });
     }
 
+    fn unsupportedConfigBackupPath(allocator: std.mem.Allocator, config_path: []const u8) ![]const u8 {
+        const config_dir = std.fs.path.dirname(config_path) orelse ".";
+        return std.fs.path.join(allocator, &.{ config_dir, "config.unsupported-schema.backup.json" });
+    }
+
+    fn resetFromUnsupportedConfig(allocator: std.mem.Allocator, config_path: []const u8) !Config {
+        const backup_path = try unsupportedConfigBackupPath(allocator, config_path);
+        defer allocator.free(backup_path);
+
+        std.fs.deleteFileAbsolute(backup_path) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
+        try std.fs.renameAbsolute(config_path, backup_path);
+        std.log.warn(
+            "unsupported SpiderApp config schema at {s}; moved previous config to {s} and starting with defaults",
+            .{ config_path, backup_path },
+        );
+        return try Config.init(allocator);
+    }
+
     fn loadFromJsonSlice(allocator: std.mem.Allocator, data: []const u8) !Config {
         const parsed = try std.json.parseFromSlice(ConfigJson, allocator, data, .{
             .ignore_unknown_fields = true,
@@ -934,20 +957,10 @@ pub const Config = struct {
         defer parsed.deinit();
 
         const json = parsed.value;
-        const legacy_token = if (json.auth_token) |value|
-            value
-        else if (json.token) |value|
-            value
-        else
-            "";
-        const loaded_admin = if (json.admin_token) |value|
-            value
-        else
-            legacy_token;
-        const loaded_user = if (json.user_token) |value|
-            value
-        else
-            legacy_token;
+        const schema_version = json.schema_version orelse return error.UnsupportedConfigSchema;
+        if (schema_version != current_schema_version) return error.UnsupportedConfigSchema;
+        const loaded_admin = json.admin_token orelse "";
+        const loaded_user = json.user_token orelse "";
 
         const active_role = parseTokenRole(json.active_role);
         const legacy_server_url = json.server_url orelse default_server_url;
@@ -973,13 +986,7 @@ pub const Config = struct {
 
         const selected_profile_index = profileIndexByIdList(loaded_profiles, loaded_selected_profile_id.?) orelse 0;
         const selected_profile = loaded_profiles[selected_profile_index];
-        var loaded_default_project = try duplicateOptionalString(allocator, json.default_project);
-        if (loaded_default_project) |value| {
-            if (std.mem.eql(u8, value, "spider-web")) {
-                allocator.free(value);
-                loaded_default_project = null;
-            }
-        }
+        const loaded_default_workspace = try duplicateOptionalString(allocator, json.default_workspace);
         var loaded_default_agent = try duplicateOptionalString(allocator, json.default_agent);
         if (loaded_default_agent) |value| {
             if (std.mem.eql(u8, value, "default")) {
@@ -987,31 +994,11 @@ pub const Config = struct {
                 loaded_default_agent = null;
             }
         }
-        var loaded_project_tokens = try duplicateOptionalProjectTokens(allocator, json.project_tokens);
-        if (loaded_project_tokens) |entries_const| {
-            var entries = entries_const;
-            var keep: usize = 0;
-            for (entries) |entry| {
-                if (std.mem.eql(u8, entry.project_id, "spider-web")) {
-                    allocator.free(entry.project_id);
-                    allocator.free(entry.token);
-                    continue;
-                }
-                entries[keep] = entry;
-                keep += 1;
-            }
-            if (keep == 0) {
-                allocator.free(entries);
-                loaded_project_tokens = null;
-            } else if (keep < entries.len) {
-                loaded_project_tokens = try allocator.realloc(entries, keep);
-            }
-        }
-
-        const loaded_recent_projects = try duplicateOptionalRecentProjects(allocator, json.recent_projects);
-        const loaded_layout_index = try duplicateOptionalProjectWorkspaceLayoutIndex(
+        const loaded_workspace_tokens = try duplicateOptionalWorkspaceTokens(allocator, json.workspace_tokens);
+        const loaded_recent_workspaces = try duplicateOptionalRecentWorkspaces(allocator, json.recent_workspaces);
+        const loaded_layout_index = try duplicateOptionalWorkspaceLayoutIndex(
             allocator,
-            json.project_workspace_layout_index,
+            json.workspace_layout_index,
         );
         const loaded_app_local_nodes = try duplicateOptionalAppLocalNodes(allocator, json.app_local_nodes);
 
@@ -1024,14 +1011,14 @@ pub const Config = struct {
             .insecure_tls = selected_profile.insecure_tls,
             .auto_connect_on_launch = json.auto_connect_on_launch orelse true,
             .connect_host_override = try duplicateOptionalString(allocator, selected_profile.connect_host_override),
-            .default_project = loaded_default_project,
+            .default_workspace = loaded_default_workspace,
             .default_agent = loaded_default_agent,
-            .project_tokens = loaded_project_tokens,
+            .workspace_tokens = loaded_workspace_tokens,
             .default_session = try duplicateOptionalString(allocator, json.default_session),
             .connection_profiles = loaded_profiles,
             .selected_profile_id = loaded_selected_profile_id,
-            .recent_projects = loaded_recent_projects,
-            .project_workspace_layout_index = loaded_layout_index,
+            .recent_workspaces = loaded_recent_workspaces,
+            .workspace_layout_index = loaded_layout_index,
             .app_local_nodes = loaded_app_local_nodes,
             .update_manifest_url = try duplicateOptionalString(allocator, json.update_manifest_url) orelse
                 try allocator.dupe(u8, "https://github.com/DeanoC/SpiderApp/releases/latest/download/update.json"),
@@ -1063,7 +1050,10 @@ pub const Config = struct {
         };
         defer allocator.free(data);
 
-        return loadFromJsonSlice(allocator, data);
+        return loadFromJsonSlice(allocator, data) catch |err| switch (err) {
+            error.UnsupportedConfigSchema => return try resetFromUnsupportedConfig(allocator, config_path),
+            else => return err,
+        };
     }
 
     /// Save config to file
@@ -1084,6 +1074,7 @@ pub const Config = struct {
         defer json_file.close();
 
         const payload = ConfigJson{
+            .schema_version = current_schema_version,
             .server_url = mutable_self.server_url,
             .admin_token = mutable_self.admin_token,
             .user_token = mutable_self.user_token,
@@ -1091,14 +1082,14 @@ pub const Config = struct {
             .insecure_tls = mutable_self.insecure_tls,
             .auto_connect_on_launch = mutable_self.auto_connect_on_launch,
             .connect_host_override = mutable_self.connect_host_override,
-            .default_project = mutable_self.default_project,
+            .default_workspace = mutable_self.default_workspace,
             .default_agent = mutable_self.default_agent,
-            .project_tokens = mutable_self.project_tokens,
+            .workspace_tokens = mutable_self.workspace_tokens,
             .default_session = mutable_self.default_session,
             .connection_profiles = try makeConnectionProfileJsonSlice(self.allocator, mutable_self.connection_profiles),
             .selected_profile_id = mutable_self.selected_profile_id,
-            .recent_projects = try makeRecentProjectJsonSlice(self.allocator, mutable_self.recent_projects),
-            .project_workspace_layout_index = try makeProjectWorkspaceLayoutJsonSlice(self.allocator, mutable_self.project_workspace_layout_index),
+            .recent_workspaces = try makeRecentWorkspaceJsonSlice(self.allocator, mutable_self.recent_workspaces),
+            .workspace_layout_index = try makeWorkspaceLayoutJsonSlice(self.allocator, mutable_self.workspace_layout_index),
             .app_local_nodes = try makeAppLocalNodeJsonSlice(self.allocator, mutable_self.app_local_nodes),
             .update_manifest_url = mutable_self.update_manifest_url,
             .ui_theme = mutable_self.ui_theme,
@@ -1115,8 +1106,8 @@ pub const Config = struct {
         };
         defer {
             if (payload.connection_profiles) |values| self.allocator.free(values);
-            if (payload.recent_projects) |values| self.allocator.free(values);
-            if (payload.project_workspace_layout_index) |values| self.allocator.free(values);
+            if (payload.recent_workspaces) |values| self.allocator.free(values);
+            if (payload.workspace_layout_index) |values| self.allocator.free(values);
             if (payload.app_local_nodes) |values| self.allocator.free(values);
         }
 
@@ -1131,24 +1122,22 @@ pub const Config = struct {
 
 // JSON-compatible config struct for serialization
 const ConfigJson = struct {
+    schema_version: ?u32 = null,
     server_url: ?[]const u8 = null,
-    // Legacy fields kept for backwards-compatible config migration.
-    auth_token: ?[]const u8 = null,
-    token: ?[]const u8 = null,
     admin_token: ?[]const u8 = null,
     user_token: ?[]const u8 = null,
     active_role: ?[]const u8 = null,
     insecure_tls: ?bool = null,
     auto_connect_on_launch: ?bool = null,
     connect_host_override: ?[]const u8 = null,
-    default_project: ?[]const u8 = null,
+    default_workspace: ?[]const u8 = null,
     default_agent: ?[]const u8 = null,
-    project_tokens: ?[]const ProjectTokenEntry = null,
+    workspace_tokens: ?[]const WorkspaceTokenEntry = null,
     default_session: ?[]const u8 = null,
     connection_profiles: ?[]const ConnectionProfileJson = null,
     selected_profile_id: ?[]const u8 = null,
-    recent_projects: ?[]const RecentProjectJson = null,
-    project_workspace_layout_index: ?[]const ProjectWorkspaceLayoutJson = null,
+    recent_workspaces: ?[]const RecentWorkspaceJson = null,
+    workspace_layout_index: ?[]const WorkspaceLayoutJson = null,
     app_local_nodes: ?[]const AppLocalNodeJson = null,
     update_manifest_url: ?[]const u8 = null,
     ui_theme: ?[]const u8 = null,
@@ -1181,16 +1170,16 @@ const ConnectionProfileJson = struct {
     metadata: ?[]const u8 = null,
 };
 
-const RecentProjectJson = struct {
+const RecentWorkspaceJson = struct {
     profile_id: []const u8,
-    project_id: []const u8,
-    project_name: ?[]const u8 = null,
+    workspace_id: []const u8,
+    workspace_name: ?[]const u8 = null,
     opened_at_ms: ?i64 = null,
 };
 
-const ProjectWorkspaceLayoutJson = struct {
+const WorkspaceLayoutJson = struct {
     profile_id: []const u8,
-    project_id: []const u8,
+    workspace_id: []const u8,
     layout_path: []const u8,
     updated_at_ms: ?i64 = null,
 };
@@ -1229,35 +1218,35 @@ fn makeConnectionProfileJsonSlice(
     return out;
 }
 
-fn makeRecentProjectJsonSlice(
+fn makeRecentWorkspaceJsonSlice(
     allocator: std.mem.Allocator,
-    entries: ?[]const RecentProjectEntry,
-) !?[]RecentProjectJson {
+    entries: ?[]const RecentWorkspaceEntry,
+) !?[]RecentWorkspaceJson {
     const list = entries orelse return null;
-    if (list.len == 0) return try allocator.alloc(RecentProjectJson, 0);
-    const out = try allocator.alloc(RecentProjectJson, list.len);
+    if (list.len == 0) return try allocator.alloc(RecentWorkspaceJson, 0);
+    const out = try allocator.alloc(RecentWorkspaceJson, list.len);
     for (list, 0..) |entry, idx| {
         out[idx] = .{
             .profile_id = entry.profile_id,
-            .project_id = entry.project_id,
-            .project_name = entry.project_name,
+            .workspace_id = entry.workspace_id,
+            .workspace_name = entry.workspace_name,
             .opened_at_ms = entry.opened_at_ms,
         };
     }
     return out;
 }
 
-fn makeProjectWorkspaceLayoutJsonSlice(
+fn makeWorkspaceLayoutJsonSlice(
     allocator: std.mem.Allocator,
-    entries: ?[]const ProjectWorkspaceLayoutEntry,
-) !?[]ProjectWorkspaceLayoutJson {
+    entries: ?[]const WorkspaceLayoutEntry,
+) !?[]WorkspaceLayoutJson {
     const list = entries orelse return null;
-    if (list.len == 0) return try allocator.alloc(ProjectWorkspaceLayoutJson, 0);
-    const out = try allocator.alloc(ProjectWorkspaceLayoutJson, list.len);
+    if (list.len == 0) return try allocator.alloc(WorkspaceLayoutJson, 0);
+    const out = try allocator.alloc(WorkspaceLayoutJson, list.len);
     for (list, 0..) |entry, idx| {
         out[idx] = .{
             .profile_id = entry.profile_id,
-            .project_id = entry.project_id,
+            .workspace_id = entry.workspace_id,
             .layout_path = entry.layout_path,
             .updated_at_ms = entry.updated_at_ms,
         };
@@ -1297,38 +1286,31 @@ fn tokenRoleName(role: Config.TokenRole) []const u8 {
     };
 }
 
-test "legacy config migrates into connection profile schema" {
+test "config rejects missing schema version" {
     const legacy_json =
         \\{
         \\  "server_url": "ws://legacy:18790",
-        \\  "token": "legacy-token",
         \\  "active_role": "user",
         \\  "insecure_tls": true,
         \\  "connect_host_override": "legacy-host",
-        \\  "default_project": "spider-web"
+        \\  "default_workspace": "workspace-a"
         \\}
     ;
 
-    var config = try Config.loadFromJsonSlice(std.testing.allocator, legacy_json);
-    defer config.deinit();
+    try std.testing.expectError(error.UnsupportedConfigSchema, Config.loadFromJsonSlice(std.testing.allocator, legacy_json));
+}
 
-    try std.testing.expectEqual(@as(usize, 1), config.connection_profiles.len);
-    try std.testing.expectEqualStrings(Config.default_profile_id, config.connection_profiles[0].id);
-    try std.testing.expectEqualStrings("ws://legacy:18790", config.connection_profiles[0].server_url);
-    try std.testing.expectEqual(Config.TokenRole.user, config.connection_profiles[0].active_role);
-    try std.testing.expect(config.connection_profiles[0].insecure_tls);
-    try std.testing.expect(config.connection_profiles[0].connect_host_override != null);
-    try std.testing.expectEqualStrings("legacy-host", config.connection_profiles[0].connect_host_override.?);
+test "unsupported config backup path stays alongside config file" {
+    const backup_path = try Config.unsupportedConfigBackupPath(std.testing.allocator, "/tmp/spider/config.json");
+    defer std.testing.allocator.free(backup_path);
 
-    try std.testing.expectEqualStrings("legacy-token", config.admin_token);
-    try std.testing.expectEqualStrings("legacy-token", config.user_token);
-    try std.testing.expectEqualStrings(Config.default_profile_id, config.selectedProfileId());
-    try std.testing.expect(config.default_project == null);
+    try std.testing.expectEqualStrings("/tmp/spider/config.unsupported-schema.backup.json", backup_path);
 }
 
 test "selected profile falls back to first available profile when id is invalid" {
     const json =
         \\{
+        \\  "schema_version": 2,
         \\  "server_url": "ws://legacy-only",
         \\  "connection_profiles": [
         \\    { "id": "alpha", "name": "Alpha", "server_url": "ws://alpha:18790", "active_role": "admin" },
@@ -1346,38 +1328,60 @@ test "selected profile falls back to first available profile when id is invalid"
     try std.testing.expectEqual(Config.TokenRole.admin, config.active_role);
 }
 
-test "workspace layout index upserts by profile and project" {
+test "workspace layout index upserts by profile and workspace" {
     var config = try Config.init(std.testing.allocator);
     defer config.deinit();
 
-    try config.setWorkspaceLayoutPath("default", "project-a", "/tmp/layout-a.json");
-    try std.testing.expect(config.workspaceLayoutPath("default", "project-a") != null);
+    try config.setWorkspaceLayoutPath("default", "workspace-a", "/tmp/layout-a.json");
+    try std.testing.expect(config.workspaceLayoutPath("default", "workspace-a") != null);
     try std.testing.expectEqualStrings(
         "/tmp/layout-a.json",
-        config.workspaceLayoutPath("default", "project-a").?,
+        config.workspaceLayoutPath("default", "workspace-a").?,
     );
-    try std.testing.expectEqual(@as(usize, 1), config.project_workspace_layout_index.?.len);
+    try std.testing.expectEqual(@as(usize, 1), config.workspace_layout_index.?.len);
 
-    try config.setWorkspaceLayoutPath("default", "project-a", "/tmp/layout-b.json");
-    try std.testing.expectEqual(@as(usize, 1), config.project_workspace_layout_index.?.len);
+    try config.setWorkspaceLayoutPath("default", "workspace-a", "/tmp/layout-b.json");
+    try std.testing.expectEqual(@as(usize, 1), config.workspace_layout_index.?.len);
     try std.testing.expectEqualStrings(
         "/tmp/layout-b.json",
-        config.workspaceLayoutPath("default", "project-a").?,
+        config.workspaceLayoutPath("default", "workspace-a").?,
     );
 }
 
-test "recent projects are deduplicated per profile and project" {
+test "recent workspaces are deduplicated per profile and workspace" {
     var config = try Config.init(std.testing.allocator);
     defer config.deinit();
 
-    try config.recordRecentProject("default", "project-a", "Project A");
-    try std.testing.expectEqual(@as(usize, 1), config.recent_projects.?.len);
-    try std.testing.expectEqualStrings("Project A", config.recent_projects.?[0].project_name.?);
+    try config.recordRecentWorkspace("default", "workspace-a", "Workspace A");
+    try std.testing.expectEqual(@as(usize, 1), config.recent_workspaces.?.len);
+    try std.testing.expectEqualStrings("Workspace A", config.recent_workspaces.?[0].workspace_name.?);
 
-    try config.recordRecentProject("default", "project-a", "Project A (Renamed)");
-    try std.testing.expectEqual(@as(usize, 1), config.recent_projects.?.len);
-    try std.testing.expectEqualStrings("Project A (Renamed)", config.recent_projects.?[0].project_name.?);
-    try std.testing.expect(config.recent_projects.?[0].opened_at_ms > 0);
+    try config.recordRecentWorkspace("default", "workspace-a", "Workspace A (Renamed)");
+    try std.testing.expectEqual(@as(usize, 1), config.recent_workspaces.?.len);
+    try std.testing.expectEqualStrings("Workspace A (Renamed)", config.recent_workspaces.?[0].workspace_name.?);
+    try std.testing.expect(config.recent_workspaces.?[0].opened_at_ms > 0);
+}
+
+test "workspace config ignores legacy project keys" {
+    const json =
+        \\{
+        \\  "schema_version": 2,
+        \\  "default_project": "legacy-project",
+        \\  "project_tokens": [
+        \\    { "project_id": "legacy-project", "token": "legacy-token" }
+        \\  ],
+        \\  "recent_projects": [
+        \\    { "profile_id": "default", "project_id": "legacy-project", "project_name": "Legacy Project" }
+        \\  ]
+        \\}
+    ;
+
+    var config = try Config.loadFromJsonSlice(std.testing.allocator, json);
+    defer config.deinit();
+
+    try std.testing.expect(config.default_workspace == null);
+    try std.testing.expect(config.workspace_tokens == null);
+    try std.testing.expect(config.recent_workspaces == null);
 }
 
 test "config stores app-local node identity per profile" {
@@ -1394,6 +1398,7 @@ test "config stores app-local node identity per profile" {
 test "config loads app-local node identities from json" {
     const json =
         \\{
+        \\  "schema_version": 2,
         \\  "server_url": "ws://127.0.0.1:18790",
         \\  "app_local_nodes": [
         \\    {
