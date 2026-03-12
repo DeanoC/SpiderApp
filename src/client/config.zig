@@ -929,6 +929,27 @@ pub const Config = struct {
         return std.fs.path.join(allocator, &.{ home, ".config", "spider" });
     }
 
+    fn unsupportedConfigBackupPath(allocator: std.mem.Allocator, config_path: []const u8) ![]const u8 {
+        const config_dir = std.fs.path.dirname(config_path) orelse ".";
+        return std.fs.path.join(allocator, &.{ config_dir, "config.unsupported-schema.backup.json" });
+    }
+
+    fn resetFromUnsupportedConfig(allocator: std.mem.Allocator, config_path: []const u8) !Config {
+        const backup_path = try unsupportedConfigBackupPath(allocator, config_path);
+        defer allocator.free(backup_path);
+
+        std.fs.deleteFileAbsolute(backup_path) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
+        try std.fs.renameAbsolute(config_path, backup_path);
+        std.log.warn(
+            "unsupported SpiderApp config schema at {s}; moved previous config to {s} and starting with defaults",
+            .{ config_path, backup_path },
+        );
+        return try Config.init(allocator);
+    }
+
     fn loadFromJsonSlice(allocator: std.mem.Allocator, data: []const u8) !Config {
         const parsed = try std.json.parseFromSlice(ConfigJson, allocator, data, .{
             .ignore_unknown_fields = true,
@@ -1030,7 +1051,7 @@ pub const Config = struct {
         defer allocator.free(data);
 
         return loadFromJsonSlice(allocator, data) catch |err| switch (err) {
-            error.UnsupportedConfigSchema => return try Config.init(allocator),
+            error.UnsupportedConfigSchema => return try resetFromUnsupportedConfig(allocator, config_path),
             else => return err,
         };
     }
@@ -1277,6 +1298,13 @@ test "config rejects missing schema version" {
     ;
 
     try std.testing.expectError(error.UnsupportedConfigSchema, Config.loadFromJsonSlice(std.testing.allocator, legacy_json));
+}
+
+test "unsupported config backup path stays alongside config file" {
+    const backup_path = try Config.unsupportedConfigBackupPath(std.testing.allocator, "/tmp/spider/config.json");
+    defer std.testing.allocator.free(backup_path);
+
+    try std.testing.expectEqualStrings("/tmp/spider/config.unsupported-schema.backup.json", backup_path);
 }
 
 test "selected profile falls back to first available profile when id is invalid" {
