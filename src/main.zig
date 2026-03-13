@@ -16,7 +16,7 @@ pub fn main() !void {
     };
     defer logger.deinit();
 
-    // Run CLI (which may route to TUI based on args)
+    // Run CLI entry point
     cli.run(allocator) catch |err| {
         std.log.err("{s}", .{@errorName(err)});
         std.process.exit(1);
