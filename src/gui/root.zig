@@ -1331,6 +1331,7 @@ const App = struct {
     launcher_connect_token: std.ArrayList(u8) = .empty,
     launcher_create_modal_open: bool = false,
     launcher_create_selected_template_index: usize = 0,
+    launcher_create_template_page: usize = 0,
     launcher_create_templates: std.ArrayListUnmanaged(workspace_types.WorkspaceTemplate) = .{},
     launcher_create_modal_error: ?[]u8 = null,
     ide_menu_open: ?IdeMenuDomain = null,
@@ -4820,6 +4821,7 @@ const App = struct {
         self.project_selector_open = false;
         self.launcher_create_modal_open = false;
         self.launcher_create_selected_template_index = 0;
+        self.launcher_create_template_page = 0;
         workspace_types.deinitWorkspaceTemplateList(self.allocator, &self.launcher_create_templates);
         if (self.launcher_create_modal_error) |value| {
             self.allocator.free(value);
@@ -7672,8 +7674,75 @@ const App = struct {
         self.drawSurfacePanel(list_rect);
         self.drawRect(list_rect, self.theme.colors.border);
 
-        var visible_template_count: usize = 0;
-        if (self.launcher_create_templates.items.len == 0) {
+        const template_count = self.launcher_create_templates.items.len;
+        const template_row_h = @max(layout.button_height, 30.0 * self.ui_scale);
+        const template_row_gap = layout.row_gap * 0.45;
+        const template_row_step = template_row_h + template_row_gap;
+        const list_inner_h = @max(0.0, list_rect.height() - layout.inner_inset * 2.0);
+        const rows_per_page = blk: {
+            if (template_row_step <= 0.0 or list_inner_h <= 0.0) break :blk @as(usize, 1);
+            const rows_fit = @floor((list_inner_h + template_row_gap) / template_row_step);
+            break :blk @max(@as(usize, 1), @as(usize, @intFromFloat(rows_fit)));
+        };
+        const total_pages = if (template_count == 0)
+            @as(usize, 1)
+        else
+            (template_count / rows_per_page) + @as(usize, @intFromBool((template_count % rows_per_page) != 0));
+        if (self.launcher_create_template_page >= total_pages) {
+            self.launcher_create_template_page = total_pages - 1;
+        }
+
+        const pager_button_w = @max(62.0 * self.ui_scale, self.measureText("Next") + pad * 1.05);
+        const pager_gap = @max(6.0 * self.ui_scale, layout.row_gap * 0.4);
+        const next_rect = Rect.fromXYWH(
+            refresh_rect.min[0] - pager_gap - pager_button_w,
+            refresh_rect.min[1],
+            pager_button_w,
+            row_h,
+        );
+        const prev_rect = Rect.fromXYWH(
+            next_rect.min[0] - pager_gap - pager_button_w,
+            refresh_rect.min[1],
+            pager_button_w,
+            row_h,
+        );
+        if (self.drawButtonWidget(
+            prev_rect,
+            "Prev",
+            .{ .variant = .secondary, .disabled = template_count == 0 or self.launcher_create_template_page == 0 },
+        )) {
+            self.launcher_create_template_page -= 1;
+        }
+        if (self.drawButtonWidget(
+            next_rect,
+            "Next",
+            .{
+                .variant = .secondary,
+                .disabled = template_count == 0 or (self.launcher_create_template_page + 1) >= total_pages,
+            },
+        )) {
+            self.launcher_create_template_page += 1;
+        }
+
+        const page_line = std.fmt.allocPrint(
+            self.allocator,
+            "Page {d}/{d}",
+            .{ self.launcher_create_template_page + 1, total_pages },
+        ) catch null;
+        defer if (page_line) |value| self.allocator.free(value);
+        if (page_line) |value| {
+            const label_x = modal_rect.min[0] + pad + self.measureText("Template") + pad * 0.45;
+            const label_w = @max(0.0, prev_rect.min[0] - pager_gap - label_x);
+            self.drawTextTrimmed(
+                label_x,
+                template_header_y,
+                label_w,
+                value,
+                self.theme.colors.text_secondary,
+            );
+        }
+
+        if (template_count == 0) {
             self.drawTextTrimmed(
                 list_rect.min[0] + layout.inner_inset,
                 list_rect.min[1] + layout.inner_inset,
@@ -7682,12 +7751,12 @@ const App = struct {
                 self.theme.colors.text_secondary,
             );
         } else {
-            const template_row_h = @max(layout.button_height, 30.0 * self.ui_scale);
+            const page_start = self.launcher_create_template_page * rows_per_page;
+            const page_end = @min(page_start + rows_per_page, template_count);
             var row_y = list_rect.min[1] + layout.inner_inset;
             const row_max_y = list_rect.max[1] - layout.inner_inset;
-            for (self.launcher_create_templates.items, 0..) |template, idx| {
+            for (self.launcher_create_templates.items[page_start..page_end], page_start..) |template, idx| {
                 if (row_y + template_row_h > row_max_y) break;
-                visible_template_count += 1;
                 if (self.drawButtonWidget(
                     Rect.fromXYWH(
                         list_rect.min[0] + layout.inner_inset,
@@ -7702,21 +7771,7 @@ const App = struct {
                     self.syncLauncherCreateSelectedTemplateToSettings() catch {};
                     self.clearLauncherCreateWorkspaceModalError();
                 }
-                row_y += template_row_h + layout.row_gap * 0.45;
-            }
-            if (visible_template_count < self.launcher_create_templates.items.len) {
-                const more_count = self.launcher_create_templates.items.len - visible_template_count;
-                const more_line = std.fmt.allocPrint(self.allocator, "{d} more templates not shown", .{more_count}) catch null;
-                defer if (more_line) |value| self.allocator.free(value);
-                if (more_line) |value| {
-                    self.drawTextTrimmed(
-                        list_rect.min[0] + layout.inner_inset,
-                        list_rect.max[1] - layout.line_height - layout.inner_inset,
-                        list_rect.width() - layout.inner_inset * 2.0,
-                        value,
-                        self.theme.colors.text_secondary,
-                    );
-                }
+                row_y += template_row_step;
             }
         }
 
@@ -15380,6 +15435,7 @@ const App = struct {
     fn clearLauncherCreateWorkspaceTemplates(self: *App) void {
         workspace_types.deinitWorkspaceTemplateList(self.allocator, &self.launcher_create_templates);
         self.launcher_create_selected_template_index = 0;
+        self.launcher_create_template_page = 0;
     }
 
     fn setLauncherCreateWorkspaceModalError(self: *App, message: []const u8) void {
