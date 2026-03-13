@@ -1329,6 +1329,11 @@ const App = struct {
     launcher_profile_name: std.ArrayList(u8) = .empty,
     launcher_profile_metadata: std.ArrayList(u8) = .empty,
     launcher_connect_token: std.ArrayList(u8) = .empty,
+    launcher_create_modal_open: bool = false,
+    launcher_create_selected_template_index: usize = 0,
+    launcher_create_template_page: usize = 0,
+    launcher_create_templates: std.ArrayListUnmanaged(workspace_types.WorkspaceTemplate) = .{},
+    launcher_create_modal_error: ?[]u8 = null,
     ide_menu_open: ?IdeMenuDomain = null,
     credential_store: credential_store_mod.CredentialStore,
 
@@ -1722,6 +1727,8 @@ const App = struct {
         self.launcher_profile_name.deinit(self.allocator);
         self.launcher_profile_metadata.deinit(self.allocator);
         self.launcher_connect_token.deinit(self.allocator);
+        workspace_types.deinitWorkspaceTemplateList(self.allocator, &self.launcher_create_templates);
+        if (self.launcher_create_modal_error) |value| self.allocator.free(value);
         if (self.launcher_notice) |value| self.allocator.free(value);
         if (self.active_profile_id) |value| self.allocator.free(value);
         if (self.active_project_id) |value| self.allocator.free(value);
@@ -4812,6 +4819,14 @@ const App = struct {
         workspace_types.deinitWorkspaceList(self.allocator, &self.projects);
         workspace_types.deinitNodeList(self.allocator, &self.nodes);
         self.project_selector_open = false;
+        self.launcher_create_modal_open = false;
+        self.launcher_create_selected_template_index = 0;
+        self.launcher_create_template_page = 0;
+        workspace_types.deinitWorkspaceTemplateList(self.allocator, &self.launcher_create_templates);
+        if (self.launcher_create_modal_error) |value| {
+            self.allocator.free(value);
+            self.launcher_create_modal_error = null;
+        }
         self.clearConnectSetupHint();
         if (self.workspace_state) |*status| {
             status.deinit(self.allocator);
@@ -7223,6 +7238,19 @@ const App = struct {
         );
         if (shell.dock_border) |dock_border| self.drawRect(content_rect, dock_border);
 
+        const launcher_modal_open = self.launcher_create_modal_open;
+        const saved_mouse_down = self.mouse_down;
+        const saved_mouse_clicked = self.mouse_clicked;
+        const saved_mouse_released = self.mouse_released;
+        const saved_mouse_right_clicked = self.mouse_right_clicked;
+        if (launcher_modal_open) {
+            // Keep launcher visible under the modal, but route pointer input only to modal widgets.
+            self.mouse_down = false;
+            self.mouse_clicked = false;
+            self.mouse_released = false;
+            self.mouse_right_clicked = false;
+        }
+
         const layout = self.panelLayoutMetrics();
         const pad = layout.inset;
         const gap = layout.section_gap;
@@ -7462,21 +7490,6 @@ const App = struct {
             .{ .placeholder = "Search workspaces" },
         );
         if (filter_focused) self.settings_panel.focused_field = .launcher_project_filter;
-        right_y += layout.input_height + layout.row_gap * 0.55;
-
-        const create_name_rect = Rect.fromXYWH(
-            right_rect.min[0] + pad,
-            right_y,
-            right_rect.width() - pad * 2.0,
-            layout.input_height,
-        );
-        const create_name_focused = self.drawTextInputWidget(
-            create_name_rect,
-            self.settings_panel.project_create_name.items,
-            self.settings_panel.focused_field == .project_create_name,
-            .{ .placeholder = "New workspace name" },
-        );
-        if (create_name_focused) self.settings_panel.focused_field = .project_create_name;
         right_y += layout.input_height + layout.row_gap;
 
         const project_row_h = @max(layout.button_height, 32.0 * self.ui_scale);
@@ -7532,19 +7545,303 @@ const App = struct {
         if (self.drawButtonWidget(
             create_rect,
             "Create Workspace",
-            .{ .variant = .secondary, .disabled = self.connection_state != .connected or self.settings_panel.project_create_name.items.len == 0 },
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
         )) {
-            self.createProjectFromPanel() catch |err| {
-                const msg = self.formatControlOpError("Workspace create failed", err);
-                if (msg) |value| {
-                    defer self.allocator.free(value);
-                    self.setLauncherNotice(value);
-                }
-            };
+            self.openLauncherCreateWorkspaceModal();
         }
 
         _ = self.drawWindowMenuBar(ui_window, fb_width);
         self.drawStatusOverlay(fb_width, fb_height);
+        if (launcher_modal_open) {
+            self.mouse_down = saved_mouse_down;
+            self.mouse_clicked = saved_mouse_clicked;
+            self.mouse_released = saved_mouse_released;
+            self.mouse_right_clicked = saved_mouse_right_clicked;
+            self.drawLauncherCreateWorkspaceModal(fb_width, fb_height);
+        }
+    }
+
+    fn drawLauncherCreateWorkspaceModal(self: *App, fb_width: u32, fb_height: u32) void {
+        const layout = self.panelLayoutMetrics();
+        const pad = @max(layout.inset, 12.0 * self.ui_scale);
+        const row_h = @max(layout.button_height, 34.0 * self.ui_scale);
+        const screen_rect = Rect.fromXYWH(0, 0, @floatFromInt(fb_width), @floatFromInt(fb_height));
+
+        self.drawFilledRect(screen_rect, zcolors.withAlpha(self.theme.colors.background, 0.68));
+
+        const modal_w = std.math.clamp(
+            screen_rect.width() * 0.62,
+            420.0 * self.ui_scale,
+            760.0 * self.ui_scale,
+        );
+        const modal_h = std.math.clamp(
+            screen_rect.height() * 0.72,
+            360.0 * self.ui_scale,
+            640.0 * self.ui_scale,
+        );
+        const modal_rect = Rect.fromXYWH(
+            screen_rect.min[0] + (screen_rect.width() - modal_w) * 0.5,
+            screen_rect.min[1] + (screen_rect.height() - modal_h) * 0.5,
+            modal_w,
+            modal_h,
+        );
+
+        self.drawSurfacePanel(modal_rect);
+        self.drawRect(modal_rect, self.theme.colors.border);
+
+        var y = modal_rect.min[1] + pad;
+        const field_w = modal_rect.width() - pad * 2.0;
+
+        self.drawLabel(modal_rect.min[0] + pad, y, "Create Workspace", self.theme.colors.text_primary);
+        y += layout.line_height + layout.row_gap * 0.35;
+        self.drawTextTrimmed(
+            modal_rect.min[0] + pad,
+            y,
+            field_w,
+            "Pick a Spiderweb template and create a new workspace.",
+            self.theme.colors.text_secondary,
+        );
+        y += layout.line_height + layout.row_gap * 0.8;
+
+        if (self.launcher_create_modal_error) |message| {
+            self.drawTextTrimmed(
+                modal_rect.min[0] + pad,
+                y,
+                field_w,
+                message,
+                zcolors.rgba(220, 80, 80, 255),
+            );
+            y += layout.line_height + layout.row_gap * 0.65;
+        }
+
+        self.drawLabel(modal_rect.min[0] + pad, y, "Workspace Name", self.theme.colors.text_secondary);
+        y += layout.line_height + layout.row_gap * 0.25;
+        const name_focused = self.drawTextInputWidget(
+            Rect.fromXYWH(modal_rect.min[0] + pad, y, field_w, layout.input_height),
+            self.settings_panel.project_create_name.items,
+            self.settings_panel.focused_field == .project_create_name,
+            .{ .placeholder = "Example: Distributed Workspace" },
+        );
+        if (name_focused) self.settings_panel.focused_field = .project_create_name;
+        y += layout.input_height + layout.row_gap * 0.6;
+
+        self.drawLabel(modal_rect.min[0] + pad, y, "Vision (Optional)", self.theme.colors.text_secondary);
+        y += layout.line_height + layout.row_gap * 0.25;
+        const vision_focused = self.drawTextInputWidget(
+            Rect.fromXYWH(modal_rect.min[0] + pad, y, field_w, layout.input_height),
+            self.settings_panel.project_create_vision.items,
+            self.settings_panel.focused_field == .project_create_vision,
+            .{ .placeholder = "Short goal or context" },
+        );
+        if (vision_focused) self.settings_panel.focused_field = .project_create_vision;
+        y += layout.input_height + layout.row_gap * 0.8;
+
+        const action_y = modal_rect.max[1] - pad - row_h;
+        const detail_h = layout.line_height * 2.2;
+        const detail_y = action_y - layout.row_gap - detail_h;
+
+        const template_header_y = y;
+        self.drawLabel(modal_rect.min[0] + pad, template_header_y, "Template", self.theme.colors.text_secondary);
+
+        const refresh_w = @max(160.0 * self.ui_scale, self.measureText("Refresh Templates") + pad * 1.4);
+        const refresh_rect = Rect.fromXYWH(
+            modal_rect.max[0] - pad - refresh_w,
+            template_header_y - @max(0.0, (row_h - layout.line_height) * 0.3),
+            refresh_w,
+            row_h,
+        );
+        if (self.drawButtonWidget(
+            refresh_rect,
+            "Refresh Templates",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            self.clearLauncherCreateWorkspaceModalError();
+            self.refreshLauncherCreateWorkspaceTemplates() catch |err| {
+                const msg = self.formatControlOpError("Workspace template list failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setLauncherCreateWorkspaceModalError(text);
+                } else {
+                    self.setLauncherCreateWorkspaceModalError("Workspace template list failed.");
+                }
+            };
+        }
+        y += row_h + layout.row_gap * 0.4;
+
+        const list_bottom = detail_y - layout.row_gap * 0.5;
+        const list_h = @max(88.0 * self.ui_scale, list_bottom - y);
+        const list_rect = Rect.fromXYWH(modal_rect.min[0] + pad, y, field_w, list_h);
+        self.drawSurfacePanel(list_rect);
+        self.drawRect(list_rect, self.theme.colors.border);
+
+        const template_count = self.launcher_create_templates.items.len;
+        const template_row_h = @max(layout.button_height, 30.0 * self.ui_scale);
+        const template_row_gap = layout.row_gap * 0.45;
+        const template_row_step = template_row_h + template_row_gap;
+        const list_inner_h = @max(0.0, list_rect.height() - layout.inner_inset * 2.0);
+        const rows_per_page = blk: {
+            if (template_row_step <= 0.0 or list_inner_h <= 0.0) break :blk @as(usize, 1);
+            const rows_fit = @floor((list_inner_h + template_row_gap) / template_row_step);
+            break :blk @max(@as(usize, 1), @as(usize, @intFromFloat(rows_fit)));
+        };
+        const total_pages = if (template_count == 0)
+            @as(usize, 1)
+        else
+            (template_count / rows_per_page) + @as(usize, @intFromBool((template_count % rows_per_page) != 0));
+        if (self.launcher_create_template_page >= total_pages) {
+            self.launcher_create_template_page = total_pages - 1;
+        }
+
+        const pager_button_w = @max(62.0 * self.ui_scale, self.measureText("Next") + pad * 1.05);
+        const pager_gap = @max(6.0 * self.ui_scale, layout.row_gap * 0.4);
+        const next_rect = Rect.fromXYWH(
+            refresh_rect.min[0] - pager_gap - pager_button_w,
+            refresh_rect.min[1],
+            pager_button_w,
+            row_h,
+        );
+        const prev_rect = Rect.fromXYWH(
+            next_rect.min[0] - pager_gap - pager_button_w,
+            refresh_rect.min[1],
+            pager_button_w,
+            row_h,
+        );
+        if (self.drawButtonWidget(
+            prev_rect,
+            "Prev",
+            .{ .variant = .secondary, .disabled = template_count == 0 or self.launcher_create_template_page == 0 },
+        )) {
+            self.launcher_create_template_page -= 1;
+        }
+        if (self.drawButtonWidget(
+            next_rect,
+            "Next",
+            .{
+                .variant = .secondary,
+                .disabled = template_count == 0 or (self.launcher_create_template_page + 1) >= total_pages,
+            },
+        )) {
+            self.launcher_create_template_page += 1;
+        }
+
+        const page_line = std.fmt.allocPrint(
+            self.allocator,
+            "Page {d}/{d}",
+            .{ self.launcher_create_template_page + 1, total_pages },
+        ) catch null;
+        defer if (page_line) |value| self.allocator.free(value);
+        if (page_line) |value| {
+            const label_x = modal_rect.min[0] + pad + self.measureText("Template") + pad * 0.45;
+            const label_w = @max(0.0, prev_rect.min[0] - pager_gap - label_x);
+            self.drawTextTrimmed(
+                label_x,
+                template_header_y,
+                label_w,
+                value,
+                self.theme.colors.text_secondary,
+            );
+        }
+
+        if (template_count == 0) {
+            self.drawTextTrimmed(
+                list_rect.min[0] + layout.inner_inset,
+                list_rect.min[1] + layout.inner_inset,
+                list_rect.width() - layout.inner_inset * 2.0,
+                "No templates returned by Spiderweb. Use Refresh Templates.",
+                self.theme.colors.text_secondary,
+            );
+        } else {
+            const page_start = self.launcher_create_template_page * rows_per_page;
+            const page_end = @min(page_start + rows_per_page, template_count);
+            var row_y = list_rect.min[1] + layout.inner_inset;
+            const row_max_y = list_rect.max[1] - layout.inner_inset;
+            for (self.launcher_create_templates.items[page_start..page_end], page_start..) |template, idx| {
+                if (row_y + template_row_h > row_max_y) break;
+                if (self.drawButtonWidget(
+                    Rect.fromXYWH(
+                        list_rect.min[0] + layout.inner_inset,
+                        row_y,
+                        list_rect.width() - layout.inner_inset * 2.0,
+                        template_row_h,
+                    ),
+                    template.id,
+                    .{ .variant = if (idx == self.launcher_create_selected_template_index) .primary else .secondary },
+                )) {
+                    self.launcher_create_selected_template_index = idx;
+                    self.syncLauncherCreateSelectedTemplateToSettings() catch {};
+                    self.clearLauncherCreateWorkspaceModalError();
+                }
+                row_y += template_row_step;
+            }
+        }
+
+        const detail_rect = Rect.fromXYWH(modal_rect.min[0] + pad, detail_y, field_w, detail_h);
+        self.drawSurfacePanel(detail_rect);
+        self.drawRect(detail_rect, self.theme.colors.border);
+        if (self.selectedLauncherCreateWorkspaceTemplate()) |template| {
+            const desc = if (template.description.len > 0) template.description else "(no description)";
+            const binds_line = std.fmt.allocPrint(
+                self.allocator,
+                "Selected: {s} | binds: {d}",
+                .{ template.id, template.binds.items.len },
+            ) catch null;
+            defer if (binds_line) |value| self.allocator.free(value);
+            if (binds_line) |value| {
+                self.drawTextTrimmed(
+                    detail_rect.min[0] + layout.inner_inset,
+                    detail_rect.min[1] + layout.inner_inset * 0.7,
+                    detail_rect.width() - layout.inner_inset * 2.0,
+                    value,
+                    self.theme.colors.text_primary,
+                );
+            }
+            self.drawTextTrimmed(
+                detail_rect.min[0] + layout.inner_inset,
+                detail_rect.min[1] + layout.inner_inset * 0.7 + layout.line_height,
+                detail_rect.width() - layout.inner_inset * 2.0,
+                desc,
+                self.theme.colors.text_secondary,
+            );
+        } else {
+            self.drawTextTrimmed(
+                detail_rect.min[0] + layout.inner_inset,
+                detail_rect.min[1] + layout.inner_inset * 0.7,
+                detail_rect.width() - layout.inner_inset * 2.0,
+                "Select a template to continue.",
+                self.theme.colors.text_secondary,
+            );
+        }
+
+        const button_w = (field_w - pad) * 0.5;
+        const cancel_rect = Rect.fromXYWH(modal_rect.min[0] + pad, action_y, button_w, row_h);
+        if (self.drawButtonWidget(cancel_rect, "Cancel", .{ .variant = .secondary })) {
+            self.closeLauncherCreateWorkspaceModal();
+            return;
+        }
+
+        const trimmed_name = std.mem.trim(u8, self.settings_panel.project_create_name.items, " \t\r\n");
+        const create_disabled = self.connection_state != .connected or
+            trimmed_name.len == 0 or
+            self.launcher_create_templates.items.len == 0;
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(cancel_rect.max[0] + pad, action_y, button_w, row_h),
+            "Create Workspace",
+            .{ .variant = .primary, .disabled = create_disabled },
+        )) {
+            self.createWorkspaceFromLauncherModal() catch |err| {
+                const msg = self.formatControlOpError("Workspace create failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setLauncherCreateWorkspaceModalError(text);
+                } else {
+                    self.setLauncherCreateWorkspaceModalError("Workspace create failed.");
+                }
+            };
+        }
+
+        if (self.mouse_released and !modal_rect.contains(.{ self.mouse_x, self.mouse_y })) {
+            self.closeLauncherCreateWorkspaceModal();
+        }
     }
 
     fn drawWorkspaceUi(self: *App, ui_window: *UiWindow, fb_width: u32, fb_height: u32) void {
@@ -15133,6 +15430,101 @@ const App = struct {
     fn clearLauncherNotice(self: *App) void {
         if (self.launcher_notice) |existing| self.allocator.free(existing);
         self.launcher_notice = null;
+    }
+
+    fn clearLauncherCreateWorkspaceTemplates(self: *App) void {
+        workspace_types.deinitWorkspaceTemplateList(self.allocator, &self.launcher_create_templates);
+        self.launcher_create_selected_template_index = 0;
+        self.launcher_create_template_page = 0;
+    }
+
+    fn setLauncherCreateWorkspaceModalError(self: *App, message: []const u8) void {
+        if (self.launcher_create_modal_error) |existing| self.allocator.free(existing);
+        self.launcher_create_modal_error = self.allocator.dupe(u8, message) catch null;
+    }
+
+    fn clearLauncherCreateWorkspaceModalError(self: *App) void {
+        if (self.launcher_create_modal_error) |existing| self.allocator.free(existing);
+        self.launcher_create_modal_error = null;
+    }
+
+    fn syncLauncherCreateSelectedTemplateToSettings(self: *App) !void {
+        if (self.launcher_create_templates.items.len == 0) {
+            self.settings_panel.workspace_template_id.clearRetainingCapacity();
+            return;
+        }
+        const selected_index = @min(self.launcher_create_selected_template_index, self.launcher_create_templates.items.len - 1);
+        self.launcher_create_selected_template_index = selected_index;
+        self.settings_panel.workspace_template_id.clearRetainingCapacity();
+        try self.settings_panel.workspace_template_id.appendSlice(
+            self.allocator,
+            self.launcher_create_templates.items[selected_index].id,
+        );
+    }
+
+    fn selectedLauncherCreateWorkspaceTemplate(self: *const App) ?*const workspace_types.WorkspaceTemplate {
+        if (self.launcher_create_templates.items.len == 0) return null;
+        const selected_index = @min(self.launcher_create_selected_template_index, self.launcher_create_templates.items.len - 1);
+        return &self.launcher_create_templates.items[selected_index];
+    }
+
+    fn refreshLauncherCreateWorkspaceTemplates(self: *App) !void {
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
+
+        var templates = try control_plane.listWorkspaceTemplates(self.allocator, client, &self.message_counter);
+        errdefer workspace_types.deinitWorkspaceTemplateList(self.allocator, &templates);
+
+        self.clearLauncherCreateWorkspaceTemplates();
+        self.launcher_create_templates = templates;
+        self.launcher_create_selected_template_index = 0;
+
+        const preferred_template = std.mem.trim(u8, self.settings_panel.workspace_template_id.items, " \t\r\n");
+        if (preferred_template.len > 0) {
+            for (self.launcher_create_templates.items, 0..) |template, idx| {
+                if (std.mem.eql(u8, template.id, preferred_template)) {
+                    self.launcher_create_selected_template_index = idx;
+                    break;
+                }
+            }
+        }
+        try self.syncLauncherCreateSelectedTemplateToSettings();
+    }
+
+    fn openLauncherCreateWorkspaceModal(self: *App) void {
+        self.launcher_create_modal_open = true;
+        self.settings_panel.focused_field = .project_create_name;
+        self.clearLauncherCreateWorkspaceModalError();
+        self.refreshLauncherCreateWorkspaceTemplates() catch |err| {
+            self.clearLauncherCreateWorkspaceTemplates();
+            const msg = self.formatControlOpError("Workspace template list failed", err);
+            if (msg) |text| {
+                defer self.allocator.free(text);
+                self.setLauncherCreateWorkspaceModalError(text);
+            } else {
+                self.setLauncherCreateWorkspaceModalError("Workspace template list failed.");
+            }
+        };
+    }
+
+    fn closeLauncherCreateWorkspaceModal(self: *App) void {
+        self.launcher_create_modal_open = false;
+        self.clearLauncherCreateWorkspaceModalError();
+        if (self.settings_panel.focused_field == .project_create_name or
+            self.settings_panel.focused_field == .project_create_vision)
+        {
+            self.settings_panel.focused_field = .launcher_project_filter;
+        }
+    }
+
+    fn createWorkspaceFromLauncherModal(self: *App) !void {
+        const name = std.mem.trim(u8, self.settings_panel.project_create_name.items, " \t\r\n");
+        if (name.len == 0) return error.MissingField;
+        if (self.launcher_create_templates.items.len == 0) return error.MissingField;
+        try self.syncLauncherCreateSelectedTemplateToSettings();
+        try self.createProjectFromPanel();
+        self.closeLauncherCreateWorkspaceModal();
+        self.setLauncherNotice("Workspace created.");
     }
 
     fn canRenderWorkspaceStage(self: *const App) bool {
