@@ -120,14 +120,6 @@ pub fn run(allocator: std.mem.Allocator) !void {
         logger.setLevel(.debug);
     }
 
-    // Route to TUI mode if requested
-    if (options.tui) {
-        // TUI mode is only available when built with the TUI target
-        // Use zig build run-tui instead
-        std.log.err("TUI mode must be built with 'zig build tui' or run with 'zig build run-tui'", .{});
-        return error.TuiNotAvailable;
-    }
-
     if (std.mem.eql(u8, args.gitRevision(), "unknown")) {
         logger.info("SpiderApp v{s}", .{args.appVersion()});
     } else {

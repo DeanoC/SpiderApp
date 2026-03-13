@@ -24,7 +24,6 @@
 - [ ] Context recall
 
 ## Backlog
-- [ ] TUI interface (not just REPL)
 - [ ] Canvas integration
 - [ ] Notification support
 - [ ] Auto-update

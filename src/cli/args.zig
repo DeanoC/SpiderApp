@@ -88,7 +88,6 @@ pub const Options = struct {
     operator_token: ?[]const u8 = null,
     role: ?Role = null,
     interactive: bool = false,
-    tui: bool = false,
     verbose: bool = false,
     show_help: bool = false,
     show_version: bool = false,
@@ -369,10 +368,6 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Options {
         }
         if (std.mem.eql(u8, arg, "--interactive") or std.mem.eql(u8, arg, "-i")) {
             options.interactive = true;
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--tui")) {
-            options.tui = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--verbose")) {
