@@ -52,10 +52,12 @@ fn gitRevision(allocator: std.mem.Allocator, cwd: []const u8) ![]u8 {
         allocator.free(result.stdout);
         return error.CommandFailed;
     }
-    if (result.stdout.len > 0 and result.stdout[result.stdout.len - 1] == '\n') {
-        return result.stdout[0 .. result.stdout.len - 1];
-    }
-    return result.stdout;
+    const trimmed = std.mem.trimRight(u8, result.stdout, "\r\n");
+    if (trimmed.len == result.stdout.len) return result.stdout;
+
+    const owned = try allocator.dupe(u8, trimmed);
+    allocator.free(result.stdout);
+    return owned;
 }
 
 fn ensureGitCheckout(
@@ -182,11 +184,11 @@ fn addGuiArtifact(
         .target = target,
         .optimize = optimize,
     });
+    app_venom_host_module.addImport("control_plane", control_plane_module);
     if (os_tag != .windows) {
         const spiderweb_node_module = spider_protocol.module("spiderweb_node");
         const spiderweb_fs_module = spider_protocol.module("spiderweb_fs");
         app_venom_host_module.addImport("websocket", websocket.module("websocket"));
-        app_venom_host_module.addImport("control_plane", control_plane_module);
         app_venom_host_module.addImport("spider-protocol", spider_protocol_module);
         app_venom_host_module.addImport("spiderweb_node", spiderweb_node_module);
         app_venom_host_module.addImport("spiderweb_fs", spiderweb_fs_module);

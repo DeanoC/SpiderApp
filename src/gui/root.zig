@@ -15800,6 +15800,7 @@ const App = struct {
         const active_token = self.config.getRoleToken(self.config.active_role);
         var bootstrap_token = active_token;
         var bootstrap_client = client;
+        var used_admin_fallback = false;
         var admin_client_storage: ?ws_client_mod.WebSocketClient = null;
         defer if (admin_client_storage) |*admin_client| admin_client.deinit();
 
@@ -15823,6 +15824,7 @@ const App = struct {
             try control_plane.ensureUnifiedV2Connection(self.allocator, &admin_client_storage.?, &self.message_counter);
             bootstrap_token = admin_token;
             bootstrap_client = &admin_client_storage.?;
+            used_admin_fallback = true;
             break :blk try control_plane.ensureNode(
                 self.allocator,
                 &admin_client_storage.?,
@@ -15834,12 +15836,34 @@ const App = struct {
         };
         defer ensured.deinit(self.allocator);
 
-        try self.startAppLocalVenomHost(
+        self.startAppLocalVenomHost(
             bootstrap_client,
             bootstrap_token,
             ensured,
             APP_LOCAL_NODE_LEASE_TTL_MS,
-        );
+        ) catch |start_err| {
+            const admin_token = self.config.getRoleToken(.admin);
+            if (admin_token.len == 0) return start_err;
+            if (used_admin_fallback or std.mem.eql(u8, bootstrap_token, admin_token)) return start_err;
+            if (admin_client_storage == null) {
+                admin_client_storage = try ws_client_mod.WebSocketClient.init(
+                    self.allocator,
+                    self.config.server_url,
+                    admin_token,
+                );
+                try admin_client_storage.?.connect();
+                try control_plane.ensureUnifiedV2Connection(self.allocator, &admin_client_storage.?, &self.message_counter);
+            }
+            try self.startAppLocalVenomHost(
+                &admin_client_storage.?,
+                admin_token,
+                ensured,
+                APP_LOCAL_NODE_LEASE_TTL_MS,
+            );
+            bootstrap_token = admin_token;
+            bootstrap_client = &admin_client_storage.?;
+            used_admin_fallback = true;
+        };
 
         if (self.config.appLocalNode(profile_id)) |existing| {
             if (std.mem.eql(u8, existing.node_name, ensured.node_name) and
