@@ -48,7 +48,7 @@ if [ ! -f "$BIN_PATH" ]; then
     exit 1
 fi
 
-APP_VERSION="$(sed -n 's/.*\\.version = \"\\([^\"]*\\)\".*/\\1/p' "$ROOT_DIR/build.zig.zon" | head -n 1)"
+APP_VERSION="$(sed -n 's/.*\.version = "\([^"]*\)".*/\1/p' "$ROOT_DIR/build.zig.zon" | head -n 1)"
 if [ -z "$APP_VERSION" ]; then
     APP_VERSION="0.1.0"
 fi
