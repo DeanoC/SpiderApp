@@ -7,7 +7,7 @@ pub const Stage = enum {
 
 pub const ReturnReason = enum {
     none,
-    switched_project,
+    switched_workspace,
     disconnected,
     connection_lost,
 };
@@ -15,11 +15,11 @@ pub const ReturnReason = enum {
 pub const State = struct {
     stage: Stage = .launcher,
     connected: bool = false,
-    selected_project_id: ?[]const u8 = null,
+    selected_workspace_id: ?[]const u8 = null,
     last_return_reason: ReturnReason = .none,
 
     pub fn canEnterWorkspace(self: *const State) bool {
-        return self.connected and self.selected_project_id != null;
+        return self.connected and self.selected_workspace_id != null;
     }
 
     pub fn setConnected(self: *State, connected: bool) void {
@@ -29,18 +29,18 @@ pub const State = struct {
         }
     }
 
-    pub fn setSelectedProject(self: *State, project_id: ?[]const u8) void {
-        self.selected_project_id = project_id;
-        if (project_id == null and self.stage == .workspace) {
+    pub fn setSelectedWorkspace(self: *State, workspace_id: ?[]const u8) void {
+        self.selected_workspace_id = workspace_id;
+        if (workspace_id == null and self.stage == .workspace) {
             self.returnToLauncher(.disconnected);
         }
     }
 
-    pub fn openProject(self: *State, project_id: []const u8) !void {
+    pub fn openWorkspace(self: *State, workspace_id: []const u8) !void {
         if (!self.connected) return error.ConnectionRequired;
-        if (project_id.len == 0) return error.ProjectRequired;
+        if (workspace_id.len == 0) return error.WorkspaceRequired;
         self.stage = .workspace;
-        self.selected_project_id = project_id;
+        self.selected_workspace_id = workspace_id;
         self.last_return_reason = .none;
     }
 
@@ -55,12 +55,12 @@ pub const State = struct {
     }
 };
 
-test "workspace entry requires connected project selection" {
+test "workspace entry requires connected workspace selection" {
     var state = State{};
-    try std.testing.expectError(error.ConnectionRequired, state.openProject("alpha"));
+    try std.testing.expectError(error.ConnectionRequired, state.openWorkspace("alpha"));
 
     state.setConnected(true);
-    try state.openProject("alpha");
+    try state.openWorkspace("alpha");
     try std.testing.expectEqual(Stage.workspace, state.stage);
 }
 
@@ -68,7 +68,7 @@ test "disconnect forces workspace to launcher" {
     var state = State{
         .stage = .workspace,
         .connected = true,
-        .selected_project_id = "alpha",
+        .selected_workspace_id = "alpha",
     };
 
     state.handleConnectionLoss();
@@ -77,12 +77,12 @@ test "disconnect forces workspace to launcher" {
     try std.testing.expectEqual(ReturnReason.connection_lost, state.last_return_reason);
 }
 
-test "empty project id is rejected when opening workspace" {
+test "empty workspace id is rejected when opening workspace" {
     var state = State{
         .connected = true,
     };
 
-    try std.testing.expectError(error.ProjectRequired, state.openProject(""));
+    try std.testing.expectError(error.WorkspaceRequired, state.openWorkspace(""));
     try std.testing.expectEqual(Stage.launcher, state.stage);
 }
 
@@ -90,7 +90,7 @@ test "setConnected false while in workspace returns to launcher" {
     var state = State{
         .stage = .workspace,
         .connected = true,
-        .selected_project_id = "alpha",
+        .selected_workspace_id = "alpha",
     };
 
     state.setConnected(false);
@@ -99,14 +99,14 @@ test "setConnected false while in workspace returns to launcher" {
     try std.testing.expectEqual(ReturnReason.disconnected, state.last_return_reason);
 }
 
-test "clearing selected project in workspace returns to launcher" {
+test "clearing selected workspace in workspace returns to launcher" {
     var state = State{
         .stage = .workspace,
         .connected = true,
-        .selected_project_id = "alpha",
+        .selected_workspace_id = "alpha",
     };
 
-    state.setSelectedProject(null);
+    state.setSelectedWorkspace(null);
 
     try std.testing.expectEqual(Stage.launcher, state.stage);
     try std.testing.expectEqual(ReturnReason.disconnected, state.last_return_reason);

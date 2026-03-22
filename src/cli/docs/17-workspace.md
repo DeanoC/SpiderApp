@@ -66,7 +66,7 @@ Remove a mount from the selected workspace.
 
 ## workspace handoff show [generic|codex_app|spider_monkey]
 
-Generate mount and worker startup commands for an external handoff.
+Generate mount and external tool startup commands for an external handoff.
 
 ## workspace status [workspace_id]
 

@@ -50,19 +50,9 @@ spider --help
 - `node service-get <node_id>` - Show node service catalog
 - `node service-upsert <node_id> <node_secret>` - Update node service catalog metadata
 - `node service-runtime <node_id> <service_id> <action>` - Read/write runtime control files for a service mount
-- `pairing pending` - Refresh and list pending pairing join requests
-- `pairing approve <request_id> [--lease-ttl-ms <ms>]` - Approve pending pairing request
-- `pairing deny <request_id>` - Deny pending pairing request
-- `pairing list` - Refresh and list active pairing invites
-- `pairing create [--expires-in-ms <ms>]` - Create a new pairing invite
-- `pairing refresh [pending|invites|all]` - Refresh pairing snapshots and print results
 - `workspace status [workspace_id]` - Show active workspace mounts
 - `auth status` - Show Spiderweb auth token status (admin only)
 - `auth rotate <admin|user>` - Rotate Spiderweb auth token (admin only)
-- `goal list` - List goals for current workspace
-- `goal create <description>` - Create a new goal
-- `task list` - List active tasks
-- `worker list` - Show running workers
 - `connect` - Connect to Spiderweb
 - `disconnect` - Disconnect from Spiderweb
 
@@ -94,7 +84,7 @@ Use command mode for now.
 ## Design Philosophy
 
 ZSS uses a noun-verb command structure:
-- **Noun** = What you're acting on (chat, workspace, goal, task)
+- **Noun** = What you're acting on (chat, workspace, node, session)
 - **Verb** = What you're doing (send, list, create, use)
 
 This makes commands discoverable and consistent.

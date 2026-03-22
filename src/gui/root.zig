@@ -842,7 +842,7 @@ fn sanitizeSessionKey(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
 }
 
 const system_project_id = "system";
-const system_agent_id = "mother";
+const system_agent_id = "spiderweb";
 
 fn isSystemProjectId(project_id: ?[]const u8) bool {
     const concrete = project_id orelse return false;
@@ -5934,30 +5934,30 @@ const App = struct {
         errdefer workspace_types.deinitWorkspaceList(self.allocator, &projects);
         var nodes = try control_plane.listNodes(self.allocator, client, &self.message_counter);
         errdefer workspace_types.deinitNodeList(self.allocator, &nodes);
-        const selected_project_id = self.selectedProjectId();
-        const selected_project_token = if (selected_project_id) |project_id|
-            self.selectedProjectToken(project_id)
+        const selected_workspace_id = self.selectedProjectId();
+        const selected_workspace_token = if (selected_workspace_id) |workspace_id|
+            self.selectedProjectToken(workspace_id)
         else
             null;
 
-        var selected_project_warning: ?[]u8 = null;
-        defer if (selected_project_warning) |value| self.allocator.free(value);
+        var selected_workspace_warning: ?[]u8 = null;
+        defer if (selected_workspace_warning) |value| self.allocator.free(value);
 
         var workspace_status = control_plane.workspaceStatus(
             self.allocator,
             client,
             &self.message_counter,
-            selected_project_id,
-            selected_project_token,
+            selected_workspace_id,
+            selected_workspace_token,
         ) catch |err| blk: {
-            if (selected_project_id != null and err == error.RemoteError) {
+            if (selected_workspace_id != null and err == error.RemoteError) {
                 if (control_plane.lastRemoteError()) |remote| {
                     if (isSelectedProjectAttachRemoteError(remote)) {
                         self.clearSelectedProjectAfterAttachFailure();
                     }
-                    selected_project_warning = self.formatControlRemoteMessage("Selected workspace unavailable", remote);
+                    selected_workspace_warning = self.formatControlRemoteMessage("Selected workspace unavailable", remote);
                 } else {
-                    selected_project_warning = std.fmt.allocPrint(self.allocator, "Selected workspace unavailable: {s}", .{@errorName(err)}) catch null;
+                    selected_workspace_warning = std.fmt.allocPrint(self.allocator, "Selected workspace unavailable: {s}", .{@errorName(err)}) catch null;
                 }
                 break :blk try control_plane.workspaceStatus(
                     self.allocator,
@@ -5979,7 +5979,7 @@ const App = struct {
         self.nodes = nodes;
         self.workspace_state = workspace_status;
         self.workspace_last_refresh_ms = std.time.milliTimestamp();
-        if (selected_project_warning) |message| {
+        if (selected_workspace_warning) |message| {
             self.setWorkspaceError(message);
         } else {
             self.clearWorkspaceError();
@@ -8121,7 +8121,7 @@ const App = struct {
                             "Switch Workspace",
                             .{ .variant = .secondary },
                         )) {
-                            self.returnToLauncher(.switched_project);
+                            self.returnToLauncher(.switched_workspace);
                             self.ide_menu_open = null;
                         }
                         row_y += row_h + row_gap;
@@ -15718,13 +15718,13 @@ const App = struct {
         self.closeAllSecondaryWindows();
         _ = c.SDL_SetWindowTitle(self.window, platformWindowTitle("SpiderApp - Launcher"));
         switch (reason) {
-            .switched_project => self.setLauncherNotice("Switched back to launcher. Select another workspace."),
+            .switched_workspace => self.setLauncherNotice("Switched back to launcher. Select another workspace."),
             .connection_lost => self.setLauncherNotice("Connection lost. Reconnect to continue."),
             .disconnected => self.setLauncherNotice("Disconnected from Spider Web."),
             .none => self.clearLauncherNotice(),
         }
 
-        if (reason == .switched_project and self.connection_state == .connected and self.ws_client != null) {
+        if (reason == .switched_workspace and self.connection_state == .connected and self.ws_client != null) {
             self.refreshWorkspaceData() catch |err| {
                 const msg = std.fmt.allocPrint(self.allocator, "Workspace refresh failed: {s}", .{@errorName(err)}) catch null;
                 defer if (msg) |value| self.allocator.free(value);

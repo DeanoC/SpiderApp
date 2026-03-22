@@ -18,7 +18,7 @@ List persisted sessions recorded by Spiderweb for this auth role (newest first).
 **Examples:**
 ```bash
 spider session history
-spider session history mother --limit 5
+spider session history spiderweb --limit 5
 ```
 
 ## session status [session_key]
@@ -37,8 +37,8 @@ Create or rebind a session to an agent and workspace context.
 
 **Examples:**
 ```bash
-spider session attach review mother --workspace system
-spider session attach work bob --workspace proj-2 --workspace-token proj-secret
+spider session attach review spiderweb --workspace system
+spider session attach work bob --workspace ws-demo --workspace-token ws-secret
 ```
 
 ## session resume <session_key>
@@ -67,5 +67,5 @@ Find the most recent persisted session (optionally for one agent) and attach it.
 **Examples:**
 ```bash
 spider session restore
-spider session restore mother
+spider session restore spiderweb
 ```

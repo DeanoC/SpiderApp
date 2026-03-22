@@ -1818,8 +1818,8 @@ test "parseAgentInfo reads capabilities and flags" {
     const allocator = std.testing.allocator;
     const json =
         \\{
-        \\  "id":"mother",
-        \\  "name":"Mother",
+        \\  "id":"spiderweb",
+        \\  "name":"Spiderweb",
         \\  "description":"Primary orchestrator",
         \\  "is_default":true,
         \\  "identity_loaded":true,
@@ -1834,8 +1834,8 @@ test "parseAgentInfo reads capabilities and flags" {
     var info = try parseAgentInfo(allocator, parsed.value.object);
     defer info.deinit(allocator);
 
-    try std.testing.expectEqualStrings("mother", info.id);
-    try std.testing.expectEqualStrings("Mother", info.name);
+    try std.testing.expectEqualStrings("spiderweb", info.id);
+    try std.testing.expectEqualStrings("Spiderweb", info.name);
     try std.testing.expect(info.is_default);
     try std.testing.expect(info.identity_loaded);
     try std.testing.expect(!info.needs_hatching);
@@ -1850,7 +1850,7 @@ test "parseSessionList reads active session and entries" {
         \\{
         \\  "active_session":"main",
         \\  "sessions":[
-        \\    {"session_key":"main","agent_id":"mother","project_id":"system"},
+        \\    {"session_key":"main","agent_id":"spiderweb","project_id":"system"},
         \\    {"session_key":"work","agent_id":"bob","project_id":null}
         \\  ]
         \\}
@@ -1897,7 +1897,7 @@ test "parseSessionRestoreResult reads found session payload" {
         \\  "found":true,
         \\  "session":{
         \\    "session_key":"work-1",
-        \\    "agent_id":"mother",
+        \\    "agent_id":"spiderweb",
         \\    "project_id":"system",
         \\    "last_active_ms":1234,
         \\    "message_count":7,
@@ -1924,7 +1924,7 @@ test "parseSessionHistory reads entry list" {
     const json =
         \\{
         \\  "sessions":[
-        \\    {"session_key":"a","agent_id":"mother","project_id":"system","last_active_ms":10,"message_count":1},
+        \\    {"session_key":"a","agent_id":"spiderweb","project_id":"system","last_active_ms":10,"message_count":1},
         \\    {"session_key":"b","agent_id":"bob","project_id":"proj-2","last_active_ms":9,"message_count":0,"summary":"todo"}
         \\  ]
         \\}

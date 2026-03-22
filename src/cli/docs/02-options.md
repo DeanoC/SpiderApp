@@ -18,7 +18,7 @@ Set the current workspace for this session.
 
 **Examples:**
 ```bash
-spider --workspace spiderweb goal list
+spider --workspace ws-demo workspace status
 spider --workspace mygame chat send "What's next?"
 ```
 
@@ -29,8 +29,8 @@ If provided with `workspace use`, the token is also persisted in local config fo
 
 **Examples:**
 ```bash
-spider --workspace proj-1 --workspace-token proj-abc workspace status
-spider --workspace-token proj-abc workspace use proj-1
+spider --workspace ws-demo --workspace-token ws-secret workspace status
+spider --workspace-token ws-secret workspace use ws-demo
 ```
 
 ### `--operator-token <token>`
