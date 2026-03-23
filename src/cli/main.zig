@@ -666,7 +666,7 @@ fn sessionStatusMatchesTarget(
     project_id: []const u8,
 ) bool {
     if (!std.mem.eql(u8, status.agent_id, agent_id)) return false;
-    const attached_project_id = status.project_id orelse return false;
+    const attached_project_id = status.workspace_id orelse return false;
     return std.mem.eql(u8, attached_project_id, project_id);
 }
 
@@ -700,7 +700,7 @@ fn waitForSessionReady(
         if (!sessionStatusMatchesTarget(&status, agent_id, project_id)) {
             logger.err(
                 "session binding changed while waiting: expected {s}@{s}, got {s}@{s}",
-                .{ agent_id, project_id, status.agent_id, status.project_id orelse "(none)" },
+                .{ agent_id, project_id, status.agent_id, status.workspace_id orelse "(none)" },
             );
             return error.SessionAttachMismatch;
         }
@@ -740,7 +740,7 @@ fn waitForSessionReady(
 
 fn printWorkspaceStatus(stdout: anytype, status: *const workspace_types.WorkspaceStatus, verbose: bool) !void {
     try stdout.print("Agent: {s}\n", .{status.agent_id});
-    if (status.project_id) |project_id| {
+    if (status.workspace_id) |project_id| {
         try stdout.print("Workspace: {s}\n", .{project_id});
     } else {
         try stdout.print("Workspace: (none)\n", .{});
@@ -972,7 +972,7 @@ fn executeWorkspaceInfo(allocator: std.mem.Allocator, options: args.Options, cmd
     try stdout.print("  Template: {s}\n", .{detail.template_id orelse "dev"});
     try stdout.print("  Created: {d}\n", .{detail.created_at_ms});
     try stdout.print("  Updated: {d}\n", .{detail.updated_at_ms});
-    if (detail.project_token) |token| {
+    if (detail.workspace_token) |token| {
         try stdout.print("  Workspace token: {s}\n", .{token});
     }
     try stdout.print("  Mounts ({d}):\n", .{detail.mounts.items.len});
@@ -1045,7 +1045,7 @@ fn executeWorkspaceCreate(allocator: std.mem.Allocator, options: args.Options, c
     defer created.deinit(allocator);
 
     try cfg.setSelectedWorkspace(created.id);
-    if (created.project_token) |token| {
+    if (created.workspace_token) |token| {
         try cfg.setWorkspaceToken(created.id, token);
     }
     try cfg.save();
@@ -1056,12 +1056,12 @@ fn executeWorkspaceCreate(allocator: std.mem.Allocator, options: args.Options, c
     try stdout.print("  Status: {s}\n", .{created.status});
     try stdout.print("  Template: {s}\n", .{created.template_id orelse "dev"});
     try stdout.print("  Created: {d}\n", .{created.created_at_ms});
-    if (created.project_token) |token| {
+    if (created.workspace_token) |token| {
         try stdout.print("  Workspace token: {s}\n", .{token});
     }
     try stdout.print("  Saved as selected workspace in local config\n", .{});
 
-    if (created.project_token) |token| {
+    if (created.workspace_token) |token| {
         var status = control_plane.activateWorkspace(
             allocator,
             client,
@@ -1837,7 +1837,7 @@ fn executeAgentInfo(allocator: std.mem.Allocator, options: args.Options, cmd: ar
 fn printSessionAttachStatus(stdout: anytype, status: *const workspace_types.SessionAttachStatus) !void {
     try stdout.print("Session: {s}\n", .{status.session_key});
     try stdout.print("  Agent: {s}\n", .{status.agent_id});
-    if (status.project_id) |project_id| {
+    if (status.workspace_id) |project_id| {
         try stdout.print("  Workspace: {s}\n", .{project_id});
     } else {
         try stdout.print("  Workspace: (none)\n", .{});
@@ -1881,7 +1881,7 @@ fn executeSessionList(allocator: std.mem.Allocator, options: args.Options, cmd: 
     try stdout.print("Sessions:\n", .{});
     for (list.sessions.items) |session| {
         const marker = if (std.mem.eql(u8, session.session_key, list.active_session)) "*" else " ";
-        if (session.project_id) |project_id| {
+        if (session.workspace_id) |project_id| {
             try stdout.print(
                 "{s} {s}  agent={s}  workspace={s}\n",
                 .{ marker, session.session_key, session.agent_id, project_id },
@@ -1952,7 +1952,7 @@ fn executeSessionHistory(allocator: std.mem.Allocator, options: args.Options, cm
             .{
                 session.session_key,
                 session.agent_id,
-                session.project_id orelse "(none)",
+                session.workspace_id orelse "(none)",
                 session.last_active_ms,
                 session.message_count,
             },
@@ -2113,7 +2113,7 @@ fn executeSessionRestore(allocator: std.mem.Allocator, options: args.Options, cm
         return;
     }
     const session = restored.session.?;
-    const attach_project_id = session.project_id orelse {
+    const attach_project_id = session.workspace_id orelse {
         logger.err(
             "restored session has no workspace_id; choose a workspace and run: session attach {s} {s} --workspace <workspace_id>",
             .{ session.session_key, session.agent_id },
@@ -2126,7 +2126,7 @@ fn executeSessionRestore(allocator: std.mem.Allocator, options: args.Options, cm
         cfg.getWorkspaceToken(attach_project_id);
     try stdout.print(
         "Restoring session {s} (agent={s}, workspace={s})\n",
-        .{ session.session_key, session.agent_id, session.project_id orelse "(none)" },
+        .{ session.session_key, session.agent_id, session.workspace_id orelse "(none)" },
     );
 
     const attach_agent = if (isSystemWorkspaceId(attach_project_id))
@@ -2967,22 +2967,22 @@ fn validateJsonObjectPayload(allocator: std.mem.Allocator, payload: []const u8, 
     }
 }
 
-const VenomBindingScope = venom_bindings.BindingScope;
+const WorkspaceBindingScope = venom_bindings.WorkspaceBindingScope;
 
-const OwnedVenomBindingScope = struct {
+const OwnedWorkspaceBindingScope = struct {
     agent_id: ?[]u8 = null,
-    project_id: ?[]u8 = null,
+    workspace_id: ?[]u8 = null,
 
-    fn deinit(self: *OwnedVenomBindingScope, allocator: std.mem.Allocator) void {
+    fn deinit(self: *OwnedWorkspaceBindingScope, allocator: std.mem.Allocator) void {
         if (self.agent_id) |value| allocator.free(value);
-        if (self.project_id) |value| allocator.free(value);
+        if (self.workspace_id) |value| allocator.free(value);
         self.* = .{};
     }
 
-    fn asBorrowed(self: OwnedVenomBindingScope) VenomBindingScope {
+    fn asBorrowed(self: OwnedWorkspaceBindingScope) WorkspaceBindingScope {
         return .{
             .agent_id = self.agent_id,
-            .project_id = self.project_id,
+            .workspace_id = self.workspace_id,
         };
     }
 };
@@ -3002,23 +3002,23 @@ const DefaultFsMount = struct {
 fn discoverChatBindingPaths(
     allocator: std.mem.Allocator,
     client: *WebSocketClient,
-    scope: VenomBindingScope,
+    scope: WorkspaceBindingScope,
 ) !venom_bindings.ChatBindingPaths {
     return venom_bindings.discoverChatBindingPaths(
         allocator,
         CliFsPathReader{ .allocator = allocator, .client = client },
-        .{ .agent_id = scope.agent_id, .project_id = scope.project_id },
+        .{ .agent_id = scope.agent_id, .workspace_id = scope.workspace_id },
     );
 }
 
-fn resolveAttachedVenomBindingScope(
+fn resolveAttachedWorkspaceBindingScope(
     allocator: std.mem.Allocator,
     client: *WebSocketClient,
-) !OwnedVenomBindingScope {
+) !OwnedWorkspaceBindingScope {
     var cfg = try loadCliConfig(allocator);
     defer cfg.deinit();
 
-    var scope = OwnedVenomBindingScope{};
+    var scope = OwnedWorkspaceBindingScope{};
     errdefer scope.deinit(allocator);
 
     const session_key = resolveSessionKey(&cfg);
@@ -3035,9 +3035,9 @@ fn resolveAttachedVenomBindingScope(
         if (value.agent_id.len > 0) {
             scope.agent_id = try allocator.dupe(u8, value.agent_id);
         }
-        if (value.project_id) |project_id| {
-            if (project_id.len > 0) {
-                scope.project_id = try allocator.dupe(u8, project_id);
+        if (value.workspace_id) |workspace_id| {
+            if (workspace_id.len > 0) {
+                scope.workspace_id = try allocator.dupe(u8, workspace_id);
             }
         }
         return scope;
@@ -3046,8 +3046,8 @@ fn resolveAttachedVenomBindingScope(
     if (cfg.selectedAgent()) |agent_id| {
         scope.agent_id = try allocator.dupe(u8, agent_id);
     }
-    if (cfg.selectedWorkspace()) |project_id| {
-        scope.project_id = try allocator.dupe(u8, project_id);
+    if (cfg.selectedWorkspace()) |workspace_id| {
+        scope.workspace_id = try allocator.dupe(u8, workspace_id);
     }
     return scope;
 }
@@ -3155,12 +3155,12 @@ fn findNodeVenomRuntimeRootPath(
 fn discoverDefaultFsMount(
     allocator: std.mem.Allocator,
     client: *WebSocketClient,
-    scope: VenomBindingScope,
+    scope: WorkspaceBindingScope,
 ) !DefaultFsMount {
     var global_binding = venom_bindings.readPreferredVenomBinding(
         allocator,
         CliFsPathReader{ .allocator = allocator, .client = client },
-        .{ .agent_id = scope.agent_id, .project_id = scope.project_id },
+        .{ .agent_id = scope.agent_id, .workspace_id = scope.workspace_id },
         "fs",
     ) catch null;
     defer if (global_binding) |*binding| binding.deinit(allocator);
@@ -3617,7 +3617,7 @@ fn executeWorkspaceStatus(allocator: std.mem.Allocator, options: args.Options, c
             allocator,
             client,
             &g_control_request_counter,
-            status.project_id,
+            status.workspace_id,
         );
         defer reconcile.deinit(allocator);
         try stdout.print(
@@ -3808,7 +3808,7 @@ fn executeChatSend(allocator: std.mem.Allocator, options: args.Options, cmd: arg
     try maybeApplyWorkspaceContext(allocator, options, client);
     logger.info("Negotiating FS-RPC session...", .{});
     try fsrpcBootstrap(allocator, client);
-    var binding_scope = try resolveAttachedVenomBindingScope(allocator, client);
+    var binding_scope = try resolveAttachedWorkspaceBindingScope(allocator, client);
     defer binding_scope.deinit(allocator);
     var chat_paths = try discoverChatBindingPaths(allocator, client, binding_scope.asBorrowed());
     defer chat_paths.deinit(allocator);
@@ -3975,7 +3975,7 @@ fn executeChatResume(allocator: std.mem.Allocator, options: args.Options, cmd: a
     const client = try getOrCreateClient(allocator, options);
     try maybeApplyWorkspaceContext(allocator, options, client);
     try fsrpcBootstrap(allocator, client);
-    var binding_scope = try resolveAttachedVenomBindingScope(allocator, client);
+    var binding_scope = try resolveAttachedWorkspaceBindingScope(allocator, client);
     defer binding_scope.deinit(allocator);
     var chat_paths = try discoverChatBindingPaths(allocator, client, binding_scope.asBorrowed());
     defer chat_paths.deinit(allocator);

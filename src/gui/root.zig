@@ -1283,7 +1283,7 @@ const App = struct {
     ui_commands: zui.ui.render.command_list.CommandList,
     ui_inbox: ui_command_inbox.UiCommandInbox,
 
-    projects: std.ArrayListUnmanaged(workspace_types.ProjectSummary) = .{},
+    projects: std.ArrayListUnmanaged(workspace_types.WorkspaceSummary) = .{},
     nodes: std.ArrayListUnmanaged(workspace_types.NodeInfo) = .{},
     workspace_state: ?workspace_types.WorkspaceStatus = null,
     workspace_last_error: ?[]u8 = null,
@@ -5880,7 +5880,7 @@ const App = struct {
         return self.defaultAttachWorkspaceId();
     }
 
-    fn selectedWorkspaceSummary(self: *const App) ?*const workspace_types.ProjectSummary {
+    fn selectedWorkspaceSummary(self: *const App) ?*const workspace_types.WorkspaceSummary {
         const workspace_id = self.selectedWorkspaceId() orelse return null;
         for (self.projects.items) |*project| {
             if (std.mem.eql(u8, project.id, workspace_id)) return project;
@@ -6655,7 +6655,7 @@ const App = struct {
         self.settings_panel.project_id.clearRetainingCapacity();
         try self.settings_panel.project_id.appendSlice(self.allocator, created.id);
         self.settings_panel.project_token.clearRetainingCapacity();
-        if (created.project_token) |token| {
+        if (created.workspace_token) |token| {
             try self.settings_panel.project_token.appendSlice(self.allocator, token);
         }
         try self.syncSettingsToConfig();
@@ -6670,7 +6670,7 @@ const App = struct {
         const current_token = self.selectedWorkspaceToken(project_id);
         try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
 
-        var result = try control_plane.rotateProjectToken(
+        var result = try control_plane.rotateWorkspaceToken(
             self.allocator,
             client,
             &self.message_counter,
@@ -6679,7 +6679,7 @@ const App = struct {
         );
         defer result.deinit(self.allocator);
 
-        const next_token = result.project_token orelse return error.InvalidResponse;
+        const next_token = result.workspace_token orelse return error.InvalidResponse;
         try self.ensureSelectedWorkspaceInSettings(project_id);
         self.settings_panel.project_token.clearRetainingCapacity();
         try self.settings_panel.project_token.appendSlice(self.allocator, next_token);
@@ -6695,7 +6695,7 @@ const App = struct {
         const current_token = self.selectedWorkspaceToken(project_id);
         try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
 
-        var result = try control_plane.revokeProjectToken(
+        var result = try control_plane.revokeWorkspaceToken(
             self.allocator,
             client,
             &self.message_counter,
@@ -14623,7 +14623,7 @@ const App = struct {
                 .{
                     session.session_key,
                     session.agent_id,
-                    session.project_id orelse "(none)",
+                    session.workspace_id orelse "(none)",
                     summary,
                 },
             );
@@ -14634,7 +14634,7 @@ const App = struct {
             .{
                 session.session_key,
                 session.agent_id,
-                session.project_id orelse "(none)",
+                session.workspace_id orelse "(none)",
             },
         );
     }
@@ -14757,7 +14757,7 @@ const App = struct {
         try self.settings_panel.default_session.appendSlice(self.allocator, session.session_key);
         try self.setDefaultAgentInSettings(session.agent_id);
 
-        var effective_workspace_id: ?[]const u8 = session.project_id;
+        var effective_workspace_id: ?[]const u8 = session.workspace_id;
         if (effective_workspace_id == null) {
             effective_workspace_id = self.preferredAttachWorkspaceId();
         }

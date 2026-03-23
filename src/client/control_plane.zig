@@ -126,17 +126,9 @@ pub fn listWorkspaces(
 
     for (workspaces_val.array.items) |item| {
         if (item != .object) return error.InvalidResponse;
-        try workspaces.append(allocator, try parseProjectSummary(allocator, item.object));
+        try workspaces.append(allocator, try parseWorkspaceSummary(allocator, item.object));
     }
     return workspaces;
-}
-
-pub fn listProjects(
-    allocator: std.mem.Allocator,
-    client: anytype,
-    message_counter: *u64,
-) !std.ArrayListUnmanaged(workspace_types.ProjectSummary) {
-    return listWorkspaces(allocator, client, message_counter);
 }
 
 pub fn getWorkspace(
@@ -163,16 +155,7 @@ pub fn getWorkspace(
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidResponse;
 
-    return parseProjectDetail(allocator, parsed.value.object);
-}
-
-pub fn getProject(
-    allocator: std.mem.Allocator,
-    client: anytype,
-    message_counter: *u64,
-    project_id: []const u8,
-) !workspace_types.ProjectDetail {
-    return getWorkspace(allocator, client, message_counter, project_id);
+    return parseWorkspaceDetail(allocator, parsed.value.object);
 }
 
 pub fn createWorkspace(
@@ -232,18 +215,7 @@ pub fn createWorkspace(
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidResponse;
 
-    return parseProjectDetail(allocator, parsed.value.object);
-}
-
-pub fn createProject(
-    allocator: std.mem.Allocator,
-    client: anytype,
-    message_counter: *u64,
-    name: []const u8,
-    vision: ?[]const u8,
-    operator_token: ?[]const u8,
-) !workspace_types.ProjectDetail {
-    return createWorkspace(allocator, client, message_counter, name, vision, "dev", operator_token);
+    return parseWorkspaceDetail(allocator, parsed.value.object);
 }
 
 pub fn activateWorkspace(
@@ -306,7 +278,7 @@ pub fn setProjectMount(
     node_id: []const u8,
     export_name: []const u8,
     mount_path: []const u8,
-) !workspace_types.ProjectDetail {
+) !workspace_types.WorkspaceDetail {
     const normalized_project_token = normalizeWorkspaceToken(project_token);
     const escaped_project = try unified_v2.jsonEscape(allocator, project_id);
     defer allocator.free(escaped_project);
@@ -346,7 +318,7 @@ pub fn setProjectMount(
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidResponse;
-    return parseProjectDetail(allocator, parsed.value.object);
+    return parseWorkspaceDetail(allocator, parsed.value.object);
 }
 
 pub fn setWorkspaceMount(
@@ -380,7 +352,7 @@ pub fn removeProjectMount(
     mount_path: []const u8,
     node_id_filter: ?[]const u8,
     export_name_filter: ?[]const u8,
-) !workspace_types.ProjectDetail {
+) !workspace_types.WorkspaceDetail {
     if ((node_id_filter == null) != (export_name_filter == null)) return error.InvalidArguments;
 
     const normalized_project_token = normalizeWorkspaceToken(project_token);
@@ -428,7 +400,7 @@ pub fn removeProjectMount(
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidResponse;
-    return parseProjectDetail(allocator, parsed.value.object);
+    return parseWorkspaceDetail(allocator, parsed.value.object);
 }
 
 pub fn removeWorkspaceMount(
@@ -557,7 +529,7 @@ pub fn setWorkspaceBind(
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidResponse;
-    return parseProjectDetail(allocator, parsed.value.object);
+    return parseWorkspaceDetail(allocator, parsed.value.object);
 }
 
 pub fn removeWorkspaceBind(
@@ -603,24 +575,22 @@ pub fn removeWorkspaceBind(
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidResponse;
-    return parseProjectDetail(allocator, parsed.value.object);
+    return parseWorkspaceDetail(allocator, parsed.value.object);
 }
 
 pub const WorkspaceTokenMutation = struct {
-    project_id: []u8,
-    project_token: ?[]u8 = null,
+    workspace_id: []u8,
+    workspace_token: ?[]u8 = null,
     updated_at_ms: i64 = 0,
     rotated: bool = false,
     revoked: bool = false,
 
     pub fn deinit(self: *WorkspaceTokenMutation, allocator: std.mem.Allocator) void {
-        allocator.free(self.project_id);
-        if (self.project_token) |value| allocator.free(value);
+        allocator.free(self.workspace_id);
+        if (self.workspace_token) |value| allocator.free(value);
         self.* = undefined;
     }
 };
-
-pub const ProjectTokenMutation = WorkspaceTokenMutation;
 
 pub fn rotateWorkspaceToken(
     allocator: std.mem.Allocator,
@@ -629,30 +599,10 @@ pub fn rotateWorkspaceToken(
     workspace_id: []const u8,
     current_workspace_token: ?[]const u8,
 ) !WorkspaceTokenMutation {
-    return rotateProjectToken(allocator, client, message_counter, workspace_id, current_workspace_token);
-}
-
-pub fn revokeWorkspaceToken(
-    allocator: std.mem.Allocator,
-    client: anytype,
-    message_counter: *u64,
-    workspace_id: []const u8,
-    current_workspace_token: ?[]const u8,
-) !WorkspaceTokenMutation {
-    return revokeProjectToken(allocator, client, message_counter, workspace_id, current_workspace_token);
-}
-
-pub fn rotateProjectToken(
-    allocator: std.mem.Allocator,
-    client: anytype,
-    message_counter: *u64,
-    project_id: []const u8,
-    current_project_token: ?[]const u8,
-) !ProjectTokenMutation {
-    const normalized_project_token = normalizeWorkspaceToken(current_project_token);
-    const escaped_project = try unified_v2.jsonEscape(allocator, project_id);
-    defer allocator.free(escaped_project);
-    const escaped_token = if (normalized_project_token) |value|
+    const normalized_workspace_token = normalizeWorkspaceToken(current_workspace_token);
+    const escaped_workspace = try unified_v2.jsonEscape(allocator, workspace_id);
+    defer allocator.free(escaped_workspace);
+    const escaped_token = if (normalized_workspace_token) |value|
         try unified_v2.jsonEscape(allocator, value)
     else
         null;
@@ -661,7 +611,7 @@ pub fn rotateProjectToken(
     var payload = std.ArrayListUnmanaged(u8){};
     defer payload.deinit(allocator);
     try payload.append(allocator, '{');
-    try payload.writer(allocator).print("\"workspace_id\":\"{s}\"", .{escaped_project});
+    try payload.writer(allocator).print("\"workspace_id\":\"{s}\"", .{escaped_workspace});
     if (escaped_token) |value| {
         try payload.writer(allocator).print(",\"workspace_token\":\"{s}\"", .{value});
     }
@@ -679,20 +629,20 @@ pub fn rotateProjectToken(
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidResponse;
-    return parseProjectTokenMutation(allocator, parsed.value.object);
+    return parseWorkspaceTokenMutation(allocator, parsed.value.object);
 }
 
-pub fn revokeProjectToken(
+pub fn revokeWorkspaceToken(
     allocator: std.mem.Allocator,
     client: anytype,
     message_counter: *u64,
-    project_id: []const u8,
-    current_project_token: ?[]const u8,
-) !ProjectTokenMutation {
-    const normalized_project_token = normalizeWorkspaceToken(current_project_token);
-    const escaped_project = try unified_v2.jsonEscape(allocator, project_id);
-    defer allocator.free(escaped_project);
-    const escaped_token = if (normalized_project_token) |value|
+    workspace_id: []const u8,
+    current_workspace_token: ?[]const u8,
+) !WorkspaceTokenMutation {
+    const normalized_workspace_token = normalizeWorkspaceToken(current_workspace_token);
+    const escaped_workspace = try unified_v2.jsonEscape(allocator, workspace_id);
+    defer allocator.free(escaped_workspace);
+    const escaped_token = if (normalized_workspace_token) |value|
         try unified_v2.jsonEscape(allocator, value)
     else
         null;
@@ -701,7 +651,7 @@ pub fn revokeProjectToken(
     var payload = std.ArrayListUnmanaged(u8){};
     defer payload.deinit(allocator);
     try payload.append(allocator, '{');
-    try payload.writer(allocator).print("\"workspace_id\":\"{s}\"", .{escaped_project});
+    try payload.writer(allocator).print("\"workspace_id\":\"{s}\"", .{escaped_workspace});
     if (escaped_token) |value| {
         try payload.writer(allocator).print(",\"workspace_token\":\"{s}\"", .{value});
     }
@@ -711,7 +661,7 @@ pub fn revokeProjectToken(
         allocator,
         client,
         message_counter,
-        "control.workspace_token_revoke",
+        "control.workspace_token_rotate",
         payload.items,
     );
     defer allocator.free(payload_json);
@@ -719,7 +669,7 @@ pub fn revokeProjectToken(
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidResponse;
-    return parseProjectTokenMutation(allocator, parsed.value.object);
+    return parseWorkspaceTokenMutation(allocator, parsed.value.object);
 }
 
 pub fn listNodes(
@@ -1262,10 +1212,10 @@ pub fn reconcileStatus(
     return parseReconcileStatus(allocator, parsed.value.object);
 }
 
-fn parseProjectSummary(
+fn parseWorkspaceSummary(
     allocator: std.mem.Allocator,
     obj: std.json.ObjectMap,
-) !workspace_types.ProjectSummary {
+) !workspace_types.WorkspaceSummary {
     return .{
         .id = try dupRequiredStringAny(allocator, obj, &.{ "id", "workspace_id", "project_id" }),
         .name = try dupRequiredString(allocator, obj, "name"),
@@ -1282,11 +1232,11 @@ fn parseProjectSummary(
     };
 }
 
-fn parseProjectDetail(
+fn parseWorkspaceDetail(
     allocator: std.mem.Allocator,
     obj: std.json.ObjectMap,
-) !workspace_types.ProjectDetail {
-    var detail = workspace_types.ProjectDetail{
+) !workspace_types.WorkspaceDetail {
+    var detail = workspace_types.WorkspaceDetail{
         .id = try dupRequiredStringAny(allocator, obj, &.{ "id", "workspace_id", "project_id" }),
         .name = try dupRequiredString(allocator, obj, "name"),
         .vision = try dupOptionalString(allocator, obj, "vision") orelse try allocator.dupe(u8, ""),
@@ -1297,7 +1247,7 @@ fn parseProjectDetail(
         .token_locked = try getOptionalBool(obj, "token_locked", false),
         .created_at_ms = try getOptionalI64(obj, "created_at_ms", 0),
         .updated_at_ms = try getOptionalI64(obj, "updated_at_ms", 0),
-        .project_token = try dupOptionalStringAny(allocator, obj, &.{ "workspace_token", "project_token" }),
+        .workspace_token = try dupOptionalStringAny(allocator, obj, &.{ "workspace_token", "project_token" }),
     };
     errdefer detail.deinit(allocator);
 
@@ -1320,13 +1270,13 @@ fn parseProjectDetail(
     return detail;
 }
 
-fn parseProjectTokenMutation(
+fn parseWorkspaceTokenMutation(
     allocator: std.mem.Allocator,
     obj: std.json.ObjectMap,
-) !ProjectTokenMutation {
+) !WorkspaceTokenMutation {
     return .{
-        .project_id = try dupRequiredStringAny(allocator, obj, &.{ "workspace_id", "project_id", "id" }),
-        .project_token = try dupOptionalNullableStringAny(allocator, obj, &.{ "workspace_token", "project_token" }),
+        .workspace_id = try dupRequiredStringAny(allocator, obj, &.{ "workspace_id", "project_id", "id" }),
+        .workspace_token = try dupOptionalNullableStringAny(allocator, obj, &.{ "workspace_token", "project_token" }),
         .updated_at_ms = try getOptionalI64(obj, "updated_at_ms", 0),
         .rotated = try getOptionalBool(obj, "rotated", false),
         .revoked = try getOptionalBool(obj, "revoked", false),
@@ -1377,7 +1327,7 @@ fn parseWorkspaceStatus(
 ) !workspace_types.WorkspaceStatus {
     var status = workspace_types.WorkspaceStatus{
         .agent_id = try dupRequiredString(allocator, obj, "agent_id"),
-        .project_id = try dupOptionalNullableStringAny(allocator, obj, &.{ "workspace_id", "project_id" }),
+        .workspace_id = try dupOptionalNullableStringAny(allocator, obj, &.{ "workspace_id", "project_id" }),
         .workspace_root = try dupOptionalNullableString(allocator, obj, "workspace_root"),
     };
     errdefer status.deinit(allocator);
@@ -1441,7 +1391,7 @@ fn parseSessionAttachStatus(
     var status = workspace_types.SessionAttachStatus{
         .session_key = try dupRequiredString(allocator, obj, "session_key"),
         .agent_id = try dupRequiredString(allocator, obj, "agent_id"),
-        .project_id = try dupOptionalNullableString(allocator, obj, "project_id"),
+        .workspace_id = try dupOptionalNullableStringAny(allocator, obj, &.{ "workspace_id", "project_id" }),
         .state = try allocator.dupe(u8, ""),
         .runtime_ready = false,
         .mount_ready = false,
@@ -1471,7 +1421,7 @@ fn parseSessionSummary(
     return .{
         .session_key = try dupRequiredString(allocator, obj, "session_key"),
         .agent_id = try dupRequiredString(allocator, obj, "agent_id"),
-        .project_id = try dupOptionalNullableString(allocator, obj, "project_id"),
+        .workspace_id = try dupOptionalNullableStringAny(allocator, obj, &.{ "workspace_id", "project_id" }),
         .last_active_ms = try getOptionalI64(obj, "last_active_ms", 0),
         .message_count = try getOptionalU64(obj, "message_count", 0),
         .summary = try dupOptionalNullableString(allocator, obj, "summary"),
@@ -1566,14 +1516,14 @@ fn parseReconcileStatus(
         }
     }
 
-    if (obj.get("projects")) |projects_val| {
-        if (projects_val != .array) return error.InvalidResponse;
-        for (projects_val.array.items) |item| {
+    if (obj.get("workspaces") orelse obj.get("projects")) |workspaces_val| {
+        if (workspaces_val != .array) return error.InvalidResponse;
+        for (workspaces_val.array.items) |item| {
             if (item != .object) return error.InvalidResponse;
-            const project_id = try dupRequiredStringAny(allocator, item.object, &.{ "project_id", "id" });
-            errdefer allocator.free(project_id);
-            try status.projects.append(allocator, .{
-                .project_id = project_id,
+            const workspace_id = try dupRequiredStringAny(allocator, item.object, &.{ "workspace_id", "project_id", "id" });
+            errdefer allocator.free(workspace_id);
+            try status.workspaces.append(allocator, .{
+                .workspace_id = workspace_id,
                 .mounts = @intCast(try getOptionalU64(item.object, "mounts", 0)),
                 .drift_count = @intCast(try getOptionalU64(item.object, "drift_count", 0)),
                 .queue_depth = @intCast(try getOptionalU64(item.object, "queue_depth", 0)),
@@ -1739,7 +1689,7 @@ test "normalizeWorkspaceToken trims empty and preserves non-empty tokens" {
     try std.testing.expectEqualStrings(long_token, normalizeWorkspaceToken(long_token).?);
 }
 
-test "parseProjectSummary accepts project_id key" {
+test "parseWorkspaceSummary accepts project_id key" {
     const allocator = std.testing.allocator;
     const json =
         \\{
@@ -1754,7 +1704,7 @@ test "parseProjectSummary accepts project_id key" {
     defer parsed.deinit();
     try std.testing.expect(parsed.value == .object);
 
-    var summary = try parseProjectSummary(allocator, parsed.value.object);
+    var summary = try parseWorkspaceSummary(allocator, parsed.value.object);
     defer summary.deinit(allocator);
 
     try std.testing.expectEqualStrings("proj-1", summary.id);
@@ -1764,7 +1714,7 @@ test "parseProjectSummary accepts project_id key" {
     try std.testing.expectEqual(@as(usize, 2), summary.mount_count);
 }
 
-test "parseProjectDetail accepts project_id key" {
+test "parseWorkspaceDetail accepts project_id key" {
     const allocator = std.testing.allocator;
     const json =
         \\{
@@ -1781,7 +1731,7 @@ test "parseProjectDetail accepts project_id key" {
     defer parsed.deinit();
     try std.testing.expect(parsed.value == .object);
 
-    var detail = try parseProjectDetail(allocator, parsed.value.object);
+    var detail = try parseWorkspaceDetail(allocator, parsed.value.object);
     defer detail.deinit(allocator);
 
     try std.testing.expectEqualStrings("proj-7", detail.id);
@@ -1791,7 +1741,7 @@ test "parseProjectDetail accepts project_id key" {
     try std.testing.expectEqual(@as(usize, 1), detail.mounts.items.len);
 }
 
-test "parseProjectTokenMutation accepts nullable token" {
+test "parseWorkspaceTokenMutation accepts nullable token" {
     const allocator = std.testing.allocator;
     const json =
         \\{
@@ -1805,11 +1755,11 @@ test "parseProjectTokenMutation accepts nullable token" {
     defer parsed.deinit();
     try std.testing.expect(parsed.value == .object);
 
-    var mutation = try parseProjectTokenMutation(allocator, parsed.value.object);
+    var mutation = try parseWorkspaceTokenMutation(allocator, parsed.value.object);
     defer mutation.deinit(allocator);
 
-    try std.testing.expectEqualStrings("proj-9", mutation.project_id);
-    try std.testing.expect(mutation.project_token == null);
+    try std.testing.expectEqualStrings("proj-9", mutation.workspace_id);
+    try std.testing.expect(mutation.workspace_token == null);
     try std.testing.expectEqual(true, mutation.revoked);
     try std.testing.expectEqual(@as(i64, 1234), mutation.updated_at_ms);
 }
@@ -1866,7 +1816,7 @@ test "parseSessionList reads active session and entries" {
     try std.testing.expectEqual(@as(usize, 2), list.sessions.items.len);
     try std.testing.expectEqualStrings("work", list.sessions.items[1].session_key);
     try std.testing.expectEqualStrings("bob", list.sessions.items[1].agent_id);
-    try std.testing.expect(list.sessions.items[1].project_id == null);
+    try std.testing.expect(list.sessions.items[1].workspace_id == null);
 }
 
 test "parseSessionCloseResult reads close response" {

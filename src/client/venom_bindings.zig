@@ -1,8 +1,8 @@
 const std = @import("std");
 
-pub const BindingScope = struct {
+pub const WorkspaceBindingScope = struct {
     agent_id: ?[]const u8 = null,
-    project_id: ?[]const u8 = null,
+    workspace_id: ?[]const u8 = null,
 };
 
 pub const VenomBinding = struct {
@@ -44,7 +44,7 @@ pub const ChatBindingPaths = struct {
 pub fn readPreferredVenomBinding(
     allocator: std.mem.Allocator,
     reader: anytype,
-    scope: BindingScope,
+    scope: WorkspaceBindingScope,
     venom_id: []const u8,
 ) !VenomBinding {
     if (scope.agent_id) |agent_id| {
@@ -60,10 +60,10 @@ pub fn readPreferredVenomBinding(
         }
     }
 
-    if (scope.project_id) |project_id| {
-        const index_path = try std.fmt.allocPrint(allocator, "/projects/{s}/venoms/VENOMS.json", .{project_id});
+    if (scope.workspace_id) |workspace_id| {
+        const index_path = try std.fmt.allocPrint(allocator, "/projects/{s}/venoms/VENOMS.json", .{workspace_id});
         defer allocator.free(index_path);
-        const preferred_prefix = try std.fmt.allocPrint(allocator, "/projects/{s}/venoms/", .{project_id});
+        const preferred_prefix = try std.fmt.allocPrint(allocator, "/projects/{s}/venoms/", .{workspace_id});
         defer allocator.free(preferred_prefix);
         if (readVenomBindingFromIndexPath(allocator, reader, index_path, preferred_prefix, venom_id)) |binding| {
             return binding;
@@ -79,7 +79,7 @@ pub fn readPreferredVenomBinding(
 pub fn discoverChatBindingPaths(
     allocator: std.mem.Allocator,
     reader: anytype,
-    scope: BindingScope,
+    scope: WorkspaceBindingScope,
 ) !ChatBindingPaths {
     var binding = readPreferredVenomBinding(allocator, reader, scope, "chat") catch VenomBinding{
         .venom_path = try allocator.dupe(u8, "/global/chat"),
