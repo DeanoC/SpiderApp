@@ -1219,7 +1219,7 @@ fn executeWorkspaceUp(allocator: std.mem.Allocator, options: args.Options, cmd: 
     if (mounts.items.len == 0) {
         var default_fs_mount = discoverDefaultFsMount(allocator, client, .{
             .agent_id = cfg.selectedAgent(),
-            .project_id = explicit_project_id orelse cfg.selectedWorkspace(),
+            .workspace_id = explicit_project_id orelse cfg.selectedWorkspace(),
         }) catch |err| {
             if (err == error.ServiceNotFound) {
                 logger.err("workspace up requires at least one registered fs Venom (or explicit --mount)", .{});

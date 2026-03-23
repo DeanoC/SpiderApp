@@ -5889,8 +5889,8 @@ const App = struct {
     }
 
     fn selectedWorkspaceTokenLocked(self: *const App) ?bool {
-        const workspace = self.selectedWorkspaceSummary() orelse return null;
-        return workspace.token_locked;
+        const selected_workspace = self.selectedWorkspaceSummary() orelse return null;
+        return selected_workspace.token_locked;
     }
 
     fn ensureSelectedWorkspaceInSettings(self: *App, workspace_id: []const u8) !void {
@@ -14925,8 +14925,8 @@ const App = struct {
         workspace_id: ?[]const u8,
         workspace_token: ?[]const u8,
     ) ![]u8 {
-        const workspace = workspace_id orelse return error.ProjectIdRequired;
-        const trimmed_workspace = std.mem.trim(u8, workspace, " \t\r\n");
+        const requested_workspace = workspace_id orelse return error.ProjectIdRequired;
+        const trimmed_workspace = std.mem.trim(u8, requested_workspace, " \t\r\n");
         if (trimmed_workspace.len == 0) return error.ProjectIdRequired;
         if (!isValidSessionKeyForAttach(session_key)) return error.InvalidSessionKey;
         if (!isValidAgentIdForAttach(agent_id)) return error.InvalidAgentId;
