@@ -3,6 +3,7 @@ const ws = @import("websocket");
 
 const ws_client_max_message_bytes: usize = 16 * 1024 * 1024;
 const ws_client_read_buffer_bytes: usize = 16 * 1024;
+const max_pending_control_frames: usize = 16;
 
 const MessageQueue = struct {
     const capacity: usize = 4096;
@@ -614,6 +615,14 @@ pub const WebSocketClient = struct {
             if (waiter) |matched| {
                 self.waiters_mutex.unlock();
                 self.signalWaiter(matched, msg);
+                return true;
+            }
+            if (!self.pending_control_frames.contains(request_id) and
+                self.pending_control_frames.count() >= max_pending_control_frames)
+            {
+                self.waiters_mutex.unlock();
+                std.log.warn("[WS] dropping unmatched late control reply id={s}", .{request_id});
+                self.allocator.free(msg);
                 return true;
             }
             const key = self.allocator.dupe(u8, request_id) catch {
