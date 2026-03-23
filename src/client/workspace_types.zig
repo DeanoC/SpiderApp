@@ -36,14 +36,14 @@ pub const DriftItem = struct {
     }
 };
 
-pub const ReconcileProjectStatus = struct {
-    project_id: []u8,
+pub const ReconcileWorkspaceStatus = struct {
+    workspace_id: []u8,
     mounts: usize,
     drift_count: usize,
     queue_depth: usize,
 
-    pub fn deinit(self: *ReconcileProjectStatus, allocator: std.mem.Allocator) void {
-        allocator.free(self.project_id);
+    pub fn deinit(self: *ReconcileWorkspaceStatus, allocator: std.mem.Allocator) void {
+        allocator.free(self.workspace_id);
         self.* = undefined;
     }
 };
@@ -57,15 +57,15 @@ pub const ReconcileStatus = struct {
     failed_ops_total: u64 = 0,
     cycles_total: u64 = 0,
     failed_ops: std.ArrayListUnmanaged([]u8) = .{},
-    projects: std.ArrayListUnmanaged(ReconcileProjectStatus) = .{},
+    workspaces: std.ArrayListUnmanaged(ReconcileWorkspaceStatus) = .{},
 
     pub fn deinit(self: *ReconcileStatus, allocator: std.mem.Allocator) void {
         if (self.reconcile_state) |value| allocator.free(value);
         if (self.last_error) |value| allocator.free(value);
         for (self.failed_ops.items) |value| allocator.free(value);
         self.failed_ops.deinit(allocator);
-        for (self.projects.items) |*project| project.deinit(allocator);
-        self.projects.deinit(allocator);
+        for (self.workspaces.items) |*workspace| workspace.deinit(allocator);
+        self.workspaces.deinit(allocator);
         self.* = undefined;
     }
 };
@@ -117,7 +117,7 @@ pub const WorkspaceDetail = struct {
     token_locked: bool = false,
     created_at_ms: i64,
     updated_at_ms: i64,
-    project_token: ?[]u8 = null,
+    workspace_token: ?[]u8 = null,
     mounts: std.ArrayListUnmanaged(MountView) = .{},
     binds: std.ArrayListUnmanaged(WorkspaceBindView) = .{},
 
@@ -128,7 +128,7 @@ pub const WorkspaceDetail = struct {
         allocator.free(self.status);
         if (self.template_id) |value| allocator.free(value);
         if (self.kind) |value| allocator.free(value);
-        if (self.project_token) |value| allocator.free(value);
+        if (self.workspace_token) |value| allocator.free(value);
         for (self.mounts.items) |*mount| mount.deinit(allocator);
         self.mounts.deinit(allocator);
         for (self.binds.items) |*bind| bind.deinit(allocator);
@@ -201,7 +201,7 @@ pub const AgentInfo = struct {
 
 pub const WorkspaceStatus = struct {
     agent_id: []u8,
-    project_id: ?[]u8 = null,
+    workspace_id: ?[]u8 = null,
     workspace_root: ?[]u8 = null,
     mounts: std.ArrayListUnmanaged(MountView) = .{},
     desired_mounts: std.ArrayListUnmanaged(MountView) = .{},
@@ -220,7 +220,7 @@ pub const WorkspaceStatus = struct {
 
     pub fn deinit(self: *WorkspaceStatus, allocator: std.mem.Allocator) void {
         allocator.free(self.agent_id);
-        if (self.project_id) |value| allocator.free(value);
+        if (self.workspace_id) |value| allocator.free(value);
         if (self.workspace_root) |value| allocator.free(value);
         for (self.mounts.items) |*mount| mount.deinit(allocator);
         self.mounts.deinit(allocator);
@@ -239,7 +239,7 @@ pub const WorkspaceStatus = struct {
 pub const SessionAttachStatus = struct {
     session_key: []u8,
     agent_id: []u8,
-    project_id: ?[]u8 = null,
+    workspace_id: ?[]u8 = null,
     state: []u8,
     runtime_ready: bool = false,
     mount_ready: bool = false,
@@ -250,7 +250,7 @@ pub const SessionAttachStatus = struct {
     pub fn deinit(self: *SessionAttachStatus, allocator: std.mem.Allocator) void {
         allocator.free(self.session_key);
         allocator.free(self.agent_id);
-        if (self.project_id) |value| allocator.free(value);
+        if (self.workspace_id) |value| allocator.free(value);
         allocator.free(self.state);
         if (self.error_code) |value| allocator.free(value);
         if (self.error_message) |value| allocator.free(value);
@@ -261,7 +261,7 @@ pub const SessionAttachStatus = struct {
 pub const SessionSummary = struct {
     session_key: []u8,
     agent_id: []u8,
-    project_id: ?[]u8 = null,
+    workspace_id: ?[]u8 = null,
     last_active_ms: i64 = 0,
     message_count: u64 = 0,
     summary: ?[]u8 = null,
@@ -269,7 +269,7 @@ pub const SessionSummary = struct {
     pub fn deinit(self: *SessionSummary, allocator: std.mem.Allocator) void {
         allocator.free(self.session_key);
         allocator.free(self.agent_id);
-        if (self.project_id) |value| allocator.free(value);
+        if (self.workspace_id) |value| allocator.free(value);
         if (self.summary) |value| allocator.free(value);
         self.* = undefined;
     }
@@ -309,17 +309,10 @@ pub const SessionRestoreResult = struct {
     }
 };
 
-pub const ProjectSummary = WorkspaceSummary;
-pub const ProjectDetail = WorkspaceDetail;
-
 pub fn deinitWorkspaceList(allocator: std.mem.Allocator, workspaces: *std.ArrayListUnmanaged(WorkspaceSummary)) void {
     for (workspaces.items) |*workspace| workspace.deinit(allocator);
     workspaces.deinit(allocator);
     workspaces.* = .{};
-}
-
-pub fn deinitProjectList(allocator: std.mem.Allocator, projects: *std.ArrayListUnmanaged(ProjectSummary)) void {
-    deinitWorkspaceList(allocator, projects);
 }
 
 pub fn deinitWorkspaceTemplateList(

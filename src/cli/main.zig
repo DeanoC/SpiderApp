@@ -33,8 +33,8 @@ const session_status_timeout_ms: i64 = 5_000;
 const session_warming_wait_timeout_ms: i64 = 30_000;
 const session_warming_poll_interval_ms: u64 = 250;
 const app_local_node_lease_ttl_ms: u64 = 15 * 60 * 1000;
-const system_project_id = "system";
-const system_agent_id = "mother";
+const system_workspace_id = "system";
+const system_agent_id = "spiderweb";
 
 const ChatProgressOptions = struct {
     args: []const []const u8,
@@ -423,20 +423,6 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
                 },
             }
         },
-        .pairing => {
-            switch (cmd.verb) {
-                .pending => try executePairingPending(allocator, options, cmd),
-                .approve => try executePairingApprove(allocator, options, cmd),
-                .deny => try executePairingDeny(allocator, options, cmd),
-                .list => try executePairingInviteList(allocator, options, cmd),
-                .create => try executePairingInviteCreate(allocator, options, cmd),
-                .refresh => try executePairingRefresh(allocator, options, cmd),
-                else => {
-                    logger.err("Unknown pairing verb", .{});
-                    return error.InvalidArguments;
-                },
-            }
-        },
         .workspace => {
             switch (cmd.verb) {
                 .list => try executeWorkspaceList(allocator, options, cmd),
@@ -462,69 +448,6 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
                 .rotate => try executeAuthRotate(allocator, options, cmd),
                 else => {
                     logger.err("Unknown auth verb", .{});
-                    return error.InvalidArguments;
-                },
-            }
-        },
-        .goal => {
-            switch (cmd.verb) {
-                .list => {
-                    try stdout.print("Goal list not yet implemented\n", .{});
-                },
-                .create => {
-                    if (cmd.args.len == 0) {
-                        logger.err("goal create requires a description", .{});
-                        return error.InvalidArguments;
-                    }
-                    const desc = try std.mem.join(allocator, " ", cmd.args);
-                    defer allocator.free(desc);
-                    try stdout.print("Would create goal: \"{s}\"\n", .{desc});
-                },
-                .complete => {
-                    if (cmd.args.len == 0) {
-                        logger.err("goal complete requires a goal ID", .{});
-                        return error.InvalidArguments;
-                    }
-                    try stdout.print("Would complete goal: {s}\n", .{cmd.args[0]});
-                },
-                else => {
-                    logger.err("Unknown goal verb", .{});
-                    return error.InvalidArguments;
-                },
-            }
-        },
-        .task => {
-            switch (cmd.verb) {
-                .list => {
-                    try stdout.print("Task list not yet implemented\n", .{});
-                },
-                .info => {
-                    if (cmd.args.len == 0) {
-                        logger.err("task info requires a task ID", .{});
-                        return error.InvalidArguments;
-                    }
-                    try stdout.print("Would show task info: {s}\n", .{cmd.args[0]});
-                },
-                else => {
-                    logger.err("Unknown task verb", .{});
-                    return error.InvalidArguments;
-                },
-            }
-        },
-        .worker => {
-            switch (cmd.verb) {
-                .list => {
-                    try stdout.print("Worker list not yet implemented\n", .{});
-                },
-                .logs => {
-                    if (cmd.args.len == 0) {
-                        logger.err("worker logs requires a worker ID", .{});
-                        return error.InvalidArguments;
-                    }
-                    try stdout.print("Would show logs for worker: {s}\n", .{cmd.args[0]});
-                },
-                else => {
-                    logger.err("Unknown worker verb", .{});
                     return error.InvalidArguments;
                 },
             }
@@ -646,8 +569,8 @@ fn isUserScopedAgentId(agent_id: []const u8) bool {
     return std.mem.eql(u8, agent_id, "user") or std.mem.eql(u8, agent_id, "user-isolated");
 }
 
-fn isSystemProjectId(project_id: []const u8) bool {
-    return std.mem.eql(u8, project_id, system_project_id);
+fn isSystemWorkspaceId(workspace_id: []const u8) bool {
+    return std.mem.eql(u8, workspace_id, system_workspace_id);
 }
 
 fn isSystemAgentId(agent_id: []const u8) bool {
@@ -698,7 +621,7 @@ fn fetchFirstNonSystemAgent(
     return error.NoProjectCompatibleAgent;
 }
 
-fn resolveAttachAgentForProject(
+fn resolveAttachAgentForWorkspace(
     allocator: std.mem.Allocator,
     options: args.Options,
     cfg: *const Config,
@@ -707,7 +630,7 @@ fn resolveAttachAgentForProject(
     project_id: []const u8,
 ) ![]u8 {
     const role = effectiveRole(options, cfg);
-    if (role == .user and isSystemProjectId(project_id)) {
+    if (role == .user and isSystemWorkspaceId(project_id)) {
         return error.UserRoleCannotAttachSystemProject;
     }
     var resolved_agent = if (cfg.selectedAgent()) |selected_agent| blk: {
@@ -721,7 +644,7 @@ fn resolveAttachAgentForProject(
         resolved_agent = try fetchDefaultAgentFromSessionList(allocator, client, preferred_session_key);
     }
 
-    if (isSystemProjectId(project_id)) {
+    if (isSystemWorkspaceId(project_id)) {
         if (!isSystemAgentId(resolved_agent)) {
             allocator.free(resolved_agent);
             resolved_agent = try allocator.dupe(u8, system_agent_id);
@@ -743,7 +666,7 @@ fn sessionStatusMatchesTarget(
     project_id: []const u8,
 ) bool {
     if (!std.mem.eql(u8, status.agent_id, agent_id)) return false;
-    const attached_project_id = status.project_id orelse return false;
+    const attached_project_id = status.workspace_id orelse return false;
     return std.mem.eql(u8, attached_project_id, project_id);
 }
 
@@ -777,7 +700,7 @@ fn waitForSessionReady(
         if (!sessionStatusMatchesTarget(&status, agent_id, project_id)) {
             logger.err(
                 "session binding changed while waiting: expected {s}@{s}, got {s}@{s}",
-                .{ agent_id, project_id, status.agent_id, status.project_id orelse "(none)" },
+                .{ agent_id, project_id, status.agent_id, status.workspace_id orelse "(none)" },
             );
             return error.SessionAttachMismatch;
         }
@@ -817,7 +740,7 @@ fn waitForSessionReady(
 
 fn printWorkspaceStatus(stdout: anytype, status: *const workspace_types.WorkspaceStatus, verbose: bool) !void {
     try stdout.print("Agent: {s}\n", .{status.agent_id});
-    if (status.project_id) |project_id| {
+    if (status.workspace_id) |project_id| {
         try stdout.print("Workspace: {s}\n", .{project_id});
     } else {
         try stdout.print("Workspace: (none)\n", .{});
@@ -890,7 +813,7 @@ fn maybeApplyWorkspaceContext(
 
     const token = if (options.workspace_token) |value| value else cfg.getWorkspaceToken(project_id);
     const session_key = resolveSessionKey(&cfg);
-    const attach_agent = resolveAttachAgentForProject(
+    const attach_agent = resolveAttachAgentForWorkspace(
         allocator,
         options,
         &cfg,
@@ -1049,7 +972,7 @@ fn executeWorkspaceInfo(allocator: std.mem.Allocator, options: args.Options, cmd
     try stdout.print("  Template: {s}\n", .{detail.template_id orelse "dev"});
     try stdout.print("  Created: {d}\n", .{detail.created_at_ms});
     try stdout.print("  Updated: {d}\n", .{detail.updated_at_ms});
-    if (detail.project_token) |token| {
+    if (detail.workspace_token) |token| {
         try stdout.print("  Workspace token: {s}\n", .{token});
     }
     try stdout.print("  Mounts ({d}):\n", .{detail.mounts.items.len});
@@ -1122,7 +1045,7 @@ fn executeWorkspaceCreate(allocator: std.mem.Allocator, options: args.Options, c
     defer created.deinit(allocator);
 
     try cfg.setSelectedWorkspace(created.id);
-    if (created.project_token) |token| {
+    if (created.workspace_token) |token| {
         try cfg.setWorkspaceToken(created.id, token);
     }
     try cfg.save();
@@ -1133,12 +1056,12 @@ fn executeWorkspaceCreate(allocator: std.mem.Allocator, options: args.Options, c
     try stdout.print("  Status: {s}\n", .{created.status});
     try stdout.print("  Template: {s}\n", .{created.template_id orelse "dev"});
     try stdout.print("  Created: {d}\n", .{created.created_at_ms});
-    if (created.project_token) |token| {
+    if (created.workspace_token) |token| {
         try stdout.print("  Workspace token: {s}\n", .{token});
     }
     try stdout.print("  Saved as selected workspace in local config\n", .{});
 
-    if (created.project_token) |token| {
+    if (created.workspace_token) |token| {
         var status = control_plane.activateWorkspace(
             allocator,
             client,
@@ -1296,7 +1219,7 @@ fn executeWorkspaceUp(allocator: std.mem.Allocator, options: args.Options, cmd: 
     if (mounts.items.len == 0) {
         var default_fs_mount = discoverDefaultFsMount(allocator, client, .{
             .agent_id = cfg.selectedAgent(),
-            .project_id = explicit_project_id orelse cfg.selectedWorkspace(),
+            .workspace_id = explicit_project_id orelse cfg.selectedWorkspace(),
         }) catch |err| {
             if (err == error.ServiceNotFound) {
                 logger.err("workspace up requires at least one registered fs Venom (or explicit --mount)", .{});
@@ -1914,7 +1837,7 @@ fn executeAgentInfo(allocator: std.mem.Allocator, options: args.Options, cmd: ar
 fn printSessionAttachStatus(stdout: anytype, status: *const workspace_types.SessionAttachStatus) !void {
     try stdout.print("Session: {s}\n", .{status.session_key});
     try stdout.print("  Agent: {s}\n", .{status.agent_id});
-    if (status.project_id) |project_id| {
+    if (status.workspace_id) |project_id| {
         try stdout.print("  Workspace: {s}\n", .{project_id});
     } else {
         try stdout.print("  Workspace: (none)\n", .{});
@@ -1958,7 +1881,7 @@ fn executeSessionList(allocator: std.mem.Allocator, options: args.Options, cmd: 
     try stdout.print("Sessions:\n", .{});
     for (list.sessions.items) |session| {
         const marker = if (std.mem.eql(u8, session.session_key, list.active_session)) "*" else " ";
-        if (session.project_id) |project_id| {
+        if (session.workspace_id) |project_id| {
             try stdout.print(
                 "{s} {s}  agent={s}  workspace={s}\n",
                 .{ marker, session.session_key, session.agent_id, project_id },
@@ -2029,7 +1952,7 @@ fn executeSessionHistory(allocator: std.mem.Allocator, options: args.Options, cm
             .{
                 session.session_key,
                 session.agent_id,
-                session.project_id orelse "(none)",
+                session.workspace_id orelse "(none)",
                 session.last_active_ms,
                 session.message_count,
             },
@@ -2064,16 +1987,16 @@ fn executeSessionStatus(allocator: std.mem.Allocator, options: args.Options, cmd
 const SessionAttachArgs = struct {
     session_key: []const u8,
     agent_id: []const u8,
-    project_id: ?[]const u8 = null,
-    project_token: ?[]const u8 = null,
+    workspace_id: ?[]const u8 = null,
+    workspace_token: ?[]const u8 = null,
 };
 
 fn parseSessionAttachArgs(options: args.Options, cmd: args.Command) !SessionAttachArgs {
     var parsed = SessionAttachArgs{
         .session_key = undefined,
         .agent_id = undefined,
-        .project_id = options.workspace,
-        .project_token = options.workspace_token,
+        .workspace_id = options.workspace,
+        .workspace_token = options.workspace_token,
     };
 
     var positional: [2][]const u8 = undefined;
@@ -2084,13 +2007,13 @@ fn parseSessionAttachArgs(options: args.Options, cmd: args.Command) !SessionAtta
         if (std.mem.eql(u8, arg, "--workspace")) {
             i += 1;
             if (i >= cmd.args.len) return error.InvalidArguments;
-            parsed.project_id = cmd.args[i];
+            parsed.workspace_id = cmd.args[i];
             continue;
         }
         if (std.mem.eql(u8, arg, "--workspace-token")) {
             i += 1;
             if (i >= cmd.args.len) return error.InvalidArguments;
-            parsed.project_token = cmd.args[i];
+            parsed.workspace_token = cmd.args[i];
             continue;
         }
         if (std.mem.startsWith(u8, arg, "--")) return error.InvalidArguments;
@@ -2110,7 +2033,7 @@ fn executeSessionAttach(allocator: std.mem.Allocator, options: args.Options, cmd
         logger.err("session attach usage: session attach <session_key> <agent_id> --workspace <workspace_id> [--workspace-token <token>]", .{});
         return error.InvalidArguments;
     };
-    const project_id = parsed.project_id orelse {
+    const workspace_id = parsed.workspace_id orelse {
         logger.err("session attach requires --workspace <workspace_id>", .{});
         return error.InvalidArguments;
     };
@@ -2125,8 +2048,8 @@ fn executeSessionAttach(allocator: std.mem.Allocator, options: args.Options, cmd
         &g_control_request_counter,
         parsed.session_key,
         parsed.agent_id,
-        project_id,
-        parsed.project_token,
+        workspace_id,
+        parsed.workspace_token,
     );
     defer status.deinit(allocator);
     try printSessionAttachStatus(stdout, &status);
@@ -2190,7 +2113,7 @@ fn executeSessionRestore(allocator: std.mem.Allocator, options: args.Options, cm
         return;
     }
     const session = restored.session.?;
-    const attach_project_id = session.project_id orelse {
+    const attach_project_id = session.workspace_id orelse {
         logger.err(
             "restored session has no workspace_id; choose a workspace and run: session attach {s} {s} --workspace <workspace_id>",
             .{ session.session_key, session.agent_id },
@@ -2203,13 +2126,13 @@ fn executeSessionRestore(allocator: std.mem.Allocator, options: args.Options, cm
         cfg.getWorkspaceToken(attach_project_id);
     try stdout.print(
         "Restoring session {s} (agent={s}, workspace={s})\n",
-        .{ session.session_key, session.agent_id, session.project_id orelse "(none)" },
+        .{ session.session_key, session.agent_id, session.workspace_id orelse "(none)" },
     );
 
-    const attach_agent = if (isSystemProjectId(attach_project_id))
+    const attach_agent = if (isSystemWorkspaceId(attach_project_id))
         try allocator.dupe(u8, system_agent_id)
     else if (isSystemAgentId(session.agent_id))
-        resolveAttachAgentForProject(
+        resolveAttachAgentForWorkspace(
             allocator,
             options,
             &cfg,
@@ -2952,34 +2875,6 @@ fn executeNodeDeny(allocator: std.mem.Allocator, options: args.Options, cmd: arg
     );
 }
 
-const pairing_pending_path = "/debug/pairing/pending.json";
-const pairing_last_result_path = "/debug/pairing/last_result.json";
-const pairing_last_error_path = "/debug/pairing/last_error.json";
-const pairing_refresh_path = "/debug/pairing/control/refresh";
-const pairing_approve_path = "/debug/pairing/control/approve.json";
-const pairing_deny_path = "/debug/pairing/control/deny.json";
-const pairing_invites_active_path = "/debug/pairing/invites/active.json";
-const pairing_invites_last_result_path = "/debug/pairing/invites/last_result.json";
-const pairing_invites_last_error_path = "/debug/pairing/invites/last_error.json";
-const pairing_invites_refresh_path = "/debug/pairing/invites/control/refresh";
-const pairing_invites_create_path = "/debug/pairing/invites/control/create.json";
-
-fn appendOptionalOperatorToken(
-    allocator: std.mem.Allocator,
-    payload: *std.ArrayListUnmanaged(u8),
-    options: args.Options,
-    cfg: *const Config,
-    appended: *bool,
-) !void {
-    if (resolveOperatorToken(options, cfg)) |token| {
-        const escaped_token = try unified.jsonEscape(allocator, token);
-        defer allocator.free(escaped_token);
-        if (appended.*) try payload.append(allocator, ',');
-        try payload.writer(allocator).print("\"operator_token\":\"{s}\"", .{escaped_token});
-        appended.* = true;
-    }
-}
-
 fn fsrpcReadPathText(allocator: std.mem.Allocator, client: *WebSocketClient, path: []const u8) ![]u8 {
     const fid = try fsrpcWalkPath(allocator, client, path);
     defer fsrpcClunkBestEffort(allocator, client, fid);
@@ -2993,333 +2888,6 @@ fn fsrpcWritePathText(allocator: std.mem.Allocator, client: *WebSocketClient, pa
     try fsrpcOpen(allocator, client, fid, "rw");
     var write = try fsrpcWriteText(allocator, client, fid, content, null);
     defer write.deinit(allocator);
-}
-
-fn printPendingJoinPayload(stdout: anytype, allocator: std.mem.Allocator, payload_json: []const u8) !void {
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{}) catch {
-        try stdout.print("{s}\n", .{payload_json});
-        return;
-    };
-    defer parsed.deinit();
-    if (parsed.value != .object) {
-        try stdout.print("{s}\n", .{payload_json});
-        return;
-    }
-    const pending_val = parsed.value.object.get("pending") orelse {
-        try stdout.print("{s}\n", .{payload_json});
-        return;
-    };
-    if (pending_val != .array) {
-        try stdout.print("{s}\n", .{payload_json});
-        return;
-    }
-    if (pending_val.array.items.len == 0) {
-        try stdout.print("(no pending join requests)\n", .{});
-        return;
-    }
-
-    try stdout.print("Pending join requests:\n", .{});
-    for (pending_val.array.items) |item| {
-        if (item != .object) continue;
-        const request = item.object;
-        try stdout.print(
-            "  - {s} node={s} fs={s} platform={s}/{s}/{s} requested_at_ms={d}\n",
-            .{
-                jsonObjectStringOr(request, "request_id", "(unknown)"),
-                jsonObjectStringOr(request, "node_name", "(unknown)"),
-                jsonObjectStringOr(request, "fs_url", ""),
-                jsonPlatformFieldOr(request, "os", "unknown"),
-                jsonPlatformFieldOr(request, "arch", "unknown"),
-                jsonPlatformFieldOr(request, "runtime_kind", "unknown"),
-                jsonObjectI64Or(request, "requested_at_ms", 0),
-            },
-        );
-    }
-}
-
-fn printInviteListPayload(stdout: anytype, allocator: std.mem.Allocator, payload_json: []const u8) !void {
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{}) catch {
-        try stdout.print("{s}\n", .{payload_json});
-        return;
-    };
-    defer parsed.deinit();
-    if (parsed.value != .object) {
-        try stdout.print("{s}\n", .{payload_json});
-        return;
-    }
-    const invites_val = parsed.value.object.get("invites") orelse {
-        try stdout.print("{s}\n", .{payload_json});
-        return;
-    };
-    if (invites_val != .array) {
-        try stdout.print("{s}\n", .{payload_json});
-        return;
-    }
-    if (invites_val.array.items.len == 0) {
-        try stdout.print("(no active invites)\n", .{});
-        return;
-    }
-
-    try stdout.print("Active invites:\n", .{});
-    for (invites_val.array.items) |item| {
-        if (item != .object) continue;
-        const invite = item.object;
-        try stdout.print(
-            "  - {s} token={s} created_at_ms={d} expires_at_ms={d} redeemed={s} expired={s}\n",
-            .{
-                jsonObjectStringOr(invite, "invite_id", "(unknown)"),
-                jsonObjectStringOr(invite, "invite_token", "(missing)"),
-                jsonObjectI64Or(invite, "created_at_ms", 0),
-                jsonObjectI64Or(invite, "expires_at_ms", 0),
-                if (jsonObjectBoolOr(invite, "redeemed", false)) "true" else "false",
-                if (jsonObjectBoolOr(invite, "expired", false)) "true" else "false",
-            },
-        );
-    }
-}
-
-fn printPairingActionOutcome(
-    stdout: anytype,
-    result_json: []const u8,
-    error_json: []const u8,
-) !void {
-    const trimmed_error = std.mem.trim(u8, error_json, " \t\r\n");
-    if (trimmed_error.len > 0 and !std.mem.eql(u8, trimmed_error, "null")) {
-        try stdout.print("Pairing action failed:\n{s}\n", .{trimmed_error});
-        return error.RemoteError;
-    }
-
-    const trimmed_result = std.mem.trim(u8, result_json, " \t\r\n");
-    if (trimmed_result.len == 0) {
-        try stdout.print("Pairing action completed (no result payload)\n", .{});
-        return;
-    }
-    try stdout.print("{s}\n", .{trimmed_result});
-}
-
-fn refreshPairingPendingSnapshot(
-    allocator: std.mem.Allocator,
-    client: *WebSocketClient,
-    options: args.Options,
-    cfg: *const Config,
-) !void {
-    var payload = std.ArrayListUnmanaged(u8){};
-    defer payload.deinit(allocator);
-    try payload.append(allocator, '{');
-    var appended = false;
-    try appendOptionalOperatorToken(allocator, &payload, options, cfg, &appended);
-    try payload.append(allocator, '}');
-    try fsrpcWritePathText(allocator, client, pairing_refresh_path, payload.items);
-}
-
-fn refreshPairingInvitesSnapshot(
-    allocator: std.mem.Allocator,
-    client: *WebSocketClient,
-    options: args.Options,
-    cfg: *const Config,
-) !void {
-    var payload = std.ArrayListUnmanaged(u8){};
-    defer payload.deinit(allocator);
-    try payload.append(allocator, '{');
-    var appended = false;
-    try appendOptionalOperatorToken(allocator, &payload, options, cfg, &appended);
-    try payload.append(allocator, '}');
-    try fsrpcWritePathText(allocator, client, pairing_invites_refresh_path, payload.items);
-}
-
-fn executePairingPending(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
-    if (cmd.args.len != 0) {
-        logger.err("pairing pending does not accept arguments", .{});
-        return error.InvalidArguments;
-    }
-
-    var cfg = try loadCliConfig(allocator);
-    defer cfg.deinit();
-    const stdout = std.fs.File.stdout().deprecatedWriter();
-    const client = try getOrCreateClient(allocator, options);
-    try fsrpcBootstrap(allocator, client);
-
-    try refreshPairingPendingSnapshot(allocator, client, options, &cfg);
-    const pending_json = try fsrpcReadPathText(allocator, client, pairing_pending_path);
-    defer allocator.free(pending_json);
-    try printPendingJoinPayload(stdout, allocator, pending_json);
-}
-
-fn executePairingApprove(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
-    if (cmd.args.len == 0) {
-        logger.err("pairing approve requires <request_id>", .{});
-        return error.InvalidArguments;
-    }
-    var lease_ttl_ms: ?u64 = null;
-    var i: usize = 1;
-    while (i < cmd.args.len) : (i += 1) {
-        const arg = cmd.args[i];
-        if (std.mem.eql(u8, arg, "--lease-ttl-ms")) {
-            i += 1;
-            if (i >= cmd.args.len) return error.InvalidArguments;
-            lease_ttl_ms = try std.fmt.parseInt(u64, cmd.args[i], 10);
-            continue;
-        }
-        return error.InvalidArguments;
-    }
-
-    var cfg = try loadCliConfig(allocator);
-    defer cfg.deinit();
-    const stdout = std.fs.File.stdout().deprecatedWriter();
-    const client = try getOrCreateClient(allocator, options);
-    try fsrpcBootstrap(allocator, client);
-
-    var payload = std.ArrayListUnmanaged(u8){};
-    defer payload.deinit(allocator);
-    try payload.append(allocator, '{');
-    var appended = false;
-
-    const escaped_request = try unified.jsonEscape(allocator, cmd.args[0]);
-    defer allocator.free(escaped_request);
-    try payload.writer(allocator).print("\"request_id\":\"{s}\"", .{escaped_request});
-    appended = true;
-    if (lease_ttl_ms) |value| {
-        if (appended) try payload.append(allocator, ',');
-        try payload.writer(allocator).print("\"lease_ttl_ms\":{d}", .{value});
-        appended = true;
-    }
-    try appendOptionalOperatorToken(allocator, &payload, options, &cfg, &appended);
-    try payload.append(allocator, '}');
-
-    try fsrpcWritePathText(allocator, client, pairing_approve_path, payload.items);
-    const result_json = try fsrpcReadPathText(allocator, client, pairing_last_result_path);
-    defer allocator.free(result_json);
-    const error_json = try fsrpcReadPathText(allocator, client, pairing_last_error_path);
-    defer allocator.free(error_json);
-    try printPairingActionOutcome(stdout, result_json, error_json);
-}
-
-fn executePairingDeny(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
-    if (cmd.args.len != 1) {
-        logger.err("pairing deny requires <request_id>", .{});
-        return error.InvalidArguments;
-    }
-
-    var cfg = try loadCliConfig(allocator);
-    defer cfg.deinit();
-    const stdout = std.fs.File.stdout().deprecatedWriter();
-    const client = try getOrCreateClient(allocator, options);
-    try fsrpcBootstrap(allocator, client);
-
-    var payload = std.ArrayListUnmanaged(u8){};
-    defer payload.deinit(allocator);
-    try payload.append(allocator, '{');
-    var appended = false;
-
-    const escaped_request = try unified.jsonEscape(allocator, cmd.args[0]);
-    defer allocator.free(escaped_request);
-    try payload.writer(allocator).print("\"request_id\":\"{s}\"", .{escaped_request});
-    appended = true;
-    try appendOptionalOperatorToken(allocator, &payload, options, &cfg, &appended);
-    try payload.append(allocator, '}');
-
-    try fsrpcWritePathText(allocator, client, pairing_deny_path, payload.items);
-    const result_json = try fsrpcReadPathText(allocator, client, pairing_last_result_path);
-    defer allocator.free(result_json);
-    const error_json = try fsrpcReadPathText(allocator, client, pairing_last_error_path);
-    defer allocator.free(error_json);
-    try printPairingActionOutcome(stdout, result_json, error_json);
-}
-
-fn executePairingInviteList(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
-    if (cmd.args.len != 0) {
-        logger.err("pairing list does not accept arguments", .{});
-        return error.InvalidArguments;
-    }
-
-    var cfg = try loadCliConfig(allocator);
-    defer cfg.deinit();
-    const stdout = std.fs.File.stdout().deprecatedWriter();
-    const client = try getOrCreateClient(allocator, options);
-    try fsrpcBootstrap(allocator, client);
-
-    try refreshPairingInvitesSnapshot(allocator, client, options, &cfg);
-    const invites_json = try fsrpcReadPathText(allocator, client, pairing_invites_active_path);
-    defer allocator.free(invites_json);
-    try printInviteListPayload(stdout, allocator, invites_json);
-}
-
-fn executePairingInviteCreate(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
-    var expires_in_ms: ?u64 = null;
-    var i: usize = 0;
-    while (i < cmd.args.len) : (i += 1) {
-        const arg = cmd.args[i];
-        if (std.mem.eql(u8, arg, "--expires-in-ms")) {
-            i += 1;
-            if (i >= cmd.args.len) return error.InvalidArguments;
-            expires_in_ms = try std.fmt.parseInt(u64, cmd.args[i], 10);
-            continue;
-        }
-        return error.InvalidArguments;
-    }
-
-    var cfg = try loadCliConfig(allocator);
-    defer cfg.deinit();
-    const stdout = std.fs.File.stdout().deprecatedWriter();
-    const client = try getOrCreateClient(allocator, options);
-    try fsrpcBootstrap(allocator, client);
-
-    var payload = std.ArrayListUnmanaged(u8){};
-    defer payload.deinit(allocator);
-    try payload.append(allocator, '{');
-    var appended = false;
-    if (expires_in_ms) |value| {
-        try payload.writer(allocator).print("\"expires_in_ms\":{d}", .{value});
-        appended = true;
-    }
-    try appendOptionalOperatorToken(allocator, &payload, options, &cfg, &appended);
-    try payload.append(allocator, '}');
-
-    try fsrpcWritePathText(allocator, client, pairing_invites_create_path, payload.items);
-    const result_json = try fsrpcReadPathText(allocator, client, pairing_invites_last_result_path);
-    defer allocator.free(result_json);
-    const error_json = try fsrpcReadPathText(allocator, client, pairing_invites_last_error_path);
-    defer allocator.free(error_json);
-    try printPairingActionOutcome(stdout, result_json, error_json);
-}
-
-fn executePairingRefresh(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
-    var refresh_pending = true;
-    var refresh_invites = true;
-    if (cmd.args.len > 1) {
-        logger.err("pairing refresh accepts at most one target: pending|invites|all", .{});
-        return error.InvalidArguments;
-    }
-    if (cmd.args.len == 1) {
-        if (std.mem.eql(u8, cmd.args[0], "pending")) {
-            refresh_invites = false;
-        } else if (std.mem.eql(u8, cmd.args[0], "invites")) {
-            refresh_pending = false;
-        } else if (!std.mem.eql(u8, cmd.args[0], "all")) {
-            logger.err("pairing refresh target must be pending|invites|all", .{});
-            return error.InvalidArguments;
-        }
-    }
-
-    var cfg = try loadCliConfig(allocator);
-    defer cfg.deinit();
-    const stdout = std.fs.File.stdout().deprecatedWriter();
-    const client = try getOrCreateClient(allocator, options);
-    try fsrpcBootstrap(allocator, client);
-
-    if (refresh_pending) {
-        try refreshPairingPendingSnapshot(allocator, client, options, &cfg);
-        const pending_json = try fsrpcReadPathText(allocator, client, pairing_pending_path);
-        defer allocator.free(pending_json);
-        try printPendingJoinPayload(stdout, allocator, pending_json);
-    }
-    if (refresh_invites) {
-        if (refresh_pending) try stdout.print("\n", .{});
-        try refreshPairingInvitesSnapshot(allocator, client, options, &cfg);
-        const invites_json = try fsrpcReadPathText(allocator, client, pairing_invites_active_path);
-        defer allocator.free(invites_json);
-        try printInviteListPayload(stdout, allocator, invites_json);
-    }
 }
 
 fn executeNodeServiceGet(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
@@ -3399,22 +2967,22 @@ fn validateJsonObjectPayload(allocator: std.mem.Allocator, payload: []const u8, 
     }
 }
 
-const VenomBindingScope = venom_bindings.BindingScope;
+const WorkspaceBindingScope = venom_bindings.WorkspaceBindingScope;
 
-const OwnedVenomBindingScope = struct {
+const OwnedWorkspaceBindingScope = struct {
     agent_id: ?[]u8 = null,
-    project_id: ?[]u8 = null,
+    workspace_id: ?[]u8 = null,
 
-    fn deinit(self: *OwnedVenomBindingScope, allocator: std.mem.Allocator) void {
+    fn deinit(self: *OwnedWorkspaceBindingScope, allocator: std.mem.Allocator) void {
         if (self.agent_id) |value| allocator.free(value);
-        if (self.project_id) |value| allocator.free(value);
+        if (self.workspace_id) |value| allocator.free(value);
         self.* = .{};
     }
 
-    fn asBorrowed(self: OwnedVenomBindingScope) VenomBindingScope {
+    fn asBorrowed(self: OwnedWorkspaceBindingScope) WorkspaceBindingScope {
         return .{
             .agent_id = self.agent_id,
-            .project_id = self.project_id,
+            .workspace_id = self.workspace_id,
         };
     }
 };
@@ -3434,23 +3002,23 @@ const DefaultFsMount = struct {
 fn discoverChatBindingPaths(
     allocator: std.mem.Allocator,
     client: *WebSocketClient,
-    scope: VenomBindingScope,
+    scope: WorkspaceBindingScope,
 ) !venom_bindings.ChatBindingPaths {
     return venom_bindings.discoverChatBindingPaths(
         allocator,
         CliFsPathReader{ .allocator = allocator, .client = client },
-        .{ .agent_id = scope.agent_id, .project_id = scope.project_id },
+        .{ .agent_id = scope.agent_id, .workspace_id = scope.workspace_id },
     );
 }
 
-fn resolveAttachedVenomBindingScope(
+fn resolveAttachedWorkspaceBindingScope(
     allocator: std.mem.Allocator,
     client: *WebSocketClient,
-) !OwnedVenomBindingScope {
+) !OwnedWorkspaceBindingScope {
     var cfg = try loadCliConfig(allocator);
     defer cfg.deinit();
 
-    var scope = OwnedVenomBindingScope{};
+    var scope = OwnedWorkspaceBindingScope{};
     errdefer scope.deinit(allocator);
 
     const session_key = resolveSessionKey(&cfg);
@@ -3467,9 +3035,9 @@ fn resolveAttachedVenomBindingScope(
         if (value.agent_id.len > 0) {
             scope.agent_id = try allocator.dupe(u8, value.agent_id);
         }
-        if (value.project_id) |project_id| {
-            if (project_id.len > 0) {
-                scope.project_id = try allocator.dupe(u8, project_id);
+        if (value.workspace_id) |workspace_id| {
+            if (workspace_id.len > 0) {
+                scope.workspace_id = try allocator.dupe(u8, workspace_id);
             }
         }
         return scope;
@@ -3478,8 +3046,8 @@ fn resolveAttachedVenomBindingScope(
     if (cfg.selectedAgent()) |agent_id| {
         scope.agent_id = try allocator.dupe(u8, agent_id);
     }
-    if (cfg.selectedWorkspace()) |project_id| {
-        scope.project_id = try allocator.dupe(u8, project_id);
+    if (cfg.selectedWorkspace()) |workspace_id| {
+        scope.workspace_id = try allocator.dupe(u8, workspace_id);
     }
     return scope;
 }
@@ -3587,12 +3155,12 @@ fn findNodeVenomRuntimeRootPath(
 fn discoverDefaultFsMount(
     allocator: std.mem.Allocator,
     client: *WebSocketClient,
-    scope: VenomBindingScope,
+    scope: WorkspaceBindingScope,
 ) !DefaultFsMount {
     var global_binding = venom_bindings.readPreferredVenomBinding(
         allocator,
         CliFsPathReader{ .allocator = allocator, .client = client },
-        .{ .agent_id = scope.agent_id, .project_id = scope.project_id },
+        .{ .agent_id = scope.agent_id, .workspace_id = scope.workspace_id },
         "fs",
     ) catch null;
     defer if (global_binding) |*binding| binding.deinit(allocator);
@@ -4049,7 +3617,7 @@ fn executeWorkspaceStatus(allocator: std.mem.Allocator, options: args.Options, c
             allocator,
             client,
             &g_control_request_counter,
-            status.project_id,
+            status.workspace_id,
         );
         defer reconcile.deinit(allocator);
         try stdout.print(
@@ -4240,7 +3808,7 @@ fn executeChatSend(allocator: std.mem.Allocator, options: args.Options, cmd: arg
     try maybeApplyWorkspaceContext(allocator, options, client);
     logger.info("Negotiating FS-RPC session...", .{});
     try fsrpcBootstrap(allocator, client);
-    var binding_scope = try resolveAttachedVenomBindingScope(allocator, client);
+    var binding_scope = try resolveAttachedWorkspaceBindingScope(allocator, client);
     defer binding_scope.deinit(allocator);
     var chat_paths = try discoverChatBindingPaths(allocator, client, binding_scope.asBorrowed());
     defer chat_paths.deinit(allocator);
@@ -4407,7 +3975,7 @@ fn executeChatResume(allocator: std.mem.Allocator, options: args.Options, cmd: a
     const client = try getOrCreateClient(allocator, options);
     try maybeApplyWorkspaceContext(allocator, options, client);
     try fsrpcBootstrap(allocator, client);
-    var binding_scope = try resolveAttachedVenomBindingScope(allocator, client);
+    var binding_scope = try resolveAttachedWorkspaceBindingScope(allocator, client);
     defer binding_scope.deinit(allocator);
     var chat_paths = try discoverChatBindingPaths(allocator, client, binding_scope.asBorrowed());
     defer chat_paths.deinit(allocator);

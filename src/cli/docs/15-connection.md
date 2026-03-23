@@ -36,8 +36,6 @@ spider status
 
 **Output:**
 ```
-Connected: Yes
 Server: ws://100.101.192.123:18790
-Workspace: spiderweb
-Uptime: 45 minutes
+Connected: Yes
 ```

@@ -21,12 +21,8 @@ pub const Noun = enum {
     agent,
     session,
     node,
-    pairing,
     workspace,
     auth,
-    goal,
-    task,
-    worker,
     connect,
     disconnect,
     status,
@@ -123,14 +119,10 @@ pub const Options = struct {
 const help_overview = @embedFile("docs/01-overview.md");
 const help_options = @embedFile("docs/02-options.md");
 const help_chat = @embedFile("docs/10-chat.md");
-const help_goal = @embedFile("docs/12-goal.md");
-const help_task = @embedFile("docs/13-task.md");
-const help_worker = @embedFile("docs/14-worker.md");
 const help_connection = @embedFile("docs/15-connection.md");
 const help_node = @embedFile("docs/16-node.md");
 const help_workspace = @embedFile("docs/17-workspace.md");
 const help_auth = @embedFile("docs/18-auth.md");
-const help_pairing = @embedFile("docs/19-pairing.md");
 const help_agent = @embedFile("docs/20-agent.md");
 const help_session = @embedFile("docs/21-session.md");
 
@@ -146,12 +138,8 @@ pub fn printHelpForNoun(noun: Noun) void {
         .agent => help_agent,
         .session => help_session,
         .node => help_node,
-        .pairing => help_pairing,
         .workspace => help_workspace,
         .auth => help_auth,
-        .goal => help_goal,
-        .task => help_task,
-        .worker => help_worker,
         .connect, .disconnect, .status => help_connection,
         else => help_overview,
     };
@@ -181,12 +169,8 @@ fn parseNoun(arg: []const u8) ?Noun {
     if (std.mem.eql(u8, arg, "agent")) return .agent;
     if (std.mem.eql(u8, arg, "session")) return .session;
     if (std.mem.eql(u8, arg, "node")) return .node;
-    if (std.mem.eql(u8, arg, "pairing")) return .pairing;
     if (std.mem.eql(u8, arg, "workspace")) return .workspace;
     if (std.mem.eql(u8, arg, "auth")) return .auth;
-    if (std.mem.eql(u8, arg, "goal")) return .goal;
-    if (std.mem.eql(u8, arg, "task")) return .task;
-    if (std.mem.eql(u8, arg, "worker")) return .worker;
     if (std.mem.eql(u8, arg, "connect")) return .connect;
     if (std.mem.eql(u8, arg, "disconnect")) return .disconnect;
     if (std.mem.eql(u8, arg, "status")) return .status;
@@ -234,14 +218,6 @@ fn parseVerb(noun: Noun, arg: []const u8) ?Verb {
             if (std.mem.eql(u8, arg, "service-runtime")) return .service_runtime;
             if (std.mem.eql(u8, arg, "watch")) return .watch;
         },
-        .pairing => {
-            if (std.mem.eql(u8, arg, "pending")) return .pending;
-            if (std.mem.eql(u8, arg, "approve")) return .approve;
-            if (std.mem.eql(u8, arg, "deny")) return .deny;
-            if (std.mem.eql(u8, arg, "list")) return .list;
-            if (std.mem.eql(u8, arg, "create")) return .create;
-            if (std.mem.eql(u8, arg, "refresh")) return .refresh;
-        },
         .workspace => {
             if (std.mem.eql(u8, arg, "list")) return .list;
             if (std.mem.eql(u8, arg, "use")) return .use;
@@ -258,19 +234,6 @@ fn parseVerb(noun: Noun, arg: []const u8) ?Verb {
         .auth => {
             if (std.mem.eql(u8, arg, "status")) return .status;
             if (std.mem.eql(u8, arg, "rotate")) return .rotate;
-        },
-        .goal => {
-            if (std.mem.eql(u8, arg, "list")) return .list;
-            if (std.mem.eql(u8, arg, "create")) return .create;
-            if (std.mem.eql(u8, arg, "complete")) return .complete;
-        },
-        .task => {
-            if (std.mem.eql(u8, arg, "list")) return .list;
-            if (std.mem.eql(u8, arg, "info")) return .info;
-        },
-        .worker => {
-            if (std.mem.eql(u8, arg, "list")) return .list;
-            if (std.mem.eql(u8, arg, "logs")) return .logs;
         },
         else => {},
     }

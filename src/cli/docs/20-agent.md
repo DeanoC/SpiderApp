@@ -16,10 +16,10 @@ spider agent list
 Show details for one agent.
 
 **Arguments:**
-- `agent_id` - Agent identifier (for example `mother`)
+- `agent_id` - Agent identifier (for example `spiderweb`)
 
 **Examples:**
 ```bash
-spider agent info mother
-spider agent get mother
+spider agent info spiderweb
+spider agent get spiderweb
 ```
