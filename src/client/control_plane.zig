@@ -621,7 +621,7 @@ pub fn rotateWorkspaceToken(
         allocator,
         client,
         message_counter,
-        "control.workspace_token_revoke",
+        "control.workspace_token_rotate",
         payload.items,
     );
     defer allocator.free(payload_json);
