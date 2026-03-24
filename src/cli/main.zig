@@ -2471,12 +2471,12 @@ fn executeNodeServiceWatch(allocator: std.mem.Allocator, options: args.Options, 
 
     if (node_filter) |node_id| {
         try stdout.print(
-            "Watching node service events for node {s} via /global/services/node-service-events.ndjson (replay_limit={d}, Ctrl+C to stop)\n",
+            "Watching node venom events for node {s} via /.spiderweb/catalog/node-venom-events.ndjson (replay_limit={d}, Ctrl+C to stop)\n",
             .{ node_id, replay_limit },
         );
     } else {
         try stdout.print(
-            "Watching node service events for all nodes via /global/services/node-service-events.ndjson (replay_limit={d}, Ctrl+C to stop)\n",
+            "Watching node venom events for all nodes via /.spiderweb/catalog/node-venom-events.ndjson (replay_limit={d}, Ctrl+C to stop)\n",
             .{replay_limit},
         );
     }
@@ -2485,7 +2485,7 @@ fn executeNodeServiceWatch(allocator: std.mem.Allocator, options: args.Options, 
     defer if (previous_snapshot) |value| allocator.free(value);
 
     while (true) {
-        const fid = fsrpcWalkPath(allocator, client, "/global/services/node-service-events.ndjson") catch |err| {
+        const fid = fsrpcWalkPath(allocator, client, "/.spiderweb/catalog/node-venom-events.ndjson") catch |err| {
             logger.err("node watch open failed: {s}", .{@errorName(err)});
             return err;
         };
