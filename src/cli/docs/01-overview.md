@@ -31,7 +31,7 @@ spider --help
 - `workspace mount list [workspace_id]` - List workspace mounts
 - `workspace mount add <mount_path> <node_id> <export_name>` - Add a workspace mount
 - `workspace mount remove <mount_path> [node_id export_name]` - Remove a workspace mount
-- `workspace handoff show [generic|codex_app|spider_monkey]` - Print worker handoff commands
+- `workspace handoff show [generic|codex_app|spider_monkey]` - Print runtime handoff commands
 - `agent list` - List discoverable agents
 - `agent info <agent_id>` - Show one agent's metadata
 - `session list` - List known sessions for this connection

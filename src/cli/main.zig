@@ -1495,8 +1495,8 @@ fn executeWorkspaceTemplateCommand(allocator: std.mem.Allocator, options: args.O
         try stdout.print("  Binds ({d}):\n", .{template.binds.items.len});
         for (template.binds.items) |bind| {
             try stdout.print(
-                "    - {s} <= venom:{s} scope={s}\n",
-                .{ bind.bind_path, bind.venom_id, bind.provider_scope },
+                "    - {s} <= venom:{s} host={s}\n",
+                .{ bind.bind_path, bind.venom_id, bind.host_role },
             );
         }
         return;
@@ -1776,8 +1776,8 @@ fn executeWorkspaceHandoffCommand(allocator: std.mem.Allocator, options: args.Op
         try stdout.print("\nSpiderMonkey:\n", .{});
         try stdout.print("  spider-monkey run --workspace-root {s}\n", .{mount_path});
     } else {
-        try stdout.print("\nGeneric external worker:\n", .{});
-        try stdout.print("  Open {s} in your external worker after the mount is ready.\n", .{mount_path});
+        try stdout.print("\nGeneric external runtime:\n", .{});
+        try stdout.print("  Open {s} in your external runtime after the mount is ready.\n", .{mount_path});
     }
 }
 

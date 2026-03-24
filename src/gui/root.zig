@@ -10280,7 +10280,7 @@ const App = struct {
     fn refreshContractServices(self: *App) !void {
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
         try self.fsrpcBootstrapGui(client);
-        const payload = try self.readFsPathTextGui(client, "/agents/self/services/SERVICES.json");
+        const payload = try self.readFsPathTextGui(client, "/.spiderweb/venoms/VENOMS.json");
         defer self.allocator.free(payload);
 
         var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, payload, .{});
@@ -10291,22 +10291,17 @@ const App = struct {
         for (parsed.value.array.items) |entry| {
             if (entry != .object) continue;
             const obj = entry.object;
-            const scope = if (obj.get("scope")) |value| switch (value) {
-                .string => value.string,
-                else => continue,
-            } else continue;
-            if (!std.mem.eql(u8, scope, "agent_contract")) continue;
             const has_invoke = if (obj.get("has_invoke")) |value| switch (value) {
                 .bool => value.bool,
                 else => false,
             } else false;
             if (!has_invoke) continue;
 
-            const service_id = if (obj.get("service_id")) |value| switch (value) {
+            const service_id = if (obj.get("venom_id")) |value| switch (value) {
                 .string => value.string,
                 else => continue,
             } else continue;
-            const service_path = if (obj.get("service_path")) |value| switch (value) {
+            const service_path = if (obj.get("venom_path")) |value| switch (value) {
                 .string => value.string,
                 else => continue,
             } else continue;
@@ -11170,7 +11165,7 @@ const App = struct {
             .help_line = if (self.session_attach_state == .ready)
                 "Open Filesystem, Debug, or Terminal panels from the Windows menu."
             else
-                "External workers can use the workspace without live chat. Use Attach Session only when you want a Spiderweb runtime.",
+                "External runtimes can use the workspace without live chat. Use Attach Session only when you want a Spiderweb runtime.",
             .workspaces = owned.projects.items,
             .nodes = owned.nodes.items,
         };
@@ -14792,8 +14787,8 @@ const App = struct {
             session.agent_id,
             effective_workspace_id,
             effective_workspace_token,
-        ) catch |worker_err| {
-            std.log.warn("Failed to rebind filesystem transport for restored session: {s}", .{@errorName(worker_err)});
+        ) catch |restore_err| {
+            std.log.warn("Failed to rebind filesystem transport for restored session: {s}", .{@errorName(restore_err)});
         };
         self.requestDebugStreamSnapshot(true);
         self.node_service_watch_enabled = true;
@@ -16007,7 +16002,7 @@ const App = struct {
             return error.RemoteError;
         }
         if (self.session_attach_state != .ready) {
-            const msg = "Chat is disabled until you attach a Spiderweb session from Workspace Overview. External workers can keep using the mounted workspace without live chat.";
+            const msg = "Chat is disabled until you attach a Spiderweb session from Workspace Overview. External runtimes can keep using the mounted workspace without live chat.";
             self.setWorkspaceError(msg);
             try self.appendMessage("system", msg, null);
             return error.ProjectIdRequired;
@@ -16753,7 +16748,7 @@ const App = struct {
             return raw;
         }
 
-        const global_jobs_path = try std.fmt.allocPrint(self.allocator, "/global/jobs/{s}/{s}", .{ job_id, leaf });
+        const global_jobs_path = try std.fmt.allocPrint(self.allocator, "/.spiderweb/venoms/jobs/{s}/{s}", .{ job_id, leaf });
         defer self.allocator.free(global_jobs_path);
         if (self.readFsPathTextGui(client, global_jobs_path) catch null) |raw| {
             return raw;
@@ -16886,7 +16881,7 @@ const App = struct {
 
     fn tryResumePendingSendJob(self: *App) !bool {
         const job_id = self.pending_send_job_id orelse return false;
-        const jobs_root = self.pending_send_jobs_root orelse "/global/jobs";
+        const jobs_root = self.pending_send_jobs_root orelse "/.spiderweb/venoms/jobs";
         const client = if (self.ws_client) |*value| value else return false;
         if (!self.pending_send_resume_notified) return false;
         const session_key = if (self.pending_send_session_key) |value|

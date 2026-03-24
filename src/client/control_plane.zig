@@ -1570,7 +1570,9 @@ fn parseWorkspaceTemplate(
         try template.binds.append(allocator, .{
             .bind_path = try dupRequiredString(allocator, item.object, "bind_path"),
             .venom_id = try dupRequiredString(allocator, item.object, "venom_id"),
-            .provider_scope = try dupOptionalString(allocator, item.object, "provider_scope") orelse try allocator.dupe(u8, "host_local"),
+            .host_role = try dupOptionalString(allocator, item.object, "host_role") orelse
+                try dupOptionalString(allocator, item.object, "provider_scope") orelse
+                try allocator.dupe(u8, "node"),
         });
     }
     return template;
