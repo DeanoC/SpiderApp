@@ -442,6 +442,15 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
                 },
             }
         },
+        .package => {
+            switch (cmd.verb) {
+                .list, .info, .install, .enable, .disable, .remove => try executePackageCommand(allocator, options, cmd),
+                else => {
+                    logger.err("Unknown package verb", .{});
+                    return error.InvalidArguments;
+                },
+            }
+        },
         .auth => {
             switch (cmd.verb) {
                 .status => try executeAuthStatus(allocator, options, cmd),
@@ -914,6 +923,180 @@ fn maybeApplyWorkspaceContext(
         "Workspace context active: workspace={s} session={s} agent={s} state={s}",
         .{ project_id, session_key, active_agent, attach_state },
     );
+}
+
+const packages_control_root = "/.spiderweb/control/packages";
+
+fn buildPackagesControlPath(allocator: std.mem.Allocator, leaf: []const u8) ![]u8 {
+    return joinFsPath(allocator, packages_control_root, leaf);
+}
+
+fn loadPackagePayloadArg(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    if (trimmed.len == 0) return error.InvalidArguments;
+    if (trimmed[0] == '@') {
+        if (trimmed.len == 1) return error.InvalidArguments;
+        const file_raw = try std.fs.cwd().readFileAlloc(allocator, trimmed[1..], 1024 * 1024);
+        errdefer allocator.free(file_raw);
+        const file_trimmed = std.mem.trim(u8, file_raw, " \t\r\n");
+        if (file_trimmed.len == 0) return error.InvalidArguments;
+        if (file_trimmed.ptr == file_raw.ptr and file_trimmed.len == file_raw.len) return file_raw;
+        const out = try allocator.dupe(u8, file_trimmed);
+        allocator.free(file_raw);
+        return out;
+    }
+    return allocator.dupe(u8, trimmed);
+}
+
+fn writePackageControlAndReadResult(
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+    control_name: []const u8,
+    payload: []const u8,
+) ![]u8 {
+    const control_dir = try buildPackagesControlPath(allocator, "control");
+    defer allocator.free(control_dir);
+    const control_path = try joinFsPath(allocator, control_dir, control_name);
+    defer allocator.free(control_path);
+    try fsrpcWritePathText(allocator, client, control_path, payload);
+    const result_path = try buildPackagesControlPath(allocator, "result.json");
+    defer allocator.free(result_path);
+    return fsrpcReadPathText(allocator, client, result_path);
+}
+
+fn printPackageResult(stdout: anytype, result_json: []const u8) !void {
+    var parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, result_json, .{}) catch {
+        try stdout.print("{s}\n", .{result_json});
+        return;
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) {
+        try stdout.print("{s}\n", .{result_json});
+        return;
+    }
+    const root = parsed.value.object;
+    if (!jsonObjectBoolOr(root, "ok", false)) {
+        if (root.get("error")) |error_val| {
+            if (error_val == .object) {
+                try stdout.print(
+                    "Package operation failed: {s} [{s}]\n",
+                    .{
+                        jsonObjectStringOr(error_val.object, "message", "unknown error"),
+                        jsonObjectStringOr(error_val.object, "code", "error"),
+                    },
+                );
+                return;
+            }
+        }
+        try stdout.print("{s}\n", .{result_json});
+        return;
+    }
+
+    const operation = jsonObjectStringOr(root, "operation", "unknown");
+    const result_val = root.get("result") orelse {
+        try stdout.print("{s}\n", .{result_json});
+        return;
+    };
+    if (result_val != .object) {
+        try stdout.print("{s}\n", .{result_json});
+        return;
+    }
+    const result_obj = result_val.object;
+
+    if (result_obj.get("packages")) |packages_val| {
+        if (packages_val != .array) return error.InvalidResponse;
+        try stdout.print("Packages ({d}):\n", .{packages_val.array.items.len});
+        for (packages_val.array.items) |item| {
+            if (item != .object) continue;
+            try stdout.print(
+                "  - {s} kind={s} version={s} enabled={s} runtime={s}\n",
+                .{
+                    jsonObjectStringOr(item.object, "package_id", jsonObjectStringOr(item.object, "venom_id", "(unknown)")),
+                    jsonObjectStringOr(item.object, "kind", "(unknown)"),
+                    jsonObjectStringOr(item.object, "version", "1"),
+                    if (jsonObjectBoolOr(item.object, "enabled", true)) "true" else "false",
+                    jsonObjectStringOr(item.object, "runtime_kind", "native"),
+                },
+            );
+        }
+        return;
+    }
+
+    if (result_obj.get("package")) |package_val| {
+        if (package_val != .object) return error.InvalidResponse;
+        const package = package_val.object;
+        try stdout.print("Package: {s}\n", .{jsonObjectStringOr(package, "package_id", jsonObjectStringOr(package, "venom_id", "(unknown)"))});
+        try stdout.print("  Kind: {s}\n", .{jsonObjectStringOr(package, "kind", "(unknown)")});
+        try stdout.print("  Version: {s}\n", .{jsonObjectStringOr(package, "version", "1")});
+        try stdout.print("  Enabled: {s}\n", .{if (jsonObjectBoolOr(package, "enabled", true)) "true" else "false"});
+        try stdout.print("  Runtime: {s}\n", .{jsonObjectStringOr(package, "runtime_kind", "native")});
+        if (package.get("host_roles")) |host_roles| {
+            try stdout.print("  Host roles: {f}\n", .{std.json.fmt(host_roles, .{})});
+        }
+        if (package.get("binding_scopes")) |binding_scopes| {
+            try stdout.print("  Binding scopes: {f}\n", .{std.json.fmt(binding_scopes, .{})});
+        }
+        if (package.get("help_md")) |help_md| {
+            if (help_md == .string and help_md.string.len > 0) {
+                try stdout.print("  Help: {s}\n", .{help_md.string});
+            }
+        }
+        return;
+    }
+
+    if (jsonObjectBoolOr(result_obj, "removed", false)) {
+        try stdout.print(
+            "{s} package {s}\n",
+            .{ operation, jsonObjectStringOr(result_obj, "venom_id", "(unknown)") },
+        );
+        return;
+    }
+
+    try stdout.print("{s}\n", .{result_json});
+}
+
+fn executePackageCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+    try maybeApplyWorkspaceContext(allocator, options, client);
+    try fsrpcBootstrap(allocator, client);
+
+    const control_name: []const u8 = switch (cmd.verb) {
+        .list => "list.json",
+        .info => "get.json",
+        .install => "install.json",
+        .enable => "enable.json",
+        .disable => "disable.json",
+        .remove => "remove.json",
+        else => return error.InvalidArguments,
+    };
+
+    const payload = switch (cmd.verb) {
+        .list => try allocator.dupe(u8, "{}"),
+        .info, .enable, .disable, .remove => blk: {
+            if (cmd.args.len != 1) {
+                logger.err("package {s} requires <package_id>", .{@tagName(cmd.verb)});
+                return error.InvalidArguments;
+            }
+            const escaped_id = try unified.jsonEscape(allocator, cmd.args[0]);
+            defer allocator.free(escaped_id);
+            break :blk try std.fmt.allocPrint(allocator, "{{\"venom_id\":\"{s}\"}}", .{escaped_id});
+        },
+        .install => blk: {
+            if (cmd.args.len != 1) {
+                logger.err("package install requires <json_or_@file>", .{});
+                return error.InvalidArguments;
+            }
+            break :blk try loadPackagePayloadArg(allocator, cmd.args[0]);
+        },
+        else => unreachable,
+    };
+    defer allocator.free(payload);
+
+    const result_json = try writePackageControlAndReadResult(allocator, client, control_name, payload);
+    defer allocator.free(result_json);
+    try printPackageResult(stdout, result_json);
 }
 
 fn executeWorkspaceList(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
