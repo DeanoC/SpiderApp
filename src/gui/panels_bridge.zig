@@ -68,11 +68,78 @@ pub const LauncherSettingsModel = if (has_panel_interfaces) zui.ui.panel_interfa
 pub const LauncherSettingsAction = if (has_panel_interfaces) zui.ui.panel_interfaces.LauncherSettingsAction else enum { connect };
 
 // Workspace panel contracts.
-pub const WorkspacePanelModel = if (has_panel_interfaces) zui.ui.panel_interfaces.WorkspacePanelModel else struct {};
-pub const WorkspacePanelView = if (has_panel_interfaces) zui.ui.panel_interfaces.WorkspacePanelView else struct {};
-pub const WorkspaceListEntryView = if (has_panel_interfaces) zui.ui.panel_interfaces.WorkspaceListEntryView else struct {};
-pub const WorkspaceNodeEntryView = if (has_panel_interfaces) zui.ui.panel_interfaces.WorkspaceNodeEntryView else struct {};
-pub const WorkspacePanelAction = if (has_panel_interfaces) zui.ui.panel_interfaces.WorkspacePanelAction else enum { refresh_workspace };
+pub const WorkspacePanelModel = if (has_panel_interfaces) zui.ui.panel_interfaces.WorkspacePanelModel else struct {
+    connected: bool = false,
+    has_workspaces: bool = false,
+    has_nodes: bool = false,
+    can_create_workspace: bool = false,
+    can_activate_workspace: bool = false,
+    can_attach_session: bool = false,
+    can_lock_workspace: bool = false,
+    can_unlock_workspace: bool = false,
+};
+pub const WorkspacePanelView = if (has_panel_interfaces) zui.ui.panel_interfaces.WorkspacePanelView else struct {
+    title: []const u8 = "Workspace Overview",
+    selected_workspace_button_label: []const u8 = "Select workspace",
+    lock_state_text: []const u8 = "Workspace lock state: unknown",
+    workspace_token: []const u8 = "",
+    create_name: []const u8 = "",
+    create_vision: []const u8 = "",
+    template_id: []const u8 = "",
+    operator_token: []const u8 = "",
+    mount_path: []const u8 = "/",
+    mount_node_id: []const u8 = "",
+    mount_export_name: []const u8 = "",
+    bind_path: []const u8 = "/repo",
+    bind_target_path: []const u8 = "/nodes/local/fs",
+    mount_hint: ?[]const u8 = null,
+    workspace_error_text: ?[]const u8 = null,
+    session_status_line: ?[]const u8 = null,
+    session_status_warning: bool = false,
+    selected_workspace_line: ?[]const u8 = null,
+    setup_status_line: ?[]const u8 = null,
+    setup_status_warning: bool = false,
+    setup_vision_line: ?[]const u8 = null,
+    template_line: ?[]const u8 = null,
+    binds_line: ?[]const u8 = null,
+    workspace_summary_line: ?[]const u8 = null,
+    workspace_health_line: ?[]const u8 = null,
+    workspace_health_warning: bool = false,
+    workspace_health_error: bool = false,
+    counts_line: ?[]const u8 = null,
+    help_line: []const u8 = "Open Filesystem and Debug panels from the Windows menu.",
+    workspaces: []const WorkspaceListEntryView = &.{},
+    nodes: []const WorkspaceNodeEntryView = &.{},
+};
+pub const WorkspaceListEntryView = if (has_panel_interfaces) zui.ui.panel_interfaces.WorkspaceListEntryView else struct {
+    index: usize = 0,
+    line: []const u8 = "",
+    selected: bool = false,
+};
+pub const WorkspaceNodeEntryView = if (has_panel_interfaces) zui.ui.panel_interfaces.WorkspaceNodeEntryView else struct {
+    line: []const u8 = "",
+    degraded: bool = false,
+};
+pub const WorkspacePanelAction = if (has_panel_interfaces) zui.ui.panel_interfaces.WorkspacePanelAction else union(enum) {
+    select_workspace_index: usize,
+    create_workspace,
+    refresh_workspace,
+    activate_workspace,
+    attach_session,
+    lock_workspace,
+    unlock_workspace,
+    add_mount,
+    remove_mount,
+    add_bind,
+    remove_bind,
+    auth_status,
+    rotate_auth_user,
+    rotate_auth_admin,
+    reveal_auth_admin,
+    copy_auth_admin,
+    reveal_auth_user,
+    copy_auth_user,
+};
 
 // Terminal panel contracts.
 pub const TerminalPanelModel = if (has_panel_interfaces) zui.ui.panel_interfaces.TerminalPanelModel else struct {};

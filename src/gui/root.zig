@@ -16786,6 +16786,7 @@ const App = struct {
         else
             null;
         defer if (selected_package_id) |value| self.allocator.free(value);
+        errdefer self.clearPackageManagerPackages();
 
         const result_json = try self.writePackageControlAndReadResultGui(client, "list.json", "{}");
         defer self.allocator.free(result_json);
