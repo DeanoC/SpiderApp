@@ -594,6 +594,7 @@ const SettingsFocusField = enum {
     perf_benchmark_label,
     filesystem_contract_payload,
     package_manager_install_payload,
+    about_modal_build_label,
     terminal_command_input,
 };
 
@@ -1393,6 +1394,9 @@ const App = struct {
     package_manager_install_payload: std.ArrayList(u8) = .empty,
     package_manager_modal_error: ?[]u8 = null,
     package_manager_modal_notice: ?[]u8 = null,
+    about_modal_open: bool = false,
+    about_modal_build_label: std.ArrayList(u8) = .empty,
+    about_modal_notice: ?[]u8 = null,
     ide_menu_open: ?IdeMenuDomain = null,
     credential_store: credential_store_mod.CredentialStore,
 
@@ -1681,6 +1685,7 @@ const App = struct {
         app.launcher_profile_metadata.appendSlice(allocator, "") catch {};
         app.launcher_connect_token.appendSlice(allocator, "") catch {};
         app.package_manager_install_payload.appendSlice(allocator, "") catch {};
+        app.about_modal_build_label.appendSlice(allocator, currentBuildLabel()) catch {};
         app.syncLauncherSelectionFromConfig();
         app.applyLauncherSelectedProfile() catch {};
         app.node_service_watch_filter.appendSlice(allocator, "") catch {};
@@ -1827,6 +1832,8 @@ const App = struct {
         self.package_manager_install_payload.deinit(self.allocator);
         if (self.package_manager_modal_error) |value| self.allocator.free(value);
         if (self.package_manager_modal_notice) |value| self.allocator.free(value);
+        self.about_modal_build_label.deinit(self.allocator);
+        if (self.about_modal_notice) |value| self.allocator.free(value);
         if (self.active_profile_id) |value| self.allocator.free(value);
         if (self.active_workspace_id) |value| self.allocator.free(value);
         self.credential_store.deinit();
@@ -4380,6 +4387,7 @@ const App = struct {
             .perf_benchmark_label => &self.perf_benchmark_label_input,
             .filesystem_contract_payload => &self.contract_invoke_payload,
             .package_manager_install_payload => &self.package_manager_install_payload,
+            .about_modal_build_label => &self.about_modal_build_label,
             .terminal_command_input => &self.terminal_input,
             .none => null,
         };
@@ -7341,11 +7349,12 @@ const App = struct {
         if (shell.dock_border) |dock_border| self.drawRect(content_rect, dock_border);
 
         const launcher_modal_open = self.launcher_create_modal_open;
+        const about_modal_open = self.about_modal_open;
         const saved_mouse_down = self.mouse_down;
         const saved_mouse_clicked = self.mouse_clicked;
         const saved_mouse_released = self.mouse_released;
         const saved_mouse_right_clicked = self.mouse_right_clicked;
-        if (launcher_modal_open) {
+        if (launcher_modal_open or about_modal_open) {
             // Keep launcher visible under the modal, but route pointer input only to modal widgets.
             self.mouse_down = false;
             self.mouse_clicked = false;
@@ -7651,12 +7660,13 @@ const App = struct {
 
         _ = self.drawWindowMenuBar(ui_window, fb_width);
         self.drawStatusOverlay(fb_width, fb_height);
-        if (launcher_modal_open) {
+        if (launcher_modal_open or about_modal_open) {
             self.mouse_down = saved_mouse_down;
             self.mouse_clicked = saved_mouse_clicked;
             self.mouse_released = saved_mouse_released;
             self.mouse_right_clicked = saved_mouse_right_clicked;
-            self.drawLauncherCreateWorkspaceModal(fb_width, fb_height);
+            if (launcher_modal_open) self.drawLauncherCreateWorkspaceModal(fb_width, fb_height);
+            if (about_modal_open) self.drawAboutModal(fb_width, fb_height);
         }
     }
 
@@ -8020,12 +8030,14 @@ const App = struct {
         )) {
             self.clearPackageManagerModalNotice();
             self.refreshPackageManagerPackages() catch |err| {
-                const msg = self.formatControlOpError("Package list failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setPackageManagerModalError(text);
-                } else {
-                    self.setPackageManagerModalError("Package list failed.");
+                if (err != error.RemoteError) {
+                    const msg = self.formatControlOpError("Package list failed", err);
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setPackageManagerModalError(text);
+                    } else {
+                        self.setPackageManagerModalError("Package list failed.");
+                    }
                 }
             };
         }
@@ -8186,17 +8198,103 @@ const App = struct {
         }
     }
 
+    fn drawAboutModal(self: *App, fb_width: u32, fb_height: u32) void {
+        const layout = self.panelLayoutMetrics();
+        const pad = @max(layout.inset, 12.0 * self.ui_scale);
+        const row_h = @max(layout.button_height, 34.0 * self.ui_scale);
+        const screen_rect = Rect.fromXYWH(0, 0, @floatFromInt(fb_width), @floatFromInt(fb_height));
+
+        self.drawFilledRect(screen_rect, zcolors.withAlpha(self.theme.colors.background, 0.68));
+
+        const modal_w = std.math.clamp(
+            screen_rect.width() * 0.42,
+            420.0 * self.ui_scale,
+            720.0 * self.ui_scale,
+        );
+        const modal_h = std.math.clamp(
+            screen_rect.height() * 0.34,
+            220.0 * self.ui_scale,
+            360.0 * self.ui_scale,
+        );
+        const modal_rect = Rect.fromXYWH(
+            screen_rect.min[0] + (screen_rect.width() - modal_w) * 0.5,
+            screen_rect.min[1] + (screen_rect.height() - modal_h) * 0.5,
+            modal_w,
+            modal_h,
+        );
+
+        self.drawSurfacePanel(modal_rect);
+        self.drawRect(modal_rect, self.theme.colors.border);
+
+        var y = modal_rect.min[1] + pad;
+        const content_w = modal_rect.width() - pad * 2.0;
+        self.drawLabel(modal_rect.min[0] + pad, y, "About SpiderApp", self.theme.colors.text_primary);
+        y += layout.line_height + layout.row_gap * 0.4;
+        self.drawTextTrimmed(
+            modal_rect.min[0] + pad,
+            y,
+            content_w,
+            "Build identity for diagnostics and demo verification.",
+            self.theme.colors.text_secondary,
+        );
+        y += layout.line_height + layout.row_gap * 0.7;
+        self.drawLabel(modal_rect.min[0] + pad, y, "Version", self.theme.colors.text_secondary);
+        y += layout.line_height + layout.row_gap * 0.25;
+        const focused = self.drawTextInputWidget(
+            Rect.fromXYWH(modal_rect.min[0] + pad, y, content_w, layout.input_height),
+            self.about_modal_build_label.items,
+            self.settings_panel.focused_field == .about_modal_build_label,
+            .{ .read_only = true },
+        );
+        if (focused) self.settings_panel.focused_field = .about_modal_build_label;
+        y += layout.input_height + layout.row_gap * 0.55;
+
+        if (self.about_modal_notice) |notice| {
+            self.drawTextTrimmed(
+                modal_rect.min[0] + pad,
+                y,
+                content_w,
+                notice,
+                self.theme.colors.text_secondary,
+            );
+        }
+
+        const button_w = (content_w - pad) * 0.5;
+        const button_y = modal_rect.max[1] - pad - row_h;
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(modal_rect.min[0] + pad, button_y, button_w, row_h),
+            "Copy Version",
+            .{ .variant = .secondary },
+        )) {
+            self.copyTextToClipboard(self.about_modal_build_label.items) catch {};
+            self.setAboutModalNotice("Copied build string to clipboard.");
+        }
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(modal_rect.min[0] + pad + button_w + pad, button_y, button_w, row_h),
+            "Close",
+            .{ .variant = .primary },
+        )) {
+            self.closeAboutModal();
+            return;
+        }
+
+        if (self.mouse_released and !modal_rect.contains(.{ self.mouse_x, self.mouse_y })) {
+            self.closeAboutModal();
+        }
+    }
+
     fn drawWorkspaceUi(self: *App, ui_window: *UiWindow, fb_width: u32, fb_height: u32) void {
         self.ui_commands.clear();
         ui_draw_context.setGlobalCommandList(&self.ui_commands);
         defer ui_draw_context.clearGlobalCommandList();
 
         const package_modal_open = self.package_manager_modal_open;
+        const about_modal_open = self.about_modal_open;
         const saved_mouse_down = self.mouse_down;
         const saved_mouse_clicked = self.mouse_clicked;
         const saved_mouse_released = self.mouse_released;
         const saved_mouse_right_clicked = self.mouse_right_clicked;
-        if (package_modal_open) {
+        if (package_modal_open or about_modal_open) {
             self.mouse_down = false;
             self.mouse_clicked = false;
             self.mouse_released = false;
@@ -8277,7 +8375,7 @@ const App = struct {
         self.mouse_down = saved_mouse_down;
         self.mouse_right_clicked = saved_mouse_right_clicked;
 
-        if (package_modal_open) {
+        if (package_modal_open or about_modal_open) {
             self.mouse_down = false;
             self.mouse_clicked = false;
             self.mouse_released = false;
@@ -8285,12 +8383,13 @@ const App = struct {
         }
         _ = self.drawWindowMenuBar(ui_window, fb_width);
         self.drawStatusOverlay(fb_width, fb_height);
-        if (package_modal_open) {
+        if (package_modal_open or about_modal_open) {
             self.mouse_down = saved_mouse_down;
             self.mouse_clicked = saved_mouse_clicked;
             self.mouse_released = saved_mouse_released;
             self.mouse_right_clicked = saved_mouse_right_clicked;
-            self.drawPackageManagerModal(fb_width, fb_height);
+            if (package_modal_open) self.drawPackageManagerModal(fb_width, fb_height);
+            if (about_modal_open) self.drawAboutModal(fb_width, fb_height);
         }
     }
 
@@ -8528,14 +8627,7 @@ const App = struct {
                         "About SpiderApp",
                         .{ .variant = .secondary },
                     )) {
-                        const about = std.fmt.allocPrint(
-                            self.allocator,
-                            "SpiderApp v{s} - launcher/workspace flow enabled.",
-                            .{currentBuildLabel()},
-                        ) catch null;
-                        defer if (about) |value| self.allocator.free(value);
-                        if (about) |value| self.setLauncherNotice(value);
-                        self.appendMessage("system", about orelse "SpiderApp IDE - launcher/workspace flow enabled.", null) catch {};
+                        self.openAboutModal();
                         self.ide_menu_open = null;
                     }
                 },
@@ -15885,6 +15977,16 @@ const App = struct {
         self.package_manager_modal_notice = null;
     }
 
+    fn setAboutModalNotice(self: *App, message: []const u8) void {
+        if (self.about_modal_notice) |existing| self.allocator.free(existing);
+        self.about_modal_notice = self.allocator.dupe(u8, message) catch null;
+    }
+
+    fn clearAboutModalNotice(self: *App) void {
+        if (self.about_modal_notice) |existing| self.allocator.free(existing);
+        self.about_modal_notice = null;
+    }
+
     fn selectedPackageManagerEntry(self: *App) ?*const PackageManagerEntry {
         if (self.package_manager_packages.items.len == 0) return null;
         if (self.package_manager_selected_index >= self.package_manager_packages.items.len) return null;
@@ -15897,12 +15999,14 @@ const App = struct {
         self.clearPackageManagerModalError();
         self.clearPackageManagerModalNotice();
         self.refreshPackageManagerPackages() catch |err| {
-            const msg = self.formatControlOpError("Package list failed", err);
-            if (msg) |text| {
-                defer self.allocator.free(text);
-                self.setPackageManagerModalError(text);
-            } else {
-                self.setPackageManagerModalError("Package list failed.");
+            if (err != error.RemoteError) {
+                const msg = self.formatControlOpError("Package list failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setPackageManagerModalError(text);
+                } else {
+                    self.setPackageManagerModalError("Package list failed.");
+                }
             }
         };
     }
@@ -15912,6 +16016,22 @@ const App = struct {
         self.clearPackageManagerModalError();
         self.clearPackageManagerModalNotice();
         if (self.settings_panel.focused_field == .package_manager_install_payload) {
+            self.settings_panel.focused_field = .none;
+        }
+    }
+
+    fn openAboutModal(self: *App) void {
+        self.about_modal_open = true;
+        self.settings_panel.focused_field = .about_modal_build_label;
+        self.about_modal_build_label.clearRetainingCapacity();
+        self.about_modal_build_label.appendSlice(self.allocator, currentBuildLabel()) catch {};
+        self.clearAboutModalNotice();
+    }
+
+    fn closeAboutModal(self: *App) void {
+        self.about_modal_open = false;
+        self.clearAboutModalNotice();
+        if (self.settings_panel.focused_field == .about_modal_build_label) {
             self.settings_panel.focused_field = .none;
         }
     }
@@ -16082,6 +16202,7 @@ const App = struct {
     fn returnToLauncher(self: *App, reason: stage_machine.ReturnReason) void {
         self.saveActiveWorkspaceLayout();
         self.closePackageManagerModal();
+        self.closeAboutModal();
         self.ui_stage = .launcher;
         self.ide_menu_open = null;
         self.windows_menu_open_window_id = null;
@@ -16146,6 +16267,7 @@ const App = struct {
     fn disconnect(self: *App) void {
         self.setDragMouseCapture(false);
         self.closePackageManagerModal();
+        self.closeAboutModal();
         self.debug_scrollbar_dragging = false;
         self.form_scroll_drag_target = .none;
         self.stopFilesystemWorker();
