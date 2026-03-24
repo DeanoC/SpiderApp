@@ -1433,6 +1433,7 @@ const App = struct {
     pending_close_window_id: ?u32 = null,
 
     message_counter: u64 = 0,
+    mount_control_ready: bool = false,
     debug_frame_counter: u64 = 0,
     perf_frame_panel_ns: PanelDrawFrameNs = .{},
     perf_frame_cmd_stats: RenderCommandFrameStats = .{},
@@ -4053,6 +4054,7 @@ const App = struct {
 
                 client.deinit();
                 self.ws_client = null;
+                self.mount_control_ready = false;
                 self.session_attach_state = .unknown;
                 self.setConnectionState(.error_state, "Connection lost. Please reconnect.");
                 if (self.ui_stage == .workspace) {
@@ -8103,7 +8105,7 @@ const App = struct {
             .{ .variant = .secondary, .disabled = selected_disabled },
         )) {
             if (selected_entry) |entry| {
-                const payload = std.fmt.allocPrint(self.allocator, "{{\"venom_id\":\"{s}\"}}", .{entry.package_id}) catch null;
+                const payload = self.buildPackageManagerIdPayload(entry.package_id) catch null;
                 defer if (payload) |value| self.allocator.free(value);
                 if (payload) |value| {
                     const control_name = if (entry.enabled) "disable.json" else "enable.json";
@@ -8126,7 +8128,7 @@ const App = struct {
             .{ .variant = .secondary, .disabled = selected_disabled },
         )) {
             if (selected_entry) |entry| {
-                const payload = std.fmt.allocPrint(self.allocator, "{{\"venom_id\":\"{s}\"}}", .{entry.package_id}) catch null;
+                const payload = self.buildPackageManagerIdPayload(entry.package_id) catch null;
                 defer if (payload) |value| self.allocator.free(value);
                 if (payload) |value| {
                     self.runPackageManagerOperation("remove.json", value, "Package removed.") catch |err| {
@@ -15567,6 +15569,7 @@ const App = struct {
         self.clearContractServices();
         self.clearTerminalState();
         self.resetFsrpcConnectionState();
+        self.mount_control_ready = false;
         if (self.ws_client) |*existing| {
             while (existing.tryReceive()) |msg| self.allocator.free(msg);
             existing.deinit();
@@ -15617,6 +15620,7 @@ const App = struct {
         self.ws_client.?.connect() catch |err| {
             self.ws_client.?.deinit();
             self.ws_client = null;
+            self.mount_control_ready = false;
             const msg = try std.fmt.allocPrint(self.allocator, "Connect failed: {s}", .{@errorName(err)});
             defer self.allocator.free(msg);
             self.setConnectionState(.error_state, msg);
@@ -15635,6 +15639,7 @@ const App = struct {
                 appendGuiDiagnosticLogFmt("[GUI] unified control connect failed: {s}", .{@errorName(err)});
                 client.deinit();
                 self.ws_client = null;
+                self.mount_control_ready = false;
                 const msg = if (err == error.RemoteError) blk: {
                     if (control_plane.lastRemoteError()) |remote| {
                         std.log.err("[GUI] remote control error detail: {s}", .{remote});
@@ -15664,6 +15669,7 @@ const App = struct {
             defer self.allocator.free(connect_payload_json);
             std.log.info("[GUI] unified control connect succeeded payload={s}", .{connect_payload_json});
             appendGuiDiagnosticLogFmt("[GUI] unified control connect succeeded payload={s}", .{connect_payload_json});
+            self.mount_control_ready = true;
             self.applyConnectSetupHintFromPayload(connect_payload_json) catch |err| {
                 std.log.warn("Failed to parse connect setup hint payload: {s}", .{@errorName(err)});
                 self.clearConnectSetupHint();
@@ -16257,6 +16263,7 @@ const App = struct {
             client.deinit();
             self.ws_client = null;
         }
+        self.mount_control_ready = false;
         self.clearPendingSend();
         self.clearSessions();
         self.debug_stream_enabled = false;
@@ -16530,7 +16537,7 @@ const App = struct {
         timeout_ms: i64,
     ) !unified_v2_client.JsonEnvelope {
         unified_v2_client.clearLastRemoteError();
-        try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
+        try self.ensureMountControlReadyGui(client);
         const request_id = try unified_v2_client.nextRequestId(self.allocator, &self.message_counter, "mount");
         defer self.allocator.free(request_id);
         return unified_v2_client.sendControlRequest(
@@ -16541,11 +16548,24 @@ const App = struct {
             payload_json,
             timeout_ms,
         ) catch |err| {
+            if (err == error.ConnectionClosed) self.mount_control_ready = false;
             if (err == error.RemoteError) {
                 if (unified_v2_client.lastRemoteError()) |remote| self.setFsrpcRemoteError(remote);
             }
             return err;
         };
+    }
+
+    fn ensureMountControlReadyGui(self: *App, client: *ws_client_mod.WebSocketClient) !void {
+        if (self.mount_control_ready and client.isAlive()) return;
+        try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
+        self.mount_control_ready = true;
+    }
+
+    fn buildPackageManagerIdPayload(self: *App, package_id: []const u8) ![]u8 {
+        const escaped_id = try jsonEscape(self.allocator, package_id);
+        defer self.allocator.free(escaped_id);
+        return std.fmt.allocPrint(self.allocator, "{{\"venom_id\":\"{s}\"}}", .{escaped_id});
     }
 
     fn controlPayloadObjectGui(self: *App, envelope: *unified_v2_client.JsonEnvelope) !std.json.ObjectMap {
