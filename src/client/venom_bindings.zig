@@ -48,32 +48,29 @@ pub fn readPreferredVenomBinding(
     venom_id: []const u8,
 ) !VenomBinding {
     if (scope.agent_id) |agent_id| {
-        const index_path = try std.fmt.allocPrint(allocator, "/agents/{s}/venoms/VENOMS.json", .{agent_id});
-        defer allocator.free(index_path);
-        const preferred_prefix = try std.fmt.allocPrint(allocator, "/agents/{s}/venoms/", .{agent_id});
-        defer allocator.free(preferred_prefix);
-        if (readVenomBindingFromIndexPath(allocator, reader, index_path, preferred_prefix, venom_id)) |binding| {
-            return binding;
-        } else |err| switch (err) {
-            error.FileNotFound, error.InvalidResponse, error.ServiceNotFound => {},
+        const agent_index_path = try std.fmt.allocPrint(allocator, "/agents/{s}/venoms/VENOMS.json", .{agent_id});
+        defer allocator.free(agent_index_path);
+        const agent_prefix = try std.fmt.allocPrint(allocator, "/agents/{s}/venoms/", .{agent_id});
+        defer allocator.free(agent_prefix);
+        const agent_binding = readVenomBindingFromIndexPath(
+            allocator,
+            reader,
+            agent_index_path,
+            agent_prefix,
+            venom_id,
+        ) catch |err| switch (err) {
+            error.FileNotFound, error.ServiceNotFound => null,
             else => return err,
-        }
+        };
+        if (agent_binding) |binding| return binding;
     }
-
-    if (scope.workspace_id) |workspace_id| {
-        const index_path = try std.fmt.allocPrint(allocator, "/projects/{s}/venoms/VENOMS.json", .{workspace_id});
-        defer allocator.free(index_path);
-        const preferred_prefix = try std.fmt.allocPrint(allocator, "/projects/{s}/venoms/", .{workspace_id});
-        defer allocator.free(preferred_prefix);
-        if (readVenomBindingFromIndexPath(allocator, reader, index_path, preferred_prefix, venom_id)) |binding| {
-            return binding;
-        } else |err| switch (err) {
-            error.FileNotFound, error.InvalidResponse, error.ServiceNotFound => {},
-            else => return err,
-        }
-    }
-
-    return readVenomBindingFromIndexPath(allocator, reader, "/global/venoms/VENOMS.json", "/global/", venom_id);
+    return readVenomBindingFromIndexPath(
+        allocator,
+        reader,
+        "/.spiderweb/venoms/VENOMS.json",
+        "/.spiderweb/venoms/",
+        venom_id,
+    );
 }
 
 pub fn discoverChatBindingPaths(
@@ -82,7 +79,7 @@ pub fn discoverChatBindingPaths(
     scope: WorkspaceBindingScope,
 ) !ChatBindingPaths {
     var binding = readPreferredVenomBinding(allocator, reader, scope, "chat") catch VenomBinding{
-        .venom_path = try allocator.dupe(u8, "/global/chat"),
+        .venom_path = try allocator.dupe(u8, "/.spiderweb/venoms/chat"),
     };
     defer binding.deinit(allocator);
     var jobs_binding = readPreferredVenomBinding(allocator, reader, scope, "jobs") catch null;
@@ -112,7 +109,7 @@ pub fn discoverChatBindingPaths(
         const discovered = try readVenomOpsPathValue(allocator, reader, ops_base_path, "jobs_root");
         if (discovered) |value| break :blk value;
         if (try deriveSiblingVenomPath(allocator, binding.venom_path, "jobs")) |value| break :blk value;
-        break :blk try allocator.dupe(u8, "/global/jobs");
+        break :blk try allocator.dupe(u8, "/.spiderweb/venoms/jobs");
     };
     errdefer allocator.free(jobs_root);
 
@@ -121,7 +118,7 @@ pub fn discoverChatBindingPaths(
         const discovered = try readVenomOpsPathValue(allocator, reader, ops_base_path, "thoughts_root");
         if (discovered) |value| break :blk value;
         if (try deriveSiblingVenomPath(allocator, binding.venom_path, "thoughts")) |value| break :blk value;
-        break :blk try allocator.dupe(u8, "/global/thoughts");
+        break :blk try allocator.dupe(u8, "/.spiderweb/venoms/thoughts");
     };
     errdefer allocator.free(thoughts_root);
 

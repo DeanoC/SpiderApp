@@ -31,7 +31,13 @@ spider --help
 - `workspace mount list [workspace_id]` - List workspace mounts
 - `workspace mount add <mount_path> <node_id> <export_name>` - Add a workspace mount
 - `workspace mount remove <mount_path> [node_id export_name]` - Remove a workspace mount
-- `workspace handoff show [generic|codex_app|spider_monkey]` - Print worker handoff commands
+- `workspace handoff show [generic|codex_app|spider_monkey]` - Print runtime handoff commands
+- `package list` - List installed and builtin packages from `/.spiderweb/control/packages`
+- `package info <package_id>` - Show one package definition
+- `package install <json_or_@file>` - Install a package definition
+- `package enable <package_id>` - Re-enable an installed package
+- `package disable <package_id>` - Disable an installed package from discovery/use
+- `package remove <package_id>` - Remove an installed package
 - `agent list` - List discoverable agents
 - `agent info <agent_id>` - Show one agent's metadata
 - `session list` - List known sessions for this connection

@@ -121,7 +121,7 @@ spider node service-runtime node-2 camera-main restart
 
 ## node watch [node_id] [--replay-limit <n>]
 
-Poll the retained node-service event feed at `/global/services/node-service-events.ndjson`
+Poll the retained node venom event feed at `/.spiderweb/catalog/node-venom-events.ndjson`
 over Acheron and print newly appended events as catalogs change.
 
 Use `node_id` to filter to one node, or omit it to watch all nodes.

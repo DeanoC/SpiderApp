@@ -140,12 +140,12 @@ pub const WorkspaceDetail = struct {
 pub const WorkspaceTemplateBindView = struct {
     bind_path: []u8,
     venom_id: []u8,
-    provider_scope: []u8,
+    host_role: []u8,
 
     pub fn deinit(self: *WorkspaceTemplateBindView, allocator: std.mem.Allocator) void {
         allocator.free(self.bind_path);
         allocator.free(self.venom_id);
-        allocator.free(self.provider_scope);
+        allocator.free(self.host_role);
         self.* = undefined;
     }
 };
