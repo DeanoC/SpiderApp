@@ -643,7 +643,7 @@ pub fn executeWorkspaceTemplateCommand(allocator: std.mem.Allocator, options: ar
         for (template.binds.items) |bind| {
             try stdout.print(
                 "    - {s} <= venom:{s} scope={s}\n",
-                .{ bind.bind_path, bind.venom_id, bind.provider_scope },
+                .{ bind.bind_path, bind.venom_id, bind.host_role },
             );
         }
         return;
