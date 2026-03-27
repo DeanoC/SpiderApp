@@ -2974,7 +2974,7 @@ const App = struct {
         return true;
     }
 
-    fn collectDockLayoutSafe(
+    pub fn collectDockLayoutSafe(
         self: *App,
         manager: *panel_manager.PanelManager,
         dock_area: UiRect,
@@ -3712,7 +3712,7 @@ const App = struct {
         return true;
     }
 
-    fn collectDockInteractionGeometry(
+    pub fn collectDockInteractionGeometry(
         self: *App,
         manager: *panel_manager.PanelManager,
         dock_area: UiRect,
@@ -3816,12 +3816,12 @@ const App = struct {
         }
     }
 
-    fn shouldLogDebug(self: *App, every_frames: u64) bool {
+    pub fn shouldLogDebug(self: *App, every_frames: u64) bool {
         if (every_frames == 0) return false;
         return self.debug_frame_counter > 0 and (self.debug_frame_counter % every_frames) == 0;
     }
 
-    fn shouldLogStartup(self: *App) bool {
+    pub fn shouldLogStartup(self: *App) bool {
         return self.debug_frame_counter <= 5;
     }
 
@@ -5776,7 +5776,7 @@ const App = struct {
         return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, remote }) catch null;
     }
 
-    fn formatControlOpError(self: *App, operation: []const u8, err: anyerror) ?[]u8 {
+    pub fn formatControlOpError(self: *App, operation: []const u8, err: anyerror) ?[]u8 {
         if (err == error.RemoteError) {
             if (control_plane.lastRemoteError()) |remote| {
                 return self.formatControlRemoteMessage(operation, remote);
@@ -5911,7 +5911,7 @@ const App = struct {
         self.connect_setup_hint = hint;
     }
 
-    fn selectedWorkspaceId(self: *const App) ?[]const u8 {
+    pub fn selectedWorkspaceId(self: *const App) ?[]const u8 {
         if (self.settings_panel.project_id.items.len > 0) return self.settings_panel.project_id.items;
         return self.config.selectedWorkspace();
     }
@@ -5931,7 +5931,7 @@ const App = struct {
         return self.defaultAttachWorkspaceId();
     }
 
-    fn selectedWorkspaceSummary(self: *const App) ?*const workspace_types.WorkspaceSummary {
+    pub fn selectedWorkspaceSummary(self: *const App) ?*const workspace_types.WorkspaceSummary {
         const workspace_id = self.selectedWorkspaceId() orelse return null;
         for (self.ws.projects.items) |*project| {
             if (std.mem.eql(u8, project.id, workspace_id)) return project;
@@ -5939,7 +5939,7 @@ const App = struct {
         return null;
     }
 
-    fn selectedWorkspaceTokenLocked(self: *const App) ?bool {
+    pub fn selectedWorkspaceTokenLocked(self: *const App) ?bool {
         const selected_workspace = self.selectedWorkspaceSummary() orelse return null;
         return selected_workspace.token_locked;
     }
@@ -5954,7 +5954,7 @@ const App = struct {
         try self.settings_panel.project_id.appendSlice(self.allocator, workspace_id);
     }
 
-    fn selectWorkspaceInSettings(self: *App, workspace_id: []const u8) !void {
+    pub fn selectWorkspaceInSettings(self: *App, workspace_id: []const u8) !void {
         self.settings_panel.project_id.clearRetainingCapacity();
         try self.settings_panel.project_id.appendSlice(self.allocator, workspace_id);
         self.ws.workspace_selector_open = false;
@@ -5974,7 +5974,7 @@ const App = struct {
         try self.syncSettingsToConfig();
     }
 
-    fn refreshWorkspaceData(self: *App) !void {
+    pub fn refreshWorkspaceData(self: *App) !void {
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
         try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
 
@@ -6158,7 +6158,7 @@ const App = struct {
         }
     }
 
-    fn selectedMission(self: *App) ?*MissionRecordView {
+    pub fn selectedMission(self: *App) ?*MissionRecordView {
         const selected_id = self.mission.selected_id orelse return if (self.mission.records.items.len > 0) &self.mission.records.items[0] else null;
         for (self.mission.records.items) |*mission| {
             if (std.mem.eql(u8, mission.mission_id, selected_id)) return mission;
@@ -6445,7 +6445,7 @@ const App = struct {
         return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, @errorName(err) }) catch null;
     }
 
-    fn activateSelectedWorkspace(self: *App) !void {
+    pub fn activateSelectedWorkspace(self: *App) !void {
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
         const project_id = self.selectedWorkspaceId() orelse return error.MissingField;
 
@@ -6526,7 +6526,7 @@ const App = struct {
         }
     }
 
-    fn persistLauncherConnectToken(self: *App) !void {
+    pub fn persistLauncherConnectToken(self: *App) !void {
         const token = std.mem.trim(u8, self.ws.launcher_connect_token.items, " \t\r\n");
         try self.setRoleToken(.admin, token, false);
         try self.setRoleToken(.user, token, false);
@@ -6536,7 +6536,7 @@ const App = struct {
         return if (self.config.active_role == .admin) "Admin" else "User";
     }
 
-    fn setActiveConnectRole(self: *App, role: config_mod.Config.TokenRole) !void {
+    pub fn setActiveConnectRole(self: *App, role: config_mod.Config.TokenRole) !void {
         if (self.config.active_role == role) return;
         try self.config.setActiveRole(role);
         try self.config.save();
@@ -6828,7 +6828,7 @@ const App = struct {
         self.clearWorkspaceError();
     }
 
-    fn validateWorkspaceMountAddInput(self: *App) ?[]const u8 {
+    pub fn validateWorkspaceMountAddInput(self: *App) ?[]const u8 {
         _ = self.selectedWorkspaceId() orelse return "Select a workspace before adding mounts.";
         const mount_path = std.mem.trim(u8, self.settings_panel.project_mount_path.items, " \t");
         if (mount_path.len == 0) return "Mount path is required.";
@@ -6839,7 +6839,7 @@ const App = struct {
         return null;
     }
 
-    fn validateWorkspaceMountRemoveInput(self: *App) ?[]const u8 {
+    pub fn validateWorkspaceMountRemoveInput(self: *App) ?[]const u8 {
         _ = self.selectedWorkspaceId() orelse return "Select a workspace before removing mounts.";
         const mount_path = std.mem.trim(u8, self.settings_panel.project_mount_path.items, " \t");
         if (mount_path.len == 0) return "Mount path is required.";
@@ -6881,7 +6881,7 @@ const App = struct {
         self.clearWorkspaceError();
     }
 
-    fn validateWorkspaceBindAddInput(self: *App) ?[]const u8 {
+    pub fn validateWorkspaceBindAddInput(self: *App) ?[]const u8 {
         _ = self.selectedWorkspaceId() orelse return "Select a workspace before adding binds.";
         const bind_path = std.mem.trim(u8, self.settings_panel.workspace_bind_path.items, " \t");
         if (bind_path.len == 0) return "Bind path is required.";
@@ -6890,7 +6890,7 @@ const App = struct {
         return null;
     }
 
-    fn validateWorkspaceBindRemoveInput(self: *App) ?[]const u8 {
+    pub fn validateWorkspaceBindRemoveInput(self: *App) ?[]const u8 {
         _ = self.selectedWorkspaceId() orelse return "Select a workspace before removing binds.";
         const bind_path = std.mem.trim(u8, self.settings_panel.workspace_bind_path.items, " \t");
         if (bind_path.len == 0) return "Bind path is required.";
@@ -7163,7 +7163,7 @@ const App = struct {
         _ = child.spawn() catch {};
     }
 
-    fn sharedStyleSheet(self: *const App) zui.ui.theme_engine.style_sheet.StyleSheet {
+    pub fn sharedStyleSheet(self: *const App) zui.ui.theme_engine.style_sheet.StyleSheet {
         _ = self;
         return zui.ui.theme_engine.runtime.getStyleSheet();
     }
@@ -7818,7 +7818,7 @@ const App = struct {
         }
     }
 
-    fn drawLauncherCreateWorkspaceModal(self: *App, fb_width: u32, fb_height: u32) void {
+    pub fn drawLauncherCreateWorkspaceModal(self: *App, fb_width: u32, fb_height: u32) void {
         const layout = self.panelLayoutMetrics();
         const pad = @max(layout.inset, 12.0 * self.ui_scale);
         const row_h = @max(layout.button_height, 34.0 * self.ui_scale);
@@ -8545,7 +8545,7 @@ const App = struct {
         }
     }
 
-    fn windowMenuBarHeight(self: *App) f32 {
+    pub fn windowMenuBarHeight(self: *App) f32 {
         if (storage.isAndroid()) return 0.0;
         const layout = self.panelLayoutMetrics();
         return @max(layout.button_height + layout.inner_inset * 1.2, 30.0 * self.ui_scale);
@@ -8575,7 +8575,7 @@ const App = struct {
         };
     }
 
-    fn drawWindowMenuBar(self: *App, ui_window: *UiWindow, fb_width: u32) f32 {
+    pub fn drawWindowMenuBar(self: *App, ui_window: *UiWindow, fb_width: u32) f32 {
         if (storage.isAndroid()) {
             return 0.0;
         }
@@ -8879,7 +8879,7 @@ const App = struct {
         ui_window.swapchain.render(&self.gpu, &self.ui_commands);
     }
 
-    fn drawDockGroup(self: *App, manager: *panel_manager.PanelManager, node_id: dock_graph.NodeId, rect: UiRect) void {
+    pub fn drawDockGroup(self: *App, manager: *panel_manager.PanelManager, node_id: dock_graph.NodeId, rect: UiRect) void {
         if (!self.isLayoutGroupUsable(manager, node_id)) return;
         const node = manager.workspace.dock_layout.getNode(node_id) orelse return;
         const tabs_node = switch (node.*) {
@@ -8897,7 +8897,7 @@ const App = struct {
         self.drawTabsPanel(manager, &tabs_node, rect);
     }
 
-    fn drawDockSplitters(
+    pub fn drawDockSplitters(
         self: *App,
         queue: *ui_input_state.InputQueue,
         ui_window: *UiWindow,
@@ -8919,7 +8919,7 @@ const App = struct {
         }
     }
 
-    fn drawDockDragOverlay(
+    pub fn drawDockDragOverlay(
         self: *App,
         queue: *ui_input_state.InputQueue,
         manager: *panel_manager.PanelManager,
@@ -9023,7 +9023,7 @@ const App = struct {
         return out.len > 0;
     }
 
-    fn isLayoutGroupUsable(self: *App, manager: *panel_manager.PanelManager, node_id: dock_graph.NodeId) bool {
+    pub fn isLayoutGroupUsable(self: *App, manager: *panel_manager.PanelManager, node_id: dock_graph.NodeId) bool {
         if (node_id >= manager.workspace.dock_layout.nodes.items.len) return false;
         if (!self.isDockLayoutGraphHeaderSane(&manager.workspace.dock_layout)) return false;
         const node = manager.workspace.dock_layout.getNode(node_id) orelse return false;
@@ -10270,7 +10270,7 @@ const App = struct {
         }
     }
 
-    fn refreshMcpConfig(self: *App) void {
+    pub fn refreshMcpConfig(self: *App) void {
         const client = if (self.ws_client) |*value| value else return;
         self.fsrpcBootstrapGui(client) catch return;
         self.clearMcpEntries();
@@ -10334,7 +10334,7 @@ const App = struct {
         self.ws.mcp_last_refresh_ms = now_ms;
     }
 
-    fn loadMcpRuntime(self: *App, entry: *const McpEntry) void {
+    pub fn loadMcpRuntime(self: *App, entry: *const McpEntry) void {
         const client = if (self.ws_client) |*value| value else return;
         if (self.ws.mcp_selected_runtime) |v| {
             self.allocator.free(v);
@@ -10450,7 +10450,7 @@ const App = struct {
         self.setLauncherNotice("Workspace created.");
     }
 
-    fn drawWorkspaceWizardModal(self: *App, fb_width: u32, fb_height: u32) void {
+    pub fn drawWorkspaceWizardModal(self: *App, fb_width: u32, fb_height: u32) void {
         const layout = self.panelLayoutMetrics();
         const pad = @max(layout.inset, 12.0 * self.ui_scale);
         const row_h = @max(layout.button_height, 34.0 * self.ui_scale);
@@ -10920,7 +10920,7 @@ const App = struct {
         return panel_id;
     }
 
-    fn drawMissionSummaryCard(self: *App, rect: Rect, accent: [4]f32, title: []const u8, value: []const u8, summary: []const u8) void {
+    pub fn drawMissionSummaryCard(self: *App, rect: Rect, accent: [4]f32, title: []const u8, value: []const u8, summary: []const u8) void {
         self.drawSurfacePanel(rect);
         const pad = @max(self.theme.spacing.xs, 8.0 * self.ui_scale);
         const line_h = self.textLineHeight();
@@ -10931,7 +10931,7 @@ const App = struct {
         self.drawTextTrimmed(rect.min[0] + pad * 1.6, rect.min[1] + rect.height() - pad - line_h, rect.width() - pad * 2.0, summary, self.theme.colors.text_secondary);
     }
 
-    fn workspaceRecoveryHeadline(self: *App, buf: []u8) []const u8 {
+    pub fn workspaceRecoveryHeadline(self: *App, buf: []u8) []const u8 {
         if (self.ws.workspace_recovery_suspended_until != 0 and self.debug_frame_counter < self.ws.workspace_recovery_suspended_until) {
             return "suspended";
         }
@@ -10944,7 +10944,7 @@ const App = struct {
         return "stable";
     }
 
-    fn workspaceRecoveryColor(self: *App) [4]f32 {
+    pub fn workspaceRecoveryColor(self: *App) [4]f32 {
         if (self.ws.workspace_recovery_suspended_until != 0 and self.debug_frame_counter < self.ws.workspace_recovery_suspended_until) {
             return self.theme.colors.danger;
         }
@@ -10957,7 +10957,7 @@ const App = struct {
         return self.theme.colors.success;
     }
 
-    fn missionDashboardStatusText(self: *App, buf: []u8) []const u8 {
+    pub fn missionDashboardStatusText(self: *App, buf: []u8) []const u8 {
         if (self.connection_state != .connected) return "Disconnected";
         if (self.client_context.pending_workboard_request_id != null) return "Updating mission dashboard...";
         if (self.mission.last_error) |value| return value;
@@ -11872,7 +11872,7 @@ const App = struct {
         }
     }
 
-    fn workspacePanelModel(self: *App) panels_bridge.WorkspacePanelModel {
+    pub fn workspacePanelModel(self: *App) panels_bridge.WorkspacePanelModel {
         const selected_workspace_lock_state = self.selectedWorkspaceTokenLocked();
         const selected_workspace_known = selected_workspace_lock_state != null;
         const selected_is_locked = if (selected_workspace_lock_state) |locked| locked else false;
@@ -11902,7 +11902,7 @@ const App = struct {
         return workspace_host_mod.buildWorkspacePanelView(self);
     }
 
-    fn performWorkspacePanelAction(self: *App, action: panels_bridge.WorkspacePanelAction) void {
+    pub fn performWorkspacePanelAction(self: *App, action: panels_bridge.WorkspacePanelAction) void {
         switch (action) {
             .select_workspace_index => |project_index| {
                 if (project_index >= self.ws.projects.items.len) return;
@@ -13490,7 +13490,6 @@ const App = struct {
                 .mouse_down = self.mouse_down,
                 .mouse_clicked = self.mouse_clicked,
                 .mouse_released = self.mouse_released,
-                .mouse_scroll_y = self.mouse_scroll_y,
             },
             &panel_state,
         );
@@ -14928,7 +14927,7 @@ const App = struct {
         self.handleChatPanelAction(action);
     }
 
-    fn drawStatusOverlay(self: *App, fb_width: u32, fb_height: u32) void {
+    pub fn drawStatusOverlay(self: *App, fb_width: u32, fb_height: u32) void {
         const status_height: f32 = 24.0 * self.ui_scale;
         const fb_w: f32 = @floatFromInt(fb_width);
         const fb_h: f32 = @floatFromInt(fb_height);
@@ -14963,7 +14962,7 @@ const App = struct {
         );
     }
 
-    fn drawStatusRow(self: *App, rect: Rect) void {
+    pub fn drawStatusRow(self: *App, rect: Rect) void {
         self.drawSurfacePanel(rect);
 
         const inner = @max(self.theme.spacing.xs, 6.0 * self.ui_scale);
@@ -14984,7 +14983,7 @@ const App = struct {
         );
     }
 
-    fn drawVerticalScrollbar(
+    pub fn drawVerticalScrollbar(
         self: *App,
         target: FormScrollTarget,
         viewport_rect: Rect,
@@ -15055,7 +15054,7 @@ const App = struct {
         if (scrollbar.border) |border| self.drawRect(track_rect, border);
     }
 
-    fn drawButtonWidget(self: *App, rect: Rect, label: []const u8, opts: widgets.button.Options) bool {
+    pub fn drawButtonWidget(self: *App, rect: Rect, label: []const u8, opts: widgets.button.Options) bool {
         const block_interaction = self.text_input_context_menu_open and !self.text_input_context_menu_rendering;
         const state = widgets.button.updateState(
             .{ .x = rect.min[0], .y = rect.min[1], .width = rect.width(), .height = rect.height() },
@@ -15123,7 +15122,7 @@ const App = struct {
         return !block_interaction and !opts.disabled and self.mouse_released and rect.contains(.{ self.mouse_x, self.mouse_y });
     }
 
-    fn drawTextInputWidget(
+    pub fn drawTextInputWidget(
         self: *App,
         rect: Rect,
         text: []const u8,
@@ -15971,7 +15970,7 @@ const App = struct {
         try self.appendMessage("system", notice, null);
     }
 
-    fn tryConnect(self: *App, manager: *panel_manager.PanelManager) !void {
+    pub fn tryConnect(self: *App, manager: *panel_manager.PanelManager) !void {
         if (self.settings_panel.server_url.items.len == 0) {
             self.setConnectionState(.error_state, "Server URL cannot be empty");
             return;
@@ -16259,7 +16258,7 @@ const App = struct {
         }
     }
 
-    fn saveSelectedProfileFromLauncher(self: *App) !void {
+    pub fn saveSelectedProfileFromLauncher(self: *App) !void {
         if (self.config.connection_profiles.len == 0) return error.ProfileNotFound;
         const profile_name = std.mem.trim(u8, self.ws.launcher_profile_name.items, " \t\r\n");
         const server_url = std.mem.trim(u8, self.settings_panel.server_url.items, " \t\r\n");
@@ -16277,7 +16276,7 @@ const App = struct {
         self.setLauncherNotice("Profile saved.");
     }
 
-    fn createConnectionProfileFromLauncher(self: *App) !void {
+    pub fn createConnectionProfileFromLauncher(self: *App) !void {
         const profile_name = std.mem.trim(u8, self.ws.launcher_profile_name.items, " \t\r\n");
         const server_url = std.mem.trim(u8, self.settings_panel.server_url.items, " \t\r\n");
         const metadata_trimmed = std.mem.trim(u8, self.ws.launcher_profile_metadata.items, " \t\r\n");
@@ -16301,7 +16300,7 @@ const App = struct {
         self.setLauncherNotice("Profile created.");
     }
 
-    fn applyLauncherSelectedProfile(self: *App) !void {
+    pub fn applyLauncherSelectedProfile(self: *App) !void {
         if (self.config.connection_profiles.len == 0) return;
         const index = @min(self.ws.launcher_selected_profile_index, self.config.connection_profiles.len - 1);
         const profile = self.config.connection_profiles[index];
@@ -16329,7 +16328,7 @@ const App = struct {
         try self.syncLauncherConnectTokenFromConfig();
     }
 
-    fn setLauncherNotice(self: *App, message: []const u8) void {
+    pub fn setLauncherNotice(self: *App, message: []const u8) void {
         if (self.ws.launcher_notice) |existing| self.allocator.free(existing);
         self.ws.launcher_notice = self.allocator.dupe(u8, message) catch null;
     }
@@ -16345,12 +16344,12 @@ const App = struct {
         self.ws.launcher_create_template_page = 0;
     }
 
-    fn setLauncherCreateWorkspaceModalError(self: *App, message: []const u8) void {
+    pub fn setLauncherCreateWorkspaceModalError(self: *App, message: []const u8) void {
         if (self.ws.launcher_create_modal_error) |existing| self.allocator.free(existing);
         self.ws.launcher_create_modal_error = self.allocator.dupe(u8, message) catch null;
     }
 
-    fn clearLauncherCreateWorkspaceModalError(self: *App) void {
+    pub fn clearLauncherCreateWorkspaceModalError(self: *App) void {
         if (self.ws.launcher_create_modal_error) |existing| self.allocator.free(existing);
         self.ws.launcher_create_modal_error = null;
     }
@@ -16441,7 +16440,7 @@ const App = struct {
         }
     }
 
-    fn syncLauncherCreateSelectedTemplateToSettings(self: *App) !void {
+    pub fn syncLauncherCreateSelectedTemplateToSettings(self: *App) !void {
         if (self.ws.launcher_create_templates.items.len == 0) {
             self.settings_panel.workspace_template_id.clearRetainingCapacity();
             return;
@@ -16455,13 +16454,13 @@ const App = struct {
         );
     }
 
-    fn selectedLauncherCreateWorkspaceTemplate(self: *const App) ?*const workspace_types.WorkspaceTemplate {
+    pub fn selectedLauncherCreateWorkspaceTemplate(self: *const App) ?*const workspace_types.WorkspaceTemplate {
         if (self.ws.launcher_create_templates.items.len == 0) return null;
         const selected_index = @min(self.ws.launcher_create_selected_template_index, self.ws.launcher_create_templates.items.len - 1);
         return &self.ws.launcher_create_templates.items[selected_index];
     }
 
-    fn refreshLauncherCreateWorkspaceTemplates(self: *App) !void {
+    pub fn refreshLauncherCreateWorkspaceTemplates(self: *App) !void {
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
         try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
 
@@ -16484,7 +16483,7 @@ const App = struct {
         try self.syncLauncherCreateSelectedTemplateToSettings();
     }
 
-    fn openLauncherCreateWorkspaceModal(self: *App) void {
+    pub fn openLauncherCreateWorkspaceModal(self: *App) void {
         self.ws.launcher_create_modal_open = true;
         self.settings_panel.focused_field = .project_create_name;
         self.clearLauncherCreateWorkspaceModalError();
@@ -16500,7 +16499,7 @@ const App = struct {
         };
     }
 
-    fn closeLauncherCreateWorkspaceModal(self: *App) void {
+    pub fn closeLauncherCreateWorkspaceModal(self: *App) void {
         self.ws.launcher_create_modal_open = false;
         self.clearLauncherCreateWorkspaceModalError();
         if (self.settings_panel.focused_field == .project_create_name or
@@ -16510,7 +16509,7 @@ const App = struct {
         }
     }
 
-    fn createWorkspaceFromLauncherModal(self: *App) !void {
+    pub fn createWorkspaceFromLauncherModal(self: *App) !void {
         const name = std.mem.trim(u8, self.settings_panel.project_create_name.items, " \t\r\n");
         if (name.len == 0) return error.MissingField;
         if (self.ws.launcher_create_templates.items.len == 0) return error.MissingField;
@@ -16582,7 +16581,7 @@ const App = struct {
         _ = self.ensureWorkspacePanel(&self.manager) catch {};
     }
 
-    fn openSelectedWorkspaceFromLauncher(self: *App) !void {
+    pub fn openSelectedWorkspaceFromLauncher(self: *App) !void {
         if (self.connection_state != .connected) return error.NotConnected;
         if (self.ws_client == null) return error.NotConnected;
         const project_id = self.selectedWorkspaceId() orelse return error.ProjectIdRequired;
@@ -16669,7 +16668,7 @@ const App = struct {
         };
     }
 
-    fn disconnect(self: *App) void {
+    pub fn disconnect(self: *App) void {
         self.setDragMouseCapture(false);
         self.debug.debug_scrollbar_dragging = false;
         self.form_scroll_drag_target = .none;
@@ -19908,7 +19907,7 @@ const App = struct {
         }
     }
 
-    fn setConnectionState(self: *App, state: ConnectionState, text: []const u8) void {
+    pub fn setConnectionState(self: *App, state: ConnectionState, text: []const u8) void {
         self.connection_state = state;
         const copy = self.allocator.dupe(u8, text) catch return;
         self.allocator.free(self.status_text);
@@ -19917,14 +19916,14 @@ const App = struct {
 
     // Drawing helpers
 
-    fn drawSurfacePanel(self: *App, rect: Rect) void {
+    pub fn drawSurfacePanel(self: *App, rect: Rect) void {
         const ss = self.sharedStyleSheet();
         const fill = ss.surfaces.surface orelse ss.panel.fill orelse Paint{ .solid = self.theme.colors.surface };
         self.drawPaintRect(rect, fill);
         self.drawRect(rect, ss.panel.border orelse self.theme.colors.border);
     }
 
-    fn drawPaintRect(self: *App, rect: Rect, paint: Paint) void {
+    pub fn drawPaintRect(self: *App, rect: Rect, paint: Paint) void {
         switch (paint) {
             .solid => |color| self.drawFilledRect(rect, color),
             .gradient4 => |g| {
@@ -19944,25 +19943,25 @@ const App = struct {
         }
     }
 
-    fn drawFilledRect(self: *App, rect: Rect, color: [4]f32) void {
+    pub fn drawFilledRect(self: *App, rect: Rect, color: [4]f32) void {
         self.ui_commands.pushRect(
             .{ .min = rect.min, .max = rect.max },
             .{ .fill = color },
         );
     }
 
-    fn drawRect(self: *App, rect: Rect, color: [4]f32) void {
+    pub fn drawRect(self: *App, rect: Rect, color: [4]f32) void {
         self.ui_commands.pushRect(
             .{ .min = rect.min, .max = rect.max },
             .{ .stroke = color },
         );
     }
 
-    fn drawLabel(self: *App, x: f32, y: f32, text: []const u8, color: [4]f32) void {
+    pub fn drawLabel(self: *App, x: f32, y: f32, text: []const u8, color: [4]f32) void {
         self.drawText(x, y, text, color);
     }
 
-    fn drawFormSectionTitle(
+    pub fn drawFormSectionTitle(
         self: *App,
         x: f32,
         y: *f32,
@@ -19977,7 +19976,7 @@ const App = struct {
         y.* += form_layout.advanceAfterTitle(layout);
     }
 
-    fn drawFormFieldLabel(
+    pub fn drawFormFieldLabel(
         self: *App,
         x: f32,
         y: *f32,
@@ -19992,7 +19991,7 @@ const App = struct {
         y.* += form_layout.advanceLabelToInput(layout);
     }
 
-    fn textLineHeight(self: *App) f32 {
+    pub fn textLineHeight(self: *App) f32 {
         const measured = self.metrics_context.lineHeight();
         const px: f32 = @floatFromInt(self.textPixelSize());
         const min_from_font = px * 1.18;
@@ -20096,7 +20095,7 @@ const App = struct {
         return 0;
     }
 
-    fn drawCenteredText(self: *App, rect: Rect, text: []const u8, color: [4]f32) void {
+    pub fn drawCenteredText(self: *App, rect: Rect, text: []const u8, color: [4]f32) void {
         const text_w = self.measureTextFast(text);
         const line_height = self.textLineHeight();
         const x = rect.min[0] + @max(0.0, (rect.width() - text_w) * 0.5);
@@ -20104,11 +20103,11 @@ const App = struct {
         self.drawText(x, y, text, color);
     }
 
-    fn drawText(self: *App, x: f32, y: f32, text: []const u8, color: [4]f32) void {
+    pub fn drawText(self: *App, x: f32, y: f32, text: []const u8, color: [4]f32) void {
         self.ui_commands.pushText(text, .{ x, y }, color, .body, self.textPixelSize());
     }
 
-    fn drawTextWrapped(self: *App, x: f32, y: f32, max_w: f32, text: []const u8, color: [4]f32) f32 {
+    pub fn drawTextWrapped(self: *App, x: f32, y: f32, max_w: f32, text: []const u8, color: [4]f32) f32 {
         var current_y = y;
         const line_height = self.textLineHeight();
         const wrap_w = @max(1.0, max_w);
@@ -20157,11 +20156,11 @@ const App = struct {
         return total_height;
     }
 
-    fn measureText(self: *App, text: []const u8) f32 {
+    pub fn measureText(self: *App, text: []const u8) f32 {
         return self.metrics_context.measureText(text, 0.0)[0];
     }
 
-    fn measureTextFast(self: *App, text: []const u8) f32 {
+    pub fn measureTextFast(self: *App, text: []const u8) f32 {
         var width: f32 = 0.0;
         var idx: usize = 0;
         while (idx < text.len) {
@@ -20183,7 +20182,7 @@ const App = struct {
         self.drawTextTrimmed(center_x - max_w * 0.5, y, max_w, text, color);
     }
 
-    fn drawTextTrimmed(self: *App, x: f32, y: f32, max_w: f32, text: []const u8, color: [4]f32) void {
+    pub fn drawTextTrimmed(self: *App, x: f32, y: f32, max_w: f32, text: []const u8, color: [4]f32) void {
         if (max_w <= 0.0) return;
         const text_w = self.measureTextFast(text);
         if (text_w <= max_w) {
