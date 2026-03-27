@@ -10666,7 +10666,7 @@ const App = struct {
             if (y + row_h > rect.max[1] - layout.input_height * 3.0 - row_h * 1.5) break;
             const line = std.fmt.allocPrint(self.allocator, "{s}  →  {s}", .{ m.path, m.node_id }) catch null;
             defer if (line) |v| self.allocator.free(v);
-            self.drawText(rect.min[0] + pad * 0.5, y + (row_h - layout.line_height) * 0.5, line orelse m.path, self.theme.colors.text);
+            self.drawText(rect.min[0] + pad * 0.5, y + (row_h - layout.line_height) * 0.5, line orelse m.path, self.theme.colors.text_primary);
             // Remove button
             const rm_w = @max(60.0 * self.ui_scale, self.measureText("Remove") + pad);
             if (self.drawButtonWidget(
@@ -10724,7 +10724,7 @@ const App = struct {
             if (y + row_h > rect.max[1] - layout.input_height * 3.0 - row_h * 1.5) break;
             const line = std.fmt.allocPrint(self.allocator, "{s}  →  {s}", .{ b.bind_path, b.target_path }) catch null;
             defer if (line) |v| self.allocator.free(v);
-            self.drawText(rect.min[0] + pad * 0.5, y + (row_h - layout.line_height) * 0.5, line orelse b.bind_path, self.theme.colors.text);
+            self.drawText(rect.min[0] + pad * 0.5, y + (row_h - layout.line_height) * 0.5, line orelse b.bind_path, self.theme.colors.text_primary);
             const rm_w = @max(60.0 * self.ui_scale, self.measureText("Remove") + pad);
             if (self.drawButtonWidget(
                 Rect.fromXYWH(rect.max[0] - rm_w, y, rm_w, row_h),
@@ -10780,17 +10780,17 @@ const App = struct {
         // Template
         const tmpl_id = if (self.selectedLauncherCreateWorkspaceTemplate()) |t| t.id else "(none)";
         self.drawTextTrimmed(rect.min[0], y, label_w, "Template:", self.theme.colors.text_secondary);
-        self.drawTextTrimmed(rect.min[0] + label_w, y, rect.width() - label_w, tmpl_id, self.theme.colors.text);
+        self.drawTextTrimmed(rect.min[0] + label_w, y, rect.width() - label_w, tmpl_id, self.theme.colors.text_primary);
         y += layout.line_height + layout.row_gap * 0.35;
         // Name
         const name = std.mem.trim(u8, self.settings_panel.project_create_name.items, " \t\r\n");
         self.drawTextTrimmed(rect.min[0], y, label_w, "Name:", self.theme.colors.text_secondary);
-        self.drawTextTrimmed(rect.min[0] + label_w, y, rect.width() - label_w, if (name.len > 0) name else "(none)", self.theme.colors.text);
+        self.drawTextTrimmed(rect.min[0] + label_w, y, rect.width() - label_w, if (name.len > 0) name else "(none)", self.theme.colors.text_primary);
         y += layout.line_height + layout.row_gap * 0.35;
         // Vision
         const vision = std.mem.trim(u8, self.settings_panel.project_create_vision.items, " \t\r\n");
         self.drawTextTrimmed(rect.min[0], y, label_w, "Vision:", self.theme.colors.text_secondary);
-        self.drawTextTrimmed(rect.min[0] + label_w, y, rect.width() - label_w, if (vision.len > 0) vision else "(none)", self.theme.colors.text);
+        self.drawTextTrimmed(rect.min[0] + label_w, y, rect.width() - label_w, if (vision.len > 0) vision else "(none)", self.theme.colors.text_primary);
         y += layout.line_height + layout.row_gap * 0.6;
         // Mounts
         const mount_count_str = std.fmt.allocPrint(self.allocator, "Mounts ({d}):", .{self.ws.workspace_wizard_mounts.items.len}) catch null;
@@ -10801,7 +10801,7 @@ const App = struct {
             if (y + layout.line_height > rect.max[1] - layout.line_height * 3.0) break;
             const line = std.fmt.allocPrint(self.allocator, "  {s}  →  {s}", .{ m.path, m.node_id }) catch null;
             defer if (line) |v| self.allocator.free(v);
-            self.drawTextTrimmed(rect.min[0] + pad * 0.5, y, rect.width() - pad * 0.5, line orelse m.path, self.theme.colors.text);
+            self.drawTextTrimmed(rect.min[0] + pad * 0.5, y, rect.width() - pad * 0.5, line orelse m.path, self.theme.colors.text_primary);
             y += layout.line_height + layout.row_gap * 0.2;
         }
         y += layout.row_gap * 0.4;
@@ -10814,7 +10814,7 @@ const App = struct {
             if (y + layout.line_height > rect.max[1]) break;
             const line = std.fmt.allocPrint(self.allocator, "  {s}  →  {s}", .{ b.bind_path, b.target_path }) catch null;
             defer if (line) |v| self.allocator.free(v);
-            self.drawTextTrimmed(rect.min[0] + pad * 0.5, y, rect.width() - pad * 0.5, line orelse b.bind_path, self.theme.colors.text);
+            self.drawTextTrimmed(rect.min[0] + pad * 0.5, y, rect.width() - pad * 0.5, line orelse b.bind_path, self.theme.colors.text_primary);
             y += layout.line_height + layout.row_gap * 0.2;
         }
     }
