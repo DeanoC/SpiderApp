@@ -39,6 +39,10 @@ pub const Verb = enum {
     stat,
     tree,
     ls,
+    catalog,
+    updates,
+    update,
+    update_all,
     status,
     rotate,
     history,
@@ -69,7 +73,12 @@ pub const Verb = enum {
     handoff,
     install,
     enable,
+    switch_release,
     disable,
+    rollback,
+    channel_get,
+    channel_set,
+    channel_clear,
     add,
     remove,
     show,
@@ -243,11 +252,20 @@ pub fn parseVerb(noun: Noun, arg: []const u8) ?Verb {
         },
         .package => {
             if (std.mem.eql(u8, arg, "list")) return .list;
+            if (std.mem.eql(u8, arg, "catalog")) return .catalog;
+            if (std.mem.eql(u8, arg, "updates")) return .updates;
+            if (std.mem.eql(u8, arg, "update")) return .update;
+            if (std.mem.eql(u8, arg, "update-all")) return .update_all;
             if (std.mem.eql(u8, arg, "info")) return .info;
             if (std.mem.eql(u8, arg, "get")) return .info;
+            if (std.mem.eql(u8, arg, "channel-get")) return .channel_get;
+            if (std.mem.eql(u8, arg, "channel-set")) return .channel_set;
+            if (std.mem.eql(u8, arg, "channel-clear")) return .channel_clear;
             if (std.mem.eql(u8, arg, "install")) return .install;
             if (std.mem.eql(u8, arg, "enable")) return .enable;
+            if (std.mem.eql(u8, arg, "switch")) return .switch_release;
             if (std.mem.eql(u8, arg, "disable")) return .disable;
+            if (std.mem.eql(u8, arg, "rollback")) return .rollback;
             if (std.mem.eql(u8, arg, "remove")) return .remove;
         },
         .auth => {

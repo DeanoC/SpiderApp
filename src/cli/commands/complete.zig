@@ -44,7 +44,7 @@ const bash_completion =
     \\  words=("${COMP_WORDS[@]}")
     \\
     \\  # Top-level nouns
-    \\  local nouns="chat fs agent session node workspace auth connect disconnect status help complete"
+    \\  local nouns="chat fs agent session node workspace package auth connect disconnect status help complete"
     \\
     \\  if [[ ${COMP_CWORD} -eq 1 ]]; then
     \\    COMPREPLY=( $(compgen -W "${nouns}" -- "${cur}") )
@@ -64,6 +64,7 @@ const bash_completion =
     \\      session)    COMPREPLY=( $(compgen -W "list status attach resume close history restore ${global_flags}" -- "${cur}") ) ;;
     \\      node)       COMPREPLY=( $(compgen -W "list info pending approve deny join-request service-get service-upsert service-runtime watch ${global_flags}" -- "${cur}") ) ;;
     \\      workspace)  COMPREPLY=( $(compgen -W "list use create up doctor info status template bind mount handoff ${global_flags}" -- "${cur}") ) ;;
+    \\      package)    COMPREPLY=( $(compgen -W "list catalog updates update update-all info get install channel-get channel-set channel-clear enable switch disable rollback remove ${global_flags}" -- "${cur}") ) ;;
     \\      auth)       COMPREPLY=( $(compgen -W "status rotate ${global_flags}" -- "${cur}") ) ;;
     \\      complete)   COMPREPLY=( $(compgen -W "bash zsh fish" -- "${cur}") ) ;;
     \\      *)          COMPREPLY=( $(compgen -W "${global_flags}" -- "${cur}") ) ;;
@@ -135,6 +136,7 @@ const zsh_completion =
     \\        session)    _arguments '1: :(list status attach resume close history restore)' ;;
     \\        node)       _arguments '1: :(list info pending approve deny join-request service-get service-upsert service-runtime watch)' ;;
     \\        workspace)  _spider_workspace ;;
+    \\        package)    _spider_package ;;
     \\        auth)       _arguments '1: :(status rotate)' ;;
     \\        complete)   _arguments '1: :(bash zsh fish)' ;;
     \\      esac
@@ -151,6 +153,7 @@ const zsh_completion =
     \\    'session:Session management'
     \\    'node:Node management'
     \\    'workspace:Workspace management'
+    \\    'package:Package and registry management'
     \\    'auth:Authentication'
     \\    'connect:Connect to server'
     \\    'disconnect:Disconnect from server'
@@ -177,6 +180,29 @@ const zsh_completion =
     \\    'handoff:Workspace handoff'
     \\  )
     \\  _describe 'workspace verb' verbs
+    \\}
+    \\
+    \\_spider_package() {
+    \\  local verbs
+    \\  verbs=(
+    \\    'list:List installed packages'
+    \\    'catalog:Show registry-visible package catalog'
+    \\    'updates:Show available updates'
+    \\    'update:Install one package update'
+    \\    'update-all:Preview or apply all package updates'
+    \\    'info:Show one package'
+    \\    'get:Show one package'
+    \\    'install:Install from registry or raw JSON'
+    \\    'channel-get:Get host or package channel policy'
+    \\    'channel-set:Set host or package channel policy'
+    \\    'channel-clear:Clear a package channel override'
+    \\    'enable:Enable a package'
+    \\    'switch:Switch active release'
+    \\    'disable:Disable a package'
+    \\    'rollback:Rollback a package release'
+    \\    'remove:Remove an installed package'
+    \\  )
+    \\  _describe 'package verb' verbs
     \\}
     \\
     \\_spider "$@"
@@ -211,6 +237,7 @@ const fish_completion =
     \\complete -c spider -n '__fish_use_subcommand' -a session    -d 'Session management'
     \\complete -c spider -n '__fish_use_subcommand' -a node       -d 'Node management'
     \\complete -c spider -n '__fish_use_subcommand' -a workspace  -d 'Workspace management'
+    \\complete -c spider -n '__fish_use_subcommand' -a package    -d 'Package and registry management'
     \\complete -c spider -n '__fish_use_subcommand' -a auth       -d 'Authentication'
     \\complete -c spider -n '__fish_use_subcommand' -a connect    -d 'Connect to server'
     \\complete -c spider -n '__fish_use_subcommand' -a disconnect -d 'Disconnect from server'
@@ -267,6 +294,24 @@ const fish_completion =
     \\complete -c spider -n '__fish_seen_subcommand_from workspace' -a bind     -d 'Manage binds'
     \\complete -c spider -n '__fish_seen_subcommand_from workspace' -a mount    -d 'Manage mounts'
     \\complete -c spider -n '__fish_seen_subcommand_from workspace' -a handoff  -d 'Workspace handoff'
+    \\
+    \\# package verbs
+    \\complete -c spider -n '__fish_seen_subcommand_from package' -a list          -d 'List installed packages'
+    \\complete -c spider -n '__fish_seen_subcommand_from package' -a catalog       -d 'Show registry catalog'
+    \\complete -c spider -n '__fish_seen_subcommand_from package' -a updates       -d 'Show available updates'
+    \\complete -c spider -n '__fish_seen_subcommand_from package' -a update        -d 'Install one package update'
+    \\complete -c spider -n '__fish_seen_subcommand_from package' -a update-all    -d 'Preview or apply all updates'
+    \\complete -c spider -n '__fish_seen_subcommand_from package' -a info          -d 'Show package details'
+    \\complete -c spider -n '__fish_seen_subcommand_from package' -a get           -d 'Show package details'
+    \\complete -c spider -n '__fish_seen_subcommand_from package' -a install       -d 'Install from registry or JSON'
+    \\complete -c spider -n '__fish_seen_subcommand_from package' -a channel-get   -d 'Show host or package channel policy'
+    \\complete -c spider -n '__fish_seen_subcommand_from package' -a channel-set   -d 'Set host or package channel policy'
+    \\complete -c spider -n '__fish_seen_subcommand_from package' -a channel-clear -d 'Clear a package channel override'
+    \\complete -c spider -n '__fish_seen_subcommand_from package' -a enable        -d 'Enable package'
+    \\complete -c spider -n '__fish_seen_subcommand_from package' -a switch        -d 'Switch active release'
+    \\complete -c spider -n '__fish_seen_subcommand_from package' -a disable       -d 'Disable package'
+    \\complete -c spider -n '__fish_seen_subcommand_from package' -a rollback      -d 'Rollback package release'
+    \\complete -c spider -n '__fish_seen_subcommand_from package' -a remove        -d 'Remove package'
     \\
     \\# workspace up flags
     \\complete -c spider -n '__fish_seen_subcommand_from workspace; and __fish_seen_subcommand_from up' -l interactive -d 'Interactive wizard'
