@@ -941,32 +941,32 @@ const DockDropTarget = struct {
     rect: UiRect,
 };
 
-const DockTabHitList = struct {
+const DockTabHitListImpl = struct {
     items: [96]DockTabHit = undefined,
     len: usize = 0,
 
-    fn append(self: *DockTabHitList, item: DockTabHit) void {
+    fn append(self: *DockTabHitListImpl, item: DockTabHit) void {
         if (self.len >= self.items.len) return;
         self.items[self.len] = item;
         self.len += 1;
     }
 
-    fn slice(self: *const DockTabHitList) []const DockTabHit {
+    fn slice(self: *const DockTabHitListImpl) []const DockTabHit {
         return self.items[0..self.len];
     }
 };
 
-const DockDropTargetList = struct {
+const DockDropTargetListImpl = struct {
     items: [96]DockDropTarget = undefined,
     len: usize = 0,
 
-    fn append(self: *DockDropTargetList, item: DockDropTarget) void {
+    fn append(self: *DockDropTargetListImpl, item: DockDropTarget) void {
         if (self.len >= self.items.len) return;
         self.items[self.len] = item;
         self.len += 1;
     }
 
-    fn findAt(self: *const DockDropTargetList, pos: [2]f32) ?DockDropTarget {
+    fn findAt(self: *const DockDropTargetListImpl, pos: [2]f32) ?DockDropTarget {
         for (self.items[0..self.len]) |tgt| {
             if (tgt.location != .center) continue;
             if (tgt.rect.contains(pos)) return tgt;
@@ -978,7 +978,7 @@ const DockDropTargetList = struct {
         return null;
     }
 
-    fn clear(self: *DockDropTargetList) void {
+    fn clear(self: *DockDropTargetListImpl) void {
         self.len = 0;
     }
 };
@@ -1068,7 +1068,7 @@ const WindowMouseHit = struct {
     local_pos: [2]f32,
 };
 
-fn findTabHitAt(tab_hits: *const DockTabHitList, pos: [2]f32) ?DockTabHit {
+fn findTabHitAt(tab_hits: *const DockTabHitListImpl, pos: [2]f32) ?DockTabHit {
     var idx = tab_hits.len;
     while (idx > 0) {
         idx -= 1;
@@ -1324,6 +1324,10 @@ const WorkspaceState = struct {
 };
 
 pub const App = struct {
+    // Type aliases exposed for panel host delegation (anytype self access).
+    pub const DockTabHitList = DockTabHitListImpl;
+    pub const DockDropTargetList = DockDropTargetListImpl;
+
     allocator: std.mem.Allocator,
     window: *c.SDL_Window,
     gpu: zapp.multi_window_renderer.Shared,
@@ -7440,646 +7444,11 @@ pub const App = struct {
     }
 
     fn drawLauncherUi(self: *App, ui_window: *UiWindow, fb_width: u32, fb_height: u32) void {
-        self.ui_commands.clear();
-        ui_draw_context.setGlobalCommandList(&self.ui_commands);
-        defer ui_draw_context.clearGlobalCommandList();
-
-        const menu_h = self.windowMenuBarHeight();
-        const status_h: f32 = 24.0 * self.ui_scale;
-        const content_rect = Rect.fromXYWH(
-            0,
-            menu_h,
-            @floatFromInt(fb_width),
-            @max(1.0, @as(f32, @floatFromInt(fb_height)) - menu_h - status_h),
-        );
-        ui_window.ui_state.last_dock_content_rect = UiRect.fromMinSize(content_rect.min, .{
-            content_rect.width(),
-            content_rect.height(),
-        });
-
-        const shell = self.sharedStyleSheet().shell;
-        const surfaces = self.sharedStyleSheet().surfaces;
-        const full_rect = Rect.fromXYWH(0, 0, @floatFromInt(fb_width), @floatFromInt(fb_height));
-        self.drawPaintRect(
-            full_rect,
-            surfaces.background orelse Paint{ .solid = self.theme.colors.background },
-        );
-        self.drawPaintRect(
-            content_rect,
-            shell.dock_fill orelse surfaces.surface orelse Paint{ .solid = self.theme.colors.surface },
-        );
-        if (shell.dock_border) |dock_border| self.drawRect(content_rect, dock_border);
-
-        const launcher_modal_open = self.ws.launcher_create_modal_open;
-        const about_modal_open = self.about_modal_open;
-        const saved_mouse_down = self.mouse_down;
-        const saved_mouse_clicked = self.mouse_clicked;
-        const saved_mouse_released = self.mouse_released;
-        const saved_mouse_right_clicked = self.mouse_right_clicked;
-        if (launcher_modal_open or about_modal_open) {
-            // Keep launcher visible under the modal, but route pointer input only to modal widgets.
-            self.mouse_down = false;
-            self.mouse_clicked = false;
-            self.mouse_released = false;
-            self.mouse_right_clicked = false;
-        }
-
-        const layout = self.panelLayoutMetrics();
-        const pad = layout.inset;
-        const gap = layout.section_gap;
-        const left_width = @max(260.0 * self.ui_scale, content_rect.width() * 0.33);
-        const right_width = @max(320.0 * self.ui_scale, content_rect.width() - left_width - gap - pad * 2.0);
-        const left_rect = Rect.fromXYWH(
-            content_rect.min[0] + pad,
-            content_rect.min[1] + pad,
-            left_width,
-            @max(1.0, content_rect.height() - pad * 2.0),
-        );
-        const right_rect = Rect.fromXYWH(
-            left_rect.max[0] + gap,
-            content_rect.min[1] + pad,
-            right_width,
-            @max(1.0, content_rect.height() - pad * 2.0),
-        );
-
-        const sidebar_fill = shell.sidebar_fill orelse surfaces.surface orelse Paint{ .solid = self.theme.colors.surface };
-        const sidebar_border = self.sharedStyleSheet().panel.border orelse self.theme.colors.border;
-        self.drawPaintRect(left_rect, sidebar_fill);
-        self.drawRect(left_rect, sidebar_border);
-        self.drawPaintRect(right_rect, sidebar_fill);
-        self.drawRect(right_rect, sidebar_border);
-
-        var left_y = left_rect.min[1] + pad;
-        const title = "Spider Web Connections";
-        self.drawLabel(left_rect.min[0] + pad, left_y, title, self.theme.colors.text_primary);
-        left_y += layout.line_height + layout.row_gap;
-
-        const profile_row_h = @max(layout.button_height, 34.0 * self.ui_scale);
-        const profile_row_w = left_rect.width() - pad * 2.0;
-        const profiles_rect_h = @max(140.0 * self.ui_scale, left_rect.height() * 0.30);
-        const profiles_rect = Rect.fromXYWH(
-            left_rect.min[0] + pad,
-            left_y,
-            profile_row_w,
-            profiles_rect_h,
-        );
-        self.drawSurfacePanel(profiles_rect);
-        self.drawRect(profiles_rect, self.theme.colors.border);
-
-        const selected_index = @min(
-            self.ws.launcher_selected_profile_index,
-            if (self.config.connection_profiles.len > 0) self.config.connection_profiles.len - 1 else 0,
-        );
-        var profile_row_y = profiles_rect.min[1] + layout.inner_inset;
-        if (self.config.connection_profiles.len == 0) {
-            self.drawTextTrimmed(
-                profiles_rect.min[0] + layout.inner_inset,
-                profile_row_y,
-                profiles_rect.width() - layout.inner_inset * 2.0,
-                "No connection profiles. Create one below.",
-                self.theme.colors.text_secondary,
-            );
-        } else {
-            for (self.config.connection_profiles, 0..) |profile, idx| {
-                if (profile_row_y + profile_row_h > profiles_rect.max[1] - layout.inner_inset) break;
-                const label = if (std.mem.eql(u8, profile.id, self.config.selectedProfileId()))
-                    profile.name
-                else
-                    profile.server_url;
-                if (self.drawButtonWidget(
-                    Rect.fromXYWH(
-                        profiles_rect.min[0] + layout.inner_inset,
-                        profile_row_y,
-                        profiles_rect.width() - layout.inner_inset * 2.0,
-                        profile_row_h,
-                    ),
-                    label,
-                    .{ .variant = if (idx == selected_index) .primary else .secondary },
-                )) {
-                    self.ws.launcher_selected_profile_index = idx;
-                    self.applyLauncherSelectedProfile() catch |err| {
-                        std.log.warn("Failed to apply selected profile: {s}", .{@errorName(err)});
-                    };
-                }
-                profile_row_y += profile_row_h + layout.row_gap * 0.6;
-            }
-        }
-        left_y = profiles_rect.max[1] + layout.section_gap * 0.6;
-
-        self.drawLabel(left_rect.min[0] + pad, left_y, "Profile Name", self.theme.colors.text_secondary);
-        left_y += layout.line_height + layout.row_gap * 0.25;
-        const profile_name_focused = self.drawTextInputWidget(
-            Rect.fromXYWH(left_rect.min[0] + pad, left_y, profile_row_w, layout.input_height),
-            self.ws.launcher_profile_name.items,
-            self.settings_panel.focused_field == .launcher_profile_name,
-            .{ .placeholder = "Display name" },
-        );
-        if (profile_name_focused) self.settings_panel.focused_field = .launcher_profile_name;
-        left_y += layout.input_height + layout.row_gap * 0.55;
-
-        self.drawLabel(left_rect.min[0] + pad, left_y, "Server URL", self.theme.colors.text_secondary);
-        left_y += layout.line_height + layout.row_gap * 0.25;
-        const url_focused = self.drawTextInputWidget(
-            Rect.fromXYWH(left_rect.min[0] + pad, left_y, profile_row_w, layout.input_height),
-            self.settings_panel.server_url.items,
-            self.settings_panel.focused_field == .server_url,
-            .{ .placeholder = "ws://host:port" },
-        );
-        if (url_focused) self.settings_panel.focused_field = .server_url;
-        left_y += layout.input_height + layout.row_gap * 0.55;
-
-        self.drawLabel(left_rect.min[0] + pad, left_y, "Metadata", self.theme.colors.text_secondary);
-        left_y += layout.line_height + layout.row_gap * 0.25;
-        const metadata_focused = self.drawTextInputWidget(
-            Rect.fromXYWH(left_rect.min[0] + pad, left_y, profile_row_w, layout.input_height),
-            self.ws.launcher_profile_metadata.items,
-            self.settings_panel.focused_field == .launcher_profile_metadata,
-            .{ .placeholder = "Optional notes" },
-        );
-        if (metadata_focused) self.settings_panel.focused_field = .launcher_profile_metadata;
-        left_y += layout.input_height + layout.row_gap * 0.55;
-
-        self.drawLabel(left_rect.min[0] + pad, left_y, "Role", self.theme.colors.text_secondary);
-        left_y += layout.line_height + layout.row_gap * 0.25;
-        const role_button_w = (profile_row_w - pad) * 0.5;
-        if (self.drawButtonWidget(
-            Rect.fromXYWH(left_rect.min[0] + pad, left_y, role_button_w, layout.button_height),
-            "Admin",
-            .{ .variant = if (self.config.active_role == .admin) .primary else .secondary },
-        )) {
-            self.setActiveConnectRole(.admin) catch {};
-        }
-        if (self.drawButtonWidget(
-            Rect.fromXYWH(left_rect.min[0] + pad + role_button_w + pad, left_y, role_button_w, layout.button_height),
-            "User",
-            .{ .variant = if (self.config.active_role == .user) .primary else .secondary },
-        )) {
-            self.setActiveConnectRole(.user) catch {};
-        }
-        left_y += layout.button_height + layout.row_gap * 0.8;
-
-        self.drawLabel(
-            left_rect.min[0] + pad,
-            left_y,
-            "Access Token",
-            self.theme.colors.text_secondary,
-        );
-        left_y += layout.line_height + layout.row_gap * 0.25;
-        const connect_token_focused = self.drawTextInputWidget(
-            Rect.fromXYWH(left_rect.min[0] + pad, left_y, profile_row_w, layout.input_height),
-            self.ws.launcher_connect_token.items,
-            self.settings_panel.focused_field == .launcher_connect_token,
-            .{
-                .placeholder = "Spiderweb access token",
-            },
-        );
-        if (connect_token_focused) self.settings_panel.focused_field = .launcher_connect_token;
-        left_y += layout.input_height + layout.row_gap * 0.55;
-
-        if (self.drawButtonWidget(
-            Rect.fromXYWH(left_rect.min[0] + pad, left_y, role_button_w, profile_row_h),
-            "New Profile",
-            .{ .variant = .secondary },
-        )) {
-            self.createConnectionProfileFromLauncher() catch |err| {
-                const msg = std.fmt.allocPrint(self.allocator, "Profile create failed: {s}", .{@errorName(err)}) catch null;
-                defer if (msg) |value| self.allocator.free(value);
-                if (msg) |value| self.setLauncherNotice(value);
-            };
-        }
-        if (self.drawButtonWidget(
-            Rect.fromXYWH(left_rect.min[0] + pad + role_button_w + pad, left_y, role_button_w, profile_row_h),
-            "Save Profile",
-            .{ .variant = .secondary, .disabled = self.config.connection_profiles.len == 0 },
-        )) {
-            self.saveSelectedProfileFromLauncher() catch |err| {
-                const msg = std.fmt.allocPrint(self.allocator, "Profile save failed: {s}", .{@errorName(err)}) catch null;
-                defer if (msg) |value| self.allocator.free(value);
-                if (msg) |value| self.setLauncherNotice(value);
-            };
-        }
-        left_y += profile_row_h + layout.row_gap;
-
-        if (self.drawButtonWidget(
-            Rect.fromXYWH(left_rect.min[0] + pad, left_y, role_button_w, profile_row_h),
-            if (self.connection_state == .connected) "Disconnect" else "Connect",
-            .{ .variant = .primary, .disabled = self.connection_state == .connecting },
-        )) {
-            if (self.connection_state == .connected) {
-                self.disconnect();
-                self.setConnectionState(.disconnected, "Disconnected");
-            } else {
-                self.persistLauncherConnectToken() catch |err| {
-                    const msg = std.fmt.allocPrint(self.allocator, "Unable to persist token: {s}", .{@errorName(err)}) catch null;
-                    defer if (msg) |value| self.allocator.free(value);
-                    if (msg) |value| self.setLauncherNotice(value);
-                    return;
-                };
-                self.tryConnect(&self.manager) catch {};
-                if (self.connection_state == .connected) {
-                    self.refreshWorkspaceData() catch {};
-                }
-            }
-        }
-        if (self.drawButtonWidget(
-            Rect.fromXYWH(left_rect.min[0] + pad + role_button_w + pad, left_y, role_button_w, profile_row_h),
-            "Refresh",
-            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
-        )) {
-            self.refreshWorkspaceData() catch |err| {
-                const msg = std.fmt.allocPrint(self.allocator, "Refresh failed: {s}", .{@errorName(err)}) catch null;
-                defer if (msg) |value| self.allocator.free(value);
-                if (msg) |value| self.setLauncherNotice(value);
-            };
-        }
-
-        var right_y = right_rect.min[1] + pad;
-        self.drawLabel(right_rect.min[0] + pad, right_y, "Workspaces", self.theme.colors.text_primary);
-        right_y += layout.line_height + layout.row_gap * 0.6;
-        if (self.ws.launcher_notice) |notice| {
-            self.drawTextTrimmed(
-                right_rect.min[0] + pad,
-                right_y,
-                right_rect.width() - pad * 2.0,
-                notice,
-                self.theme.colors.text_secondary,
-            );
-            right_y += layout.line_height + layout.row_gap * 0.7;
-        }
-
-        const filter_rect = Rect.fromXYWH(
-            right_rect.min[0] + pad,
-            right_y,
-            right_rect.width() - pad * 2.0,
-            layout.input_height,
-        );
-        const filter_focused = self.drawTextInputWidget(
-            filter_rect,
-            self.ws.launcher_project_filter.items,
-            self.settings_panel.focused_field == .launcher_project_filter,
-            .{ .placeholder = "Search workspaces" },
-        );
-        if (filter_focused) self.settings_panel.focused_field = .launcher_project_filter;
-        right_y += layout.input_height + layout.row_gap;
-
-        const project_row_h = @max(layout.button_height, 32.0 * self.ui_scale);
-        const list_h = @max(1.0, right_rect.max[1] - right_y - pad - project_row_h - layout.row_gap);
-        const list_rect = Rect.fromXYWH(right_rect.min[0] + pad, right_y, right_rect.width() - pad * 2.0, list_h);
-        self.drawSurfacePanel(list_rect);
-        self.drawRect(list_rect, self.theme.colors.border);
-
-        var project_row_y = list_rect.min[1] + layout.inner_inset;
-        for (self.ws.projects.items) |project| {
-            if (project_row_y + project_row_h > list_rect.max[1] - layout.inner_inset) break;
-            const matches_filter = self.ws.launcher_project_filter.items.len == 0 or
-                containsCaseInsensitive(project.name, self.ws.launcher_project_filter.items) or
-                containsCaseInsensitive(project.id, self.ws.launcher_project_filter.items);
-            if (!matches_filter) continue;
-            const is_selected = self.settings_panel.project_id.items.len > 0 and std.mem.eql(u8, self.settings_panel.project_id.items, project.id);
-            if (self.drawButtonWidget(
-                Rect.fromXYWH(list_rect.min[0] + layout.inner_inset, project_row_y, list_rect.width() - layout.inner_inset * 2.0, project_row_h),
-                project.name,
-                .{ .variant = if (is_selected) .primary else .secondary },
-            )) {
-                self.selectWorkspaceInSettings(project.id) catch {};
-            }
-            project_row_y += project_row_h + layout.row_gap * 0.5;
-        }
-
-        const open_rect = Rect.fromXYWH(
-            right_rect.min[0] + pad,
-            right_rect.max[1] - pad - project_row_h,
-            @max(160.0 * self.ui_scale, right_rect.width() * 0.4),
-            project_row_h,
-        );
-        if (self.drawButtonWidget(
-            open_rect,
-            "Open Workspace",
-            .{ .variant = .primary, .disabled = self.connection_state != .connected or self.selectedWorkspaceId() == null },
-        )) {
-            self.openSelectedWorkspaceFromLauncher() catch |err| {
-                const msg = self.formatControlOpError("Failed to open workspace", err);
-                if (msg) |value| {
-                    defer self.allocator.free(value);
-                    self.setLauncherNotice(value);
-                }
-            };
-        }
-
-        const create_rect = Rect.fromXYWH(
-            open_rect.max[0] + pad,
-            right_rect.max[1] - pad - project_row_h,
-            @max(160.0 * self.ui_scale, right_rect.width() * 0.4),
-            project_row_h,
-        );
-        if (self.drawButtonWidget(
-            create_rect,
-            "Create Workspace",
-            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
-        )) {
-            self.openLauncherCreateWorkspaceModal();
-        }
-
-        _ = self.drawWindowMenuBar(ui_window, fb_width);
-        self.drawStatusOverlay(fb_width, fb_height);
-        if (launcher_modal_open or about_modal_open) {
-            self.mouse_down = saved_mouse_down;
-            self.mouse_clicked = saved_mouse_clicked;
-            self.mouse_released = saved_mouse_released;
-            self.mouse_right_clicked = saved_mouse_right_clicked;
-            if (launcher_modal_open) self.drawLauncherCreateWorkspaceModal(fb_width, fb_height);
-            if (about_modal_open) self.drawAboutModal(fb_width, fb_height);
-        }
-        if (self.ws.workspace_wizard_open) {
-            self.mouse_down = saved_mouse_down;
-            self.mouse_clicked = saved_mouse_clicked;
-            self.mouse_released = saved_mouse_released;
-            self.mouse_right_clicked = saved_mouse_right_clicked;
-            self.drawWorkspaceWizardModal(fb_width, fb_height);
-        }
+        workspace_host_mod.drawLauncherUi(self, ui_window, fb_width, fb_height);
     }
 
     pub fn drawLauncherCreateWorkspaceModal(self: *App, fb_width: u32, fb_height: u32) void {
-        const layout = self.panelLayoutMetrics();
-        const pad = @max(layout.inset, 12.0 * self.ui_scale);
-        const row_h = @max(layout.button_height, 34.0 * self.ui_scale);
-        const screen_rect = Rect.fromXYWH(0, 0, @floatFromInt(fb_width), @floatFromInt(fb_height));
-
-        self.drawFilledRect(screen_rect, zcolors.withAlpha(self.theme.colors.background, 0.68));
-
-        const modal_w = std.math.clamp(
-            screen_rect.width() * 0.62,
-            420.0 * self.ui_scale,
-            760.0 * self.ui_scale,
-        );
-        const modal_h = std.math.clamp(
-            screen_rect.height() * 0.72,
-            360.0 * self.ui_scale,
-            640.0 * self.ui_scale,
-        );
-        const modal_rect = Rect.fromXYWH(
-            screen_rect.min[0] + (screen_rect.width() - modal_w) * 0.5,
-            screen_rect.min[1] + (screen_rect.height() - modal_h) * 0.5,
-            modal_w,
-            modal_h,
-        );
-
-        self.drawSurfacePanel(modal_rect);
-        self.drawRect(modal_rect, self.theme.colors.border);
-
-        var y = modal_rect.min[1] + pad;
-        const field_w = modal_rect.width() - pad * 2.0;
-
-        self.drawLabel(modal_rect.min[0] + pad, y, "Create Workspace", self.theme.colors.text_primary);
-        y += layout.line_height + layout.row_gap * 0.35;
-        self.drawTextTrimmed(
-            modal_rect.min[0] + pad,
-            y,
-            field_w,
-            "Pick a Spiderweb template and create a new workspace.",
-            self.theme.colors.text_secondary,
-        );
-        y += layout.line_height + layout.row_gap * 0.8;
-
-        if (self.ws.launcher_create_modal_error) |message| {
-            self.drawTextTrimmed(
-                modal_rect.min[0] + pad,
-                y,
-                field_w,
-                message,
-                zcolors.rgba(220, 80, 80, 255),
-            );
-            y += layout.line_height + layout.row_gap * 0.65;
-        }
-
-        self.drawLabel(modal_rect.min[0] + pad, y, "Workspace Name", self.theme.colors.text_secondary);
-        y += layout.line_height + layout.row_gap * 0.25;
-        const name_focused = self.drawTextInputWidget(
-            Rect.fromXYWH(modal_rect.min[0] + pad, y, field_w, layout.input_height),
-            self.settings_panel.project_create_name.items,
-            self.settings_panel.focused_field == .project_create_name,
-            .{ .placeholder = "Example: Distributed Workspace" },
-        );
-        if (name_focused) self.settings_panel.focused_field = .project_create_name;
-        y += layout.input_height + layout.row_gap * 0.6;
-
-        self.drawLabel(modal_rect.min[0] + pad, y, "Vision (Optional)", self.theme.colors.text_secondary);
-        y += layout.line_height + layout.row_gap * 0.25;
-        const vision_focused = self.drawTextInputWidget(
-            Rect.fromXYWH(modal_rect.min[0] + pad, y, field_w, layout.input_height),
-            self.settings_panel.project_create_vision.items,
-            self.settings_panel.focused_field == .project_create_vision,
-            .{ .placeholder = "Short goal or context" },
-        );
-        if (vision_focused) self.settings_panel.focused_field = .project_create_vision;
-        y += layout.input_height + layout.row_gap * 0.8;
-
-        const action_y = modal_rect.max[1] - pad - row_h;
-        const detail_h = layout.line_height * 2.2;
-        const detail_y = action_y - layout.row_gap - detail_h;
-
-        const template_header_y = y;
-        self.drawLabel(modal_rect.min[0] + pad, template_header_y, "Template", self.theme.colors.text_secondary);
-
-        const refresh_w = @max(160.0 * self.ui_scale, self.measureText("Refresh Templates") + pad * 1.4);
-        const refresh_rect = Rect.fromXYWH(
-            modal_rect.max[0] - pad - refresh_w,
-            template_header_y - @max(0.0, (row_h - layout.line_height) * 0.3),
-            refresh_w,
-            row_h,
-        );
-        if (self.drawButtonWidget(
-            refresh_rect,
-            "Refresh Templates",
-            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
-        )) {
-            self.clearLauncherCreateWorkspaceModalError();
-            self.refreshLauncherCreateWorkspaceTemplates() catch |err| {
-                const msg = self.formatControlOpError("Workspace template list failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setLauncherCreateWorkspaceModalError(text);
-                } else {
-                    self.setLauncherCreateWorkspaceModalError("Workspace template list failed.");
-                }
-            };
-        }
-        y += row_h + layout.row_gap * 0.4;
-
-        const list_bottom = detail_y - layout.row_gap * 0.5;
-        const list_h = @max(88.0 * self.ui_scale, list_bottom - y);
-        const list_rect = Rect.fromXYWH(modal_rect.min[0] + pad, y, field_w, list_h);
-        self.drawSurfacePanel(list_rect);
-        self.drawRect(list_rect, self.theme.colors.border);
-
-        const template_count = self.ws.launcher_create_templates.items.len;
-        const template_row_h = @max(layout.button_height, 30.0 * self.ui_scale);
-        const template_row_gap = layout.row_gap * 0.45;
-        const template_row_step = template_row_h + template_row_gap;
-        const list_inner_h = @max(0.0, list_rect.height() - layout.inner_inset * 2.0);
-        const rows_per_page = blk: {
-            if (template_row_step <= 0.0 or list_inner_h <= 0.0) break :blk @as(usize, 1);
-            const rows_fit = @floor((list_inner_h + template_row_gap) / template_row_step);
-            break :blk @max(@as(usize, 1), @as(usize, @intFromFloat(rows_fit)));
-        };
-        const total_pages = if (template_count == 0)
-            @as(usize, 1)
-        else
-            (template_count / rows_per_page) + @as(usize, @intFromBool((template_count % rows_per_page) != 0));
-        if (self.ws.launcher_create_template_page >= total_pages) {
-            self.ws.launcher_create_template_page = total_pages - 1;
-        }
-
-        const pager_button_w = @max(62.0 * self.ui_scale, self.measureText("Next") + pad * 1.05);
-        const pager_gap = @max(6.0 * self.ui_scale, layout.row_gap * 0.4);
-        const next_rect = Rect.fromXYWH(
-            refresh_rect.min[0] - pager_gap - pager_button_w,
-            refresh_rect.min[1],
-            pager_button_w,
-            row_h,
-        );
-        const prev_rect = Rect.fromXYWH(
-            next_rect.min[0] - pager_gap - pager_button_w,
-            refresh_rect.min[1],
-            pager_button_w,
-            row_h,
-        );
-        if (self.drawButtonWidget(
-            prev_rect,
-            "Prev",
-            .{ .variant = .secondary, .disabled = template_count == 0 or self.ws.launcher_create_template_page == 0 },
-        )) {
-            self.ws.launcher_create_template_page -= 1;
-        }
-        if (self.drawButtonWidget(
-            next_rect,
-            "Next",
-            .{
-                .variant = .secondary,
-                .disabled = template_count == 0 or (self.ws.launcher_create_template_page + 1) >= total_pages,
-            },
-        )) {
-            self.ws.launcher_create_template_page += 1;
-        }
-
-        const page_line = std.fmt.allocPrint(
-            self.allocator,
-            "Page {d}/{d}",
-            .{ self.ws.launcher_create_template_page + 1, total_pages },
-        ) catch null;
-        defer if (page_line) |value| self.allocator.free(value);
-        if (page_line) |value| {
-            const label_x = modal_rect.min[0] + pad + self.measureText("Template") + pad * 0.45;
-            const label_w = @max(0.0, prev_rect.min[0] - pager_gap - label_x);
-            self.drawTextTrimmed(
-                label_x,
-                template_header_y,
-                label_w,
-                value,
-                self.theme.colors.text_secondary,
-            );
-        }
-
-        if (template_count == 0) {
-            self.drawTextTrimmed(
-                list_rect.min[0] + layout.inner_inset,
-                list_rect.min[1] + layout.inner_inset,
-                list_rect.width() - layout.inner_inset * 2.0,
-                "No templates returned by Spiderweb. Use Refresh Templates.",
-                self.theme.colors.text_secondary,
-            );
-        } else {
-            const page_start = self.ws.launcher_create_template_page * rows_per_page;
-            const page_end = @min(page_start + rows_per_page, template_count);
-            var row_y = list_rect.min[1] + layout.inner_inset;
-            const row_max_y = list_rect.max[1] - layout.inner_inset;
-            for (self.ws.launcher_create_templates.items[page_start..page_end], page_start..) |template, idx| {
-                if (row_y + template_row_h > row_max_y) break;
-                if (self.drawButtonWidget(
-                    Rect.fromXYWH(
-                        list_rect.min[0] + layout.inner_inset,
-                        row_y,
-                        list_rect.width() - layout.inner_inset * 2.0,
-                        template_row_h,
-                    ),
-                    template.id,
-                    .{ .variant = if (idx == self.ws.launcher_create_selected_template_index) .primary else .secondary },
-                )) {
-                    self.ws.launcher_create_selected_template_index = idx;
-                    self.syncLauncherCreateSelectedTemplateToSettings() catch {};
-                    self.clearLauncherCreateWorkspaceModalError();
-                }
-                row_y += template_row_step;
-            }
-        }
-
-        const detail_rect = Rect.fromXYWH(modal_rect.min[0] + pad, detail_y, field_w, detail_h);
-        self.drawSurfacePanel(detail_rect);
-        self.drawRect(detail_rect, self.theme.colors.border);
-        if (self.selectedLauncherCreateWorkspaceTemplate()) |template| {
-            const desc = if (template.description.len > 0) template.description else "(no description)";
-            const binds_line = std.fmt.allocPrint(
-                self.allocator,
-                "Selected: {s} | binds: {d}",
-                .{ template.id, template.binds.items.len },
-            ) catch null;
-            defer if (binds_line) |value| self.allocator.free(value);
-            if (binds_line) |value| {
-                self.drawTextTrimmed(
-                    detail_rect.min[0] + layout.inner_inset,
-                    detail_rect.min[1] + layout.inner_inset * 0.7,
-                    detail_rect.width() - layout.inner_inset * 2.0,
-                    value,
-                    self.theme.colors.text_primary,
-                );
-            }
-            self.drawTextTrimmed(
-                detail_rect.min[0] + layout.inner_inset,
-                detail_rect.min[1] + layout.inner_inset * 0.7 + layout.line_height,
-                detail_rect.width() - layout.inner_inset * 2.0,
-                desc,
-                self.theme.colors.text_secondary,
-            );
-        } else {
-            self.drawTextTrimmed(
-                detail_rect.min[0] + layout.inner_inset,
-                detail_rect.min[1] + layout.inner_inset * 0.7,
-                detail_rect.width() - layout.inner_inset * 2.0,
-                "Select a template to continue.",
-                self.theme.colors.text_secondary,
-            );
-        }
-
-        const button_w = (field_w - pad) * 0.5;
-        const cancel_rect = Rect.fromXYWH(modal_rect.min[0] + pad, action_y, button_w, row_h);
-        if (self.drawButtonWidget(cancel_rect, "Cancel", .{ .variant = .secondary })) {
-            self.closeLauncherCreateWorkspaceModal();
-            return;
-        }
-
-        const trimmed_name = std.mem.trim(u8, self.settings_panel.project_create_name.items, " \t\r\n");
-        const create_disabled = self.connection_state != .connected or
-            trimmed_name.len == 0 or
-            self.ws.launcher_create_templates.items.len == 0;
-        if (self.drawButtonWidget(
-            Rect.fromXYWH(cancel_rect.max[0] + pad, action_y, button_w, row_h),
-            "Create Workspace",
-            .{ .variant = .primary, .disabled = create_disabled },
-        )) {
-            self.createWorkspaceFromLauncherModal() catch |err| {
-                const msg = self.formatControlOpError("Workspace create failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setLauncherCreateWorkspaceModalError(text);
-                } else {
-                    self.setLauncherCreateWorkspaceModalError("Workspace create failed.");
-                }
-            };
-        }
-
-        if (self.mouse_released and !modal_rect.contains(.{ self.mouse_x, self.mouse_y })) {
-            self.closeLauncherCreateWorkspaceModal();
-        }
+        workspace_host_mod.drawLauncherCreateWorkspaceModal(self, fb_width, fb_height);
     }
 
     fn drawPackageManagerModal(self: *App, fb_width: u32, fb_height: u32) void {
@@ -8317,7 +7686,7 @@ pub const App = struct {
         }
     }
 
-    fn drawAboutModal(self: *App, fb_width: u32, fb_height: u32) void {
+    pub fn drawAboutModal(self: *App, fb_width: u32, fb_height: u32) void {
         const layout = self.panelLayoutMetrics();
         const pad = @max(layout.inset, 12.0 * self.ui_scale);
         const row_h = @max(layout.button_height, 34.0 * self.ui_scale);
@@ -8403,117 +7772,7 @@ pub const App = struct {
     }
 
     fn drawWorkspaceUi(self: *App, ui_window: *UiWindow, fb_width: u32, fb_height: u32) void {
-        self.ui_commands.clear();
-        ui_draw_context.setGlobalCommandList(&self.ui_commands);
-        defer ui_draw_context.clearGlobalCommandList();
-
-        const package_modal_open = self.package_manager_modal_open;
-        const about_modal_open = self.about_modal_open;
-        const saved_mouse_down = self.mouse_down;
-        const saved_mouse_clicked = self.mouse_clicked;
-        const saved_mouse_released = self.mouse_released;
-        const saved_mouse_right_clicked = self.mouse_right_clicked;
-        if (package_modal_open or about_modal_open) {
-            self.mouse_down = false;
-            self.mouse_clicked = false;
-            self.mouse_released = false;
-            self.mouse_right_clicked = false;
-        }
-
-        const status_height: f32 = 24.0 * self.ui_scale;
-        const menu_height = self.windowMenuBarHeight();
-        const dock_height = @max(1.0, @as(f32, @floatFromInt(fb_height)) - status_height - menu_height);
-        const viewport = UiRect.fromMinSize(
-            .{ 0, menu_height },
-            .{ @floatFromInt(fb_width), dock_height },
-        );
-
-        const shell = self.sharedStyleSheet().shell;
-        const surfaces = self.sharedStyleSheet().surfaces;
-        const full_rect = Rect.fromXYWH(0, 0, @floatFromInt(fb_width), @floatFromInt(fb_height));
-        const viewport_rect = Rect{ .min = viewport.min, .max = viewport.max };
-        self.drawPaintRect(
-            full_rect,
-            surfaces.background orelse Paint{ .solid = self.theme.colors.background },
-        );
-        self.drawPaintRect(
-            viewport_rect,
-            shell.dock_fill orelse surfaces.surface orelse Paint{ .solid = self.theme.colors.surface },
-        );
-        if (shell.dock_border) |dock_border| self.drawRect(viewport_rect, dock_border);
-
-        ui_window.ui_state.last_dock_content_rect = viewport;
-
-        const mouse_in_viewport = self.mouse_x >= viewport.min[0] and
-            self.mouse_x <= viewport.max[0] and
-            self.mouse_y >= viewport.min[1] and
-            self.mouse_y <= viewport.max[1];
-        if (!mouse_in_viewport) {
-            self.mouse_clicked = false;
-            self.mouse_released = false;
-            self.mouse_down = false;
-        }
-
-        self.ui_commands.pushClip(.{ .min = viewport.min, .max = viewport.max });
-
-        var layout: dock_graph.LayoutResult = .{};
-        if (!self.collectDockLayoutSafe(ui_window.manager, viewport, &layout)) {
-            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
-                std.log.warn("drawDockUi: unable to recover dock layout; no panels available", .{});
-            }
-            self.drawText(
-                viewport.min[0] + 12.0,
-                viewport.min[1] + 12.0,
-                "Unable to recover dock layout; no panels available.",
-                self.theme.colors.text_secondary,
-            );
-            self.ui_commands.popClip();
-            self.mouse_clicked = saved_mouse_clicked;
-            self.mouse_released = saved_mouse_released;
-            self.mouse_down = saved_mouse_down;
-            _ = self.drawWindowMenuBar(ui_window, fb_width);
-            self.drawStatusOverlay(fb_width, fb_height);
-            if (self.ws.workspace_wizard_open) {
-                self.mouse_down = saved_mouse_down;
-                self.mouse_clicked = saved_mouse_clicked;
-                self.mouse_released = saved_mouse_released;
-                self.drawWorkspaceWizardModal(fb_width, fb_height);
-            }
-            return;
-        }
-        // Draw each dock group
-        for (layout.slice()) |group| {
-            if (!self.isLayoutGroupUsable(ui_window.manager, group.node_id)) continue;
-            self.drawDockGroup(ui_window.manager, group.node_id, group.rect);
-        }
-
-        const splitters = ui_window.manager.workspace.dock_layout.computeSplitters(viewport);
-        self.drawDockSplitters(&ui_window.queue, ui_window, &splitters);
-
-        var drag_tab_hits = DockTabHitList{};
-        var drag_drop_targets = DockDropTargetList{};
-        self.collectDockInteractionGeometry(ui_window.manager, viewport, &drag_tab_hits, &drag_drop_targets);
-        self.drawDockDragOverlay(&ui_window.queue, ui_window.manager, ui_window, &drag_drop_targets, viewport);
-        self.ui_commands.popClip();
-        self.mouse_clicked = saved_mouse_clicked;
-        self.mouse_released = saved_mouse_released;
-        self.mouse_down = saved_mouse_down;
-        self.mouse_right_clicked = saved_mouse_right_clicked;
-
-        if (package_modal_open or about_modal_open) {
-            self.mouse_down = false;
-            self.mouse_clicked = false;
-            self.mouse_released = false;
-            self.mouse_right_clicked = false;
-        }
-        _ = self.drawWindowMenuBar(ui_window, fb_width);
-        self.drawStatusOverlay(fb_width, fb_height);
-        if (self.ws.workspace_wizard_open) {
-            self.mouse_down = saved_mouse_down;
-            self.mouse_clicked = saved_mouse_clicked;
-            self.mouse_released = saved_mouse_released;
-            self.drawWorkspaceWizardModal(fb_width, fb_height);
-        }
+        workspace_host_mod.drawWorkspaceUi(self, ui_window, fb_width, fb_height);
     }
 
     pub fn windowMenuBarHeight(self: *App) f32 {

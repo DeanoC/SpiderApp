@@ -530,11 +530,12 @@ pub fn drawLauncherUi(self: anytype, ui_window: anytype, fb_width: u32, fb_heigh
     if (shell.dock_border) |dock_border| self.drawRect(content_rect, dock_border);
 
     const launcher_modal_open = self.ws.launcher_create_modal_open;
+    const about_modal_open = self.about_modal_open;
     const saved_mouse_down = self.mouse_down;
     const saved_mouse_clicked = self.mouse_clicked;
     const saved_mouse_released = self.mouse_released;
     const saved_mouse_right_clicked = self.mouse_right_clicked;
-    if (launcher_modal_open) {
+    if (launcher_modal_open or about_modal_open) {
         // Keep launcher visible under the modal, but route pointer input only to modal widgets.
         self.mouse_down = false;
         self.mouse_clicked = false;
@@ -840,12 +841,13 @@ pub fn drawLauncherUi(self: anytype, ui_window: anytype, fb_width: u32, fb_heigh
 
     _ = self.drawWindowMenuBar(ui_window, fb_width);
     self.drawStatusOverlay(fb_width, fb_height);
-    if (launcher_modal_open) {
+    if (launcher_modal_open or about_modal_open) {
         self.mouse_down = saved_mouse_down;
         self.mouse_clicked = saved_mouse_clicked;
         self.mouse_released = saved_mouse_released;
         self.mouse_right_clicked = saved_mouse_right_clicked;
-        self.drawLauncherCreateWorkspaceModal(fb_width, fb_height);
+        if (launcher_modal_open) self.drawLauncherCreateWorkspaceModal(fb_width, fb_height);
+        if (about_modal_open) self.drawAboutModal(fb_width, fb_height);
     }
     if (self.ws.workspace_wizard_open) {
         self.mouse_down = saved_mouse_down;
@@ -1153,6 +1155,19 @@ pub fn drawWorkspaceUi(self: anytype, ui_window: anytype, fb_width: u32, fb_heig
     ui_draw_context.setGlobalCommandList(&self.ui_commands);
     defer ui_draw_context.clearGlobalCommandList();
 
+    const package_modal_open = self.package_manager_modal_open;
+    const about_modal_open = self.about_modal_open;
+    const saved_mouse_down = self.mouse_down;
+    const saved_mouse_clicked = self.mouse_clicked;
+    const saved_mouse_released = self.mouse_released;
+    const saved_mouse_right_clicked = self.mouse_right_clicked;
+    if (package_modal_open or about_modal_open) {
+        self.mouse_down = false;
+        self.mouse_clicked = false;
+        self.mouse_released = false;
+        self.mouse_right_clicked = false;
+    }
+
     const status_height: f32 = 24.0 * self.ui_scale;
     const menu_height = self.windowMenuBarHeight();
     const dock_height = @max(1.0, @as(f32, @floatFromInt(fb_height)) - status_height - menu_height);
@@ -1182,9 +1197,6 @@ pub fn drawWorkspaceUi(self: anytype, ui_window: anytype, fb_width: u32, fb_heig
         self.mouse_x <= viewport.max[0] and
         self.mouse_y >= viewport.min[1] and
         self.mouse_y <= viewport.max[1];
-    const saved_mouse_clicked = self.mouse_clicked;
-    const saved_mouse_released = self.mouse_released;
-    const saved_mouse_down = self.mouse_down;
     if (!mouse_in_viewport) {
         self.mouse_clicked = false;
         self.mouse_released = false;
@@ -1228,8 +1240,8 @@ pub fn drawWorkspaceUi(self: anytype, ui_window: anytype, fb_width: u32, fb_heig
     const splitters = ui_window.manager.workspace.dock_layout.computeSplitters(viewport);
     self.drawDockSplitters(&ui_window.queue, ui_window, &splitters);
 
-    const DockTabHitList = @TypeOf(self).DockTabHitList;
-    const DockDropTargetList = @TypeOf(self).DockDropTargetList;
+    const DockTabHitList = @TypeOf(self.*).DockTabHitList;
+    const DockDropTargetList = @TypeOf(self.*).DockDropTargetList;
     var drag_tab_hits = DockTabHitList{};
     var drag_drop_targets = DockDropTargetList{};
     self.collectDockInteractionGeometry(ui_window.manager, viewport, &drag_tab_hits, &drag_drop_targets);
@@ -1238,7 +1250,14 @@ pub fn drawWorkspaceUi(self: anytype, ui_window: anytype, fb_width: u32, fb_heig
     self.mouse_clicked = saved_mouse_clicked;
     self.mouse_released = saved_mouse_released;
     self.mouse_down = saved_mouse_down;
+    self.mouse_right_clicked = saved_mouse_right_clicked;
 
+    if (package_modal_open or about_modal_open) {
+        self.mouse_down = false;
+        self.mouse_clicked = false;
+        self.mouse_released = false;
+        self.mouse_right_clicked = false;
+    }
     _ = self.drawWindowMenuBar(ui_window, fb_width);
     self.drawStatusOverlay(fb_width, fb_height);
     if (self.ws.workspace_wizard_open) {
