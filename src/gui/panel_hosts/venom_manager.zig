@@ -172,7 +172,7 @@ fn drawDetailPane(self: anytype, rect: Rect, pad: f32, line_h: f32, button_h: f3
     const accent_rect = Rect.fromXYWH(rect.min[0], rect.min[1], @max(3.0, 4.0 * self.ui_scale), rect.height());
     self.drawFilledRect(accent_rect, if (entry.update_available) self.theme.colors.primary else self.theme.colors.border);
 
-    var detail_lines = [_][2][]const u8{
+    const detail_lines = [_][2][]const u8{
         .{ "Kind", entry.kind },
         .{ "Runtime", entry.runtime_kind },
         .{ "Enabled", if (entry.enabled) "true" else "false" },
