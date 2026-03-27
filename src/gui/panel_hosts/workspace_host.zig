@@ -1333,12 +1333,10 @@ pub fn projectFocusFieldToExternal(field: anytype) WorkspacePanel.FocusField {
     };
 }
 
-pub fn projectFocusFieldFromExternal(field: WorkspacePanel.FocusField) anytype {
-    // Returns the SettingsFocusField equivalent; callers compare by tag name.
-    return switch (field) {
-        .workspace_token => @as(u8, 0), // placeholder — real usage stays in root.zig
-        else => @as(u8, 0),
-    };
+pub fn projectFocusFieldFromExternal(field: WorkspacePanel.FocusField) u8 {
+    // Placeholder — real mapping lives in root.zig.
+    _ = field;
+    return 0;
 }
 
 pub fn isWorkspacePanelFocusField(field: anytype) bool {

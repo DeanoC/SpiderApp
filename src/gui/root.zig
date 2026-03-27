@@ -22,6 +22,7 @@ const node_topology_host = @import("panel_hosts/node_topology.zig");
 const mcp_config_host = @import("panel_hosts/mcp_config.zig");
 const mission_workboard_host = @import("panel_hosts/mission_workboard.zig");
 const mission_helpers = @import("state/mission_helpers.zig");
+const workspace_host_mod = @import("panel_hosts/workspace_host.zig");
 
 const zapp = zui.ui.app;
 const c = zapp.sdl_app.c;
@@ -6122,7 +6123,7 @@ const App = struct {
         self.clearMissionDashboardError();
     }
 
-    fn requestMissionDashboardRefresh(self: *App, force: bool) void {
+    pub fn requestMissionDashboardRefresh(self: *App, force: bool) void {
         if (self.connection_state != .connected) return;
         if (self.client_context.pending_workboard_request_id != null) return;
         const now = std.time.milliTimestamp();
@@ -10117,7 +10118,7 @@ const App = struct {
 
     const DASHBOARD_REFRESH_INTERVAL_MS: i64 = 8_000;
 
-    fn requestDashboardRefresh(self: *App, force: bool) void {
+    pub fn requestDashboardRefresh(self: *App, force: bool) void {
         if (self.connection_state != .connected) return;
         if (self.ws.workspace_op_busy) return;
         const now = std.time.milliTimestamp();
@@ -10239,7 +10240,7 @@ const App = struct {
         self.loadVenomsFromPath(client, "/agents/self/venoms/VENOMS.json", .agent) catch {};
     }
 
-    fn requestVenomRefresh(self: *App, force: bool) void {
+    pub fn requestVenomRefresh(self: *App, force: bool) void {
         if (self.connection_state != .connected) return;
         if (self.ws.venom_refresh_busy) return;
         const now = std.time.milliTimestamp();
@@ -11895,356 +11896,10 @@ const App = struct {
         }
     }
 
-    const OwnedWorkspacePanelView = struct {
-        selected_workspace_button_label: ?[]u8 = null,
-        session_status_line: ?[]u8 = null,
-        selected_workspace_line: ?[]u8 = null,
-        setup_status_line: ?[]u8 = null,
-        setup_vision_line: ?[]u8 = null,
-        template_line: ?[]u8 = null,
-        binds_line: ?[]u8 = null,
-        workspace_summary_line: ?[]u8 = null,
-        workspace_health_line: ?[]u8 = null,
-        counts_line: ?[]u8 = null,
-        workspace_lines: std.ArrayListUnmanaged([]u8) = .{},
-        projects: std.ArrayListUnmanaged(panels_bridge.WorkspaceListEntryView) = .{},
-        node_lines: std.ArrayListUnmanaged([]u8) = .{},
-        nodes: std.ArrayListUnmanaged(panels_bridge.WorkspaceNodeEntryView) = .{},
-        view: panels_bridge.WorkspacePanelView = .{},
-
-        fn deinit(self: *OwnedWorkspacePanelView, allocator: std.mem.Allocator) void {
-            if (self.selected_workspace_button_label) |value| allocator.free(value);
-            if (self.session_status_line) |value| allocator.free(value);
-            if (self.selected_workspace_line) |value| allocator.free(value);
-            if (self.setup_status_line) |value| allocator.free(value);
-            if (self.setup_vision_line) |value| allocator.free(value);
-            if (self.template_line) |value| allocator.free(value);
-            if (self.binds_line) |value| allocator.free(value);
-            if (self.workspace_summary_line) |value| allocator.free(value);
-            if (self.workspace_health_line) |value| allocator.free(value);
-            if (self.counts_line) |value| allocator.free(value);
-            for (self.workspace_lines.items) |value| allocator.free(value);
-            for (self.node_lines.items) |value| allocator.free(value);
-            self.workspace_lines.deinit(allocator);
-            self.projects.deinit(allocator);
-            self.node_lines.deinit(allocator);
-            self.nodes.deinit(allocator);
-            self.* = undefined;
-        }
-    };
+    const OwnedWorkspacePanelView = workspace_host_mod.OwnedWorkspacePanelView;
 
     fn buildWorkspacePanelView(self: *App) OwnedWorkspacePanelView {
-        var owned: OwnedWorkspacePanelView = .{};
-        const selected_workspace_lock_state = self.selectedWorkspaceTokenLocked();
-        const selected_summary = self.selectedWorkspaceSummary();
-
-        const selected_workspace_button_label: []const u8 = blk: {
-            if (self.settings_panel.project_id.items.len == 0) break :blk "Select workspace";
-            const selected_id = self.settings_panel.project_id.items;
-            for (self.ws.projects.items) |project| {
-                if (std.mem.eql(u8, project.id, selected_id)) {
-                    const formatted = std.fmt.allocPrint(
-                        self.allocator,
-                        "{s} ({s}) [{s}]",
-                        .{
-                            project.name,
-                            project.id,
-                            if (project.token_locked) "locked" else "open",
-                        },
-                    ) catch null;
-                    if (formatted) |value| {
-                        owned.selected_workspace_button_label = value;
-                        break :blk value;
-                    }
-                    break :blk selected_id;
-                }
-            }
-            break :blk selected_id;
-        };
-
-        const lock_state_text: []const u8 = if (self.selectedWorkspaceId() == null)
-            "Workspace lock state: select a workspace"
-        else if (selected_workspace_lock_state) |locked|
-            if (locked)
-                "Workspace lock state: locked (workspace token required for non-admin)"
-            else
-                "Workspace lock state: unlocked (workspace token optional)"
-        else
-            "Workspace lock state: unknown (workspace not in current list)";
-
-        const add_mount_validation = self.validateWorkspaceMountAddInput();
-        const remove_mount_validation = self.validateWorkspaceMountRemoveInput();
-        const add_bind_validation = self.validateWorkspaceBindAddInput();
-        const remove_bind_validation = self.validateWorkspaceBindRemoveInput();
-        const mount_hint = if (self.connection_state == .connected)
-            (add_mount_validation orelse remove_mount_validation)
-        else
-            null;
-        const bind_hint = if (self.connection_state == .connected)
-            (add_bind_validation orelse remove_bind_validation)
-        else
-            null;
-
-        var session_status_warning = false;
-        owned.session_status_line = switch (self.session_attach_state) {
-            .ready => std.fmt.allocPrint(
-                self.allocator,
-                "Live session attached: {s}",
-                .{self.chat.current_session_key orelse self.settings_panel.default_session.items},
-            ) catch null,
-            .err => blk: {
-                session_status_warning = true;
-                break :blk std.fmt.allocPrint(
-                    self.allocator,
-                    "Live chat unavailable: {s}",
-                    .{self.ws.workspace_last_error orelse "session attach failed"},
-                ) catch null;
-            },
-            .unknown, .warming => blk: {
-                session_status_warning = true;
-                break :blk self.allocator.dupe(
-                    u8,
-                    "Live chat is off. Select a workspace, finish setup, then use Attach Session when you want a Spiderweb runtime.",
-                ) catch null;
-            },
-        };
-
-        const selected_workspace_text = if (self.settings_panel.project_id.items.len > 0)
-            self.settings_panel.project_id.items
-        else
-            "(none)";
-        const selected_workspace_lock_suffix: []const u8 = if (selected_workspace_lock_state) |locked|
-            if (locked) " [locked]" else " [open]"
-        else
-            "";
-        owned.selected_workspace_line = std.fmt.allocPrint(
-            self.allocator,
-            "Selected workspace: {s}{s}",
-            .{ selected_workspace_text, selected_workspace_lock_suffix },
-        ) catch null;
-
-        var setup_status_warning = false;
-        if (self.connect_setup_hint) |hint| {
-            const setup_status = if (hint.required) "required" else "ready";
-            owned.setup_status_line = std.fmt.allocPrint(
-                self.allocator,
-                "Workspace setup: {s}",
-                .{setup_status},
-            ) catch null;
-            setup_status_warning = hint.required;
-            if (hint.workspace_vision) |vision| {
-                owned.setup_vision_line = std.fmt.allocPrint(
-                    self.allocator,
-                    "Workspace vision: {s}",
-                    .{vision},
-                ) catch null;
-            }
-        }
-
-        if (selected_summary) |summary| {
-            const template_text = summary.template_id orelse "dev";
-            owned.template_line = std.fmt.allocPrint(
-                self.allocator,
-                "Workspace template: {s}",
-                .{template_text},
-            ) catch null;
-            if (bind_hint) |hint| {
-                owned.binds_line = std.fmt.allocPrint(
-                    self.allocator,
-                    "Workspace binds: {d}. {s}",
-                    .{ summary.bind_count, hint },
-                ) catch null;
-            } else {
-                owned.binds_line = std.fmt.allocPrint(
-                    self.allocator,
-                    "Workspace binds: {d}",
-                    .{summary.bind_count},
-                ) catch null;
-            }
-        } else if (bind_hint) |hint| {
-            owned.binds_line = self.allocator.dupe(u8, hint) catch null;
-        }
-
-        var workspace_health_warning = false;
-        var workspace_health_error = false;
-        if (self.ws.workspace_state) |*status| {
-            const root_text = status.workspace_root orelse "(none)";
-            const mounted_count: usize = if (status.actual_mounts.items.len > 0)
-                status.actual_mounts.items.len
-            else
-                status.mounts.items.len;
-            owned.workspace_summary_line = std.fmt.allocPrint(
-                self.allocator,
-                "Workspace root: {s} | mounts: {d}",
-                .{ root_text, mounted_count },
-            ) catch null;
-
-            const health_state = workspaceHealthState(status);
-            owned.workspace_health_line = std.fmt.allocPrint(
-                self.allocator,
-                "Workspace health: {s} | online={d}/{d} degraded={d} missing={d} drift={d}",
-                .{
-                    workspaceHealthStateLabel(health_state),
-                    status.availability_online,
-                    status.availability_mounts_total,
-                    status.availability_degraded,
-                    status.availability_missing,
-                    status.drift_count,
-                },
-            ) catch null;
-            switch (health_state) {
-                .healthy, .unknown => {},
-                .degraded => workspace_health_warning = true,
-                .missing => workspace_health_error = true,
-            }
-        }
-
-        owned.counts_line = std.fmt.allocPrint(
-            self.allocator,
-            "Workspaces: {d} | Nodes: {d}",
-            .{ self.ws.projects.items.len, self.ws.nodes.items.len },
-        ) catch null;
-
-        for (self.ws.projects.items, 0..) |project, idx| {
-            const line = std.fmt.allocPrint(
-                self.allocator,
-                "{s} [{s}] access={s} template={s} mounts={d} binds={d}",
-                .{
-                    project.id,
-                    project.status,
-                    if (project.token_locked) "locked" else "open",
-                    project.template_id orelse "dev",
-                    project.mount_count,
-                    project.bind_count,
-                },
-            ) catch continue;
-            owned.workspace_lines.append(self.allocator, line) catch {
-                self.allocator.free(line);
-                continue;
-            };
-            const project_selected = self.settings_panel.project_id.items.len > 0 and
-                std.mem.eql(u8, self.settings_panel.project_id.items, project.id);
-            owned.projects.append(self.allocator, .{
-                .index = idx,
-                .line = line,
-                .selected = project_selected,
-            }) catch {};
-        }
-
-        const now_ms = std.time.milliTimestamp();
-        for (self.ws.nodes.items) |node| {
-            const node_online = node.lease_expires_at_ms > now_ms;
-            const line = std.fmt.allocPrint(
-                self.allocator,
-                "  - {s} ({s}) [{s}]",
-                .{ node.node_id, node.node_name, if (node_online) "online" else "degraded" },
-            ) catch continue;
-            owned.node_lines.append(self.allocator, line) catch {
-                self.allocator.free(line);
-                continue;
-            };
-            owned.nodes.append(self.allocator, .{
-                .line = line,
-                .degraded = !node_online,
-            }) catch {};
-        }
-
-        if (self.ws.selected_workspace_detail) |*detail| {
-            for (detail.mounts.items, 0..) |*mount, idx| {
-                owned.mount_entries.append(self.allocator, .{
-                    .index = idx,
-                    .mount_path = mount.mount_path,
-                    .node_id = mount.node_id,
-                    .node_name = mount.node_name,
-                    .export_name = mount.export_name,
-                    .selected = self.ws.workspace_selected_mount_index == idx,
-                }) catch {};
-            }
-            for (detail.binds.items, 0..) |*bind, idx| {
-                owned.bind_entries.append(self.allocator, .{
-                    .index = idx,
-                    .bind_path = bind.bind_path,
-                    .target_path = bind.target_path,
-                    .selected = self.ws.workspace_selected_bind_index == idx,
-                }) catch {};
-            }
-            if (detail.workspace_token) |token| {
-                owned.token_display = maskTokenForDisplay(self.allocator, token) catch null;
-            }
-        }
-
-        if (self.ws.node_browser_open) {
-            const now_ms_for_nodes = std.time.milliTimestamp();
-            for (self.ws.nodes.items, 0..) |*node, idx| {
-                const node_online = node.lease_expires_at_ms > now_ms_for_nodes;
-                owned.node_picker_entries.append(self.allocator, .{
-                    .index = idx,
-                    .node_id = node.node_id,
-                    .node_name = node.node_name,
-                    .online = node_online,
-                    .selected = self.ws.node_browser_selected_index == idx,
-                }) catch {};
-            }
-        }
-
-        const profile_id = self.config.selectedProfileId();
-        var local_node_id_val: ?[]const u8 = null;
-        var local_node_name_val: ?[]const u8 = null;
-        var local_node_bootstrapped_val: bool = false;
-        if (self.config.appLocalNode(profile_id)) |local_node| {
-            local_node_id_val = local_node.node_id;
-            local_node_name_val = local_node.node_name;
-            local_node_bootstrapped_val = true;
-            owned.local_node_ttl_text = buildLocalNodeTtlText(self.allocator, self.ws.nodes.items, local_node.node_id) catch null;
-        }
-
-        owned.view = .{
-            .title = "Workspace Overview",
-            .selected_workspace_button_label = selected_workspace_button_label,
-            .lock_state_text = lock_state_text,
-            .workspace_token = self.settings_panel.project_token.items,
-            .create_name = self.settings_panel.project_create_name.items,
-            .create_vision = self.settings_panel.project_create_vision.items,
-            .template_id = self.settings_panel.workspace_template_id.items,
-            .operator_token = self.settings_panel.project_operator_token.items,
-            .mount_path = self.settings_panel.project_mount_path.items,
-            .mount_node_id = self.settings_panel.project_mount_node_id.items,
-            .mount_export_name = self.settings_panel.project_mount_export_name.items,
-            .bind_path = self.settings_panel.workspace_bind_path.items,
-            .bind_target_path = self.settings_panel.workspace_bind_target_path.items,
-            .mount_hint = mount_hint,
-            .workspace_error_text = self.ws.workspace_last_error,
-            .session_status_line = owned.session_status_line,
-            .session_status_warning = session_status_warning,
-            .selected_workspace_line = owned.selected_workspace_line,
-            .setup_status_line = owned.setup_status_line,
-            .setup_status_warning = setup_status_warning,
-            .setup_vision_line = owned.setup_vision_line,
-            .template_line = owned.template_line,
-            .binds_line = owned.binds_line,
-            .workspace_summary_line = owned.workspace_summary_line,
-            .workspace_health_line = owned.workspace_health_line,
-            .workspace_health_warning = workspace_health_warning,
-            .workspace_health_error = workspace_health_error,
-            .counts_line = owned.counts_line,
-            .help_line = if (self.session_attach_state == .ready)
-                "Open Filesystem, Debug, or Terminal panels from the Windows menu."
-            else
-                "External runtimes can use the workspace without live chat. Use Attach Session only when you want a Spiderweb runtime.",
-            .workspaces = owned.projects.items,
-            .nodes = owned.nodes.items,
-            .mounts = owned.mount_entries.items,
-            .binds = owned.bind_entries.items,
-            .nodes_for_picker = owned.node_picker_entries.items,
-            .token_display = owned.token_display,
-            .local_node_id = local_node_id_val,
-            .local_node_name = local_node_name_val,
-            .local_node_ttl_text = owned.local_node_ttl_text,
-            .local_node_bootstrapped = local_node_bootstrapped_val,
-            .workspace_op_busy = self.ws.workspace_op_busy,
-            .workspace_op_error = null,
-        };
-        return owned;
+        return workspace_host_mod.buildWorkspacePanelView(self);
     }
 
     fn performWorkspacePanelAction(self: *App, action: panels_bridge.WorkspacePanelAction) void {
@@ -13798,8 +13453,6 @@ const App = struct {
             .draw_button = launcherSettingsDrawButton,
             .draw_surface_panel = filesystemDrawSurfacePanel,
             .draw_text_wrapped = filesystemDrawTextWrapped,
-            .push_clip = debugEventStreamPushClip,
-            .pop_clip = debugEventStreamPopClip,
             .draw_filled_rect = filesystemDrawFilledRect,
             .draw_rect = filesystemDrawRect,
         };
@@ -20354,7 +20007,7 @@ const App = struct {
         return @intCast(clamped);
     }
 
-    fn panelLayoutMetrics(self: *App) PanelLayoutMetrics {
+    pub fn panelLayoutMetrics(self: *App) PanelLayoutMetrics {
         const line_height = self.textLineHeight();
         return form_layout.defaultMetrics(zui.ui.theme.activeTheme(), line_height, self.ui_scale);
     }
