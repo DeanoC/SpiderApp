@@ -115,7 +115,6 @@ const DEBUG_SYNTAX_COLOR_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
 const DEBUG_SYNTAX_COLOR_MAX_LINE_BYTES: usize = 768;
 const PERF_SAMPLE_INTERVAL_MS: i64 = 1_000;
 const PERF_HISTORY_CAPACITY: usize = 600;
-const PERF_SPARKLINE_MAX_COLUMNS: usize = 24;
 const PERF_AUTOMATION_DEFAULT_DURATION_MS: i64 = 12_000;
 const MISSION_REFRESH_INTERVAL_MS: i64 = 5_000;
 const MISSION_PREVIEW_EVENT_COUNT: usize = 4;
@@ -634,27 +633,6 @@ fn themeProfileLabel(profile_value: panels_bridge.SettingsThemeProfile) ?[]const
     };
 }
 
-fn filesystemToolsFocusFieldToExternal(field: SettingsFocusField) FilesystemToolsPanel.FocusField {
-    return switch (field) {
-        .filesystem_contract_payload => .contract_payload,
-        else => .none,
-    };
-}
-
-fn filesystemToolsFocusFieldFromExternal(field: FilesystemToolsPanel.FocusField) SettingsFocusField {
-    return switch (field) {
-        .contract_payload => .filesystem_contract_payload,
-        .none => .none,
-    };
-}
-
-fn isFilesystemToolsPanelFocusField(field: SettingsFocusField) bool {
-    return switch (field) {
-        .filesystem_contract_payload => true,
-        else => false,
-    };
-}
-
 pub fn debugFocusFieldToExternal(field: SettingsFocusField) DebugPanel.FocusField {
     return switch (field) {
         .perf_benchmark_label => .perf_benchmark_label,
@@ -682,27 +660,6 @@ pub fn isDebugPanelFocusField(field: SettingsFocusField) bool {
         .node_watch_replay_limit,
         .debug_search_filter,
         => true,
-        else => false,
-    };
-}
-
-fn terminalFocusFieldToExternal(field: SettingsFocusField) TerminalPanel.FocusField {
-    return switch (field) {
-        .terminal_command_input => .command_input,
-        else => .none,
-    };
-}
-
-fn terminalFocusFieldFromExternal(field: TerminalPanel.FocusField) SettingsFocusField {
-    return switch (field) {
-        .command_input => .terminal_command_input,
-        .none => .none,
-    };
-}
-
-fn isTerminalPanelFocusField(field: SettingsFocusField) bool {
-    return switch (field) {
-        .terminal_command_input => true,
         else => false,
     };
 }
@@ -9642,21 +9599,6 @@ pub const App = struct {
         self.drawVerticalScrollbar(.settings, viewport_rect, content_height, scroll_y);
     }
 
-    fn projectDrawStatusRow(ctx: *anyopaque, rect: Rect) void {
-        const self: *App = @ptrCast(@alignCast(ctx));
-        self.drawStatusRow(rect);
-    }
-
-    fn projectDrawVerticalScrollbar(
-        ctx: *anyopaque,
-        viewport_rect: Rect,
-        content_height: f32,
-        scroll_y: *f32,
-    ) void {
-        const self: *App = @ptrCast(@alignCast(ctx));
-        self.drawVerticalScrollbar(.projects, viewport_rect, content_height, scroll_y);
-    }
-
     pub fn filesystemDrawSurfacePanel(ctx: *anyopaque, rect: Rect) void {
         const self: *App = @ptrCast(@alignCast(ctx));
         self.drawSurfacePanel(rect);
@@ -9707,7 +9649,7 @@ pub const App = struct {
     pub fn terminalDrawStyledLineAt(ctx: *anyopaque, line_index: usize, x: f32, y: f32, max_w: f32) void {
         const self: *App = @ptrCast(@alignCast(ctx));
         const line = self.terminal.terminal_backend.lineAt(line_index) orelse return;
-        self.drawTerminalStyledLine(x, y, max_w, line);
+        terminal_host_mod.drawTerminalStyledLine(self, x, y, max_w, line);
     }
 
     pub fn debugDrawPerfCharts(
@@ -10819,36 +10761,6 @@ pub const App = struct {
         return path.len > mount_path.len and path[mount_path.len] == '/';
     }
 
-    const WorkspaceHealthState = enum {
-        healthy,
-        degraded,
-        missing,
-        unknown,
-    };
-
-    fn workspaceHealthState(status: *const workspace_types.WorkspaceStatus) WorkspaceHealthState {
-        if (status.availability_missing > 0) return .missing;
-        const reconcile_state = status.reconcile_state orelse "";
-        if (status.availability_degraded > 0 or
-            status.drift_count > 0 or
-            status.queue_depth > 0 or
-            std.mem.eql(u8, reconcile_state, "degraded"))
-        {
-            return .degraded;
-        }
-        if (status.availability_mounts_total == 0 or std.mem.eql(u8, reconcile_state, "unknown")) return .unknown;
-        return .healthy;
-    }
-
-    fn workspaceHealthStateLabel(state: WorkspaceHealthState) []const u8 {
-        return switch (state) {
-            .healthy => "healthy",
-            .degraded => "degraded",
-            .missing => "missing",
-            .unknown => "unknown",
-        };
-    }
-
     fn findMountForPath(self: *App, path: []const u8) ?*const workspace_types.MountView {
         if (self.ws.workspace_state) |*status| {
             var best: ?*const workspace_types.MountView = null;
@@ -11486,141 +11398,6 @@ pub const App = struct {
         terminal_host_mod.drawTerminalPanel(self, manager, rect);
     }
 
-    fn terminalIndexedColor(index: u8) [4]f32 {
-        const base16 = [_][3]u8{
-            .{ 0, 0, 0 },
-            .{ 205, 49, 49 },
-            .{ 13, 188, 121 },
-            .{ 229, 229, 16 },
-            .{ 36, 114, 200 },
-            .{ 188, 63, 188 },
-            .{ 17, 168, 205 },
-            .{ 229, 229, 229 },
-            .{ 102, 102, 102 },
-            .{ 241, 76, 76 },
-            .{ 35, 209, 139 },
-            .{ 245, 245, 67 },
-            .{ 59, 142, 234 },
-            .{ 214, 112, 214 },
-            .{ 41, 184, 219 },
-            .{ 255, 255, 255 },
-        };
-        if (index < 16) {
-            const rgb = base16[index];
-            return zcolors.rgba(rgb[0], rgb[1], rgb[2], 255);
-        }
-        if (index < 232) {
-            const v = index - 16;
-            const r = v / 36;
-            const g = (v / 6) % 6;
-            const b = v % 6;
-            const scale = [_]u8{ 0, 95, 135, 175, 215, 255 };
-            return zcolors.rgba(scale[r], scale[g], scale[b], 255);
-        }
-        const gray = @as(u8, @intCast(8 + (index - 232) * 10));
-        return zcolors.rgba(gray, gray, gray, 255);
-    }
-
-    fn terminalColorToRgba(
-        self: *App,
-        color: terminal_render_backend.Color,
-        default_color: [4]f32,
-    ) [4]f32 {
-        _ = self;
-        return switch (color) {
-            .default => default_color,
-            .indexed => |idx| terminalIndexedColor(idx),
-            .rgb => |rgb| zcolors.rgba(rgb[0], rgb[1], rgb[2], 255),
-        };
-    }
-
-    fn terminalStyleColors(
-        self: *App,
-        style: terminal_render_backend.Style,
-    ) struct { fg: [4]f32, bg: ?[4]f32 } {
-        var fg = self.terminalColorToRgba(style.fg, self.theme.colors.text_primary);
-        var bg_opt: ?[4]f32 = if (style.bg == .default)
-            null
-        else
-            self.terminalColorToRgba(style.bg, self.theme.colors.background);
-
-        if (style.inverse) {
-            const swapped_fg = if (bg_opt) |bg| bg else self.theme.colors.background;
-            const swapped_bg = self.terminalColorToRgba(style.fg, self.theme.colors.text_primary);
-            fg = swapped_fg;
-            bg_opt = swapped_bg;
-        }
-        if (style.dim) {
-            fg = zcolors.blend(fg, self.theme.colors.background, 0.45);
-        }
-        if (style.bold) {
-            fg = zcolors.blend(fg, zcolors.rgba(255, 255, 255, 255), 0.22);
-        }
-        if (style.italic) {
-            fg = zcolors.blend(fg, self.theme.colors.primary, 0.12);
-        }
-        return .{ .fg = fg, .bg = bg_opt };
-    }
-
-    fn fitTextToWidth(self: *App, text: []const u8, max_w: f32) usize {
-        if (text.len == 0 or max_w <= 0.0) return 0;
-        if (self.measureText(text) <= max_w) return text.len;
-
-        var idx: usize = 0;
-        var best_end: usize = 0;
-        while (idx < text.len) {
-            const next = nextUtf8Boundary(text, idx);
-            if (next <= idx) break;
-            if (self.measureText(text[0..next]) > max_w) break;
-            best_end = next;
-            idx = next;
-        }
-        return best_end;
-    }
-
-    fn drawTerminalStyledLine(
-        self: *App,
-        x: f32,
-        y: f32,
-        max_w: f32,
-        line: terminal_render_backend.StyledLine,
-    ) void {
-        var cursor_x = x;
-        const max_x = x + @max(1.0, max_w);
-        var i: usize = 0;
-        while (i < line.bytes.len and i < line.styles.len and cursor_x < max_x) {
-            const style = line.styles[i];
-            var end = i + 1;
-            while (end < line.bytes.len and end < line.styles.len and std.meta.eql(line.styles[end], style)) : (end += 1) {}
-            const run_text = line.bytes[i..end];
-            const remaining_w = max_x - cursor_x;
-            const fit_end = self.fitTextToWidth(run_text, remaining_w);
-            if (fit_end == 0) break;
-            const segment = run_text[0..fit_end];
-            const colors = self.terminalStyleColors(style);
-            const segment_w = self.measureText(segment);
-            if (colors.bg) |bg| {
-                self.drawFilledRect(Rect.fromXYWH(cursor_x, y, segment_w, self.textLineHeight()), zcolors.withAlpha(bg, 0.22));
-            }
-            self.drawText(cursor_x, y, segment, colors.fg);
-            if (style.underline) {
-                self.drawFilledRect(
-                    Rect.fromXYWH(cursor_x, y + self.textLineHeight() - @max(1.0, self.ui_scale), segment_w, @max(1.0, self.ui_scale)),
-                    zcolors.withAlpha(colors.fg, 0.9),
-                );
-            }
-            if (style.strikethrough) {
-                self.drawFilledRect(
-                    Rect.fromXYWH(cursor_x, y + self.textLineHeight() * 0.48, segment_w, @max(1.0, self.ui_scale)),
-                    zcolors.withAlpha(colors.fg, 0.75),
-                );
-            }
-            cursor_x += segment_w;
-            if (fit_end < run_text.len) break;
-            i = end;
-        }
-    }
-
     pub fn workspacePanelModel(self: *App) panels_bridge.WorkspacePanelModel {
         const selected_workspace_lock_state = self.selectedWorkspaceTokenLocked();
         const selected_workspace_known = selected_workspace_lock_state != null;
@@ -11643,12 +11420,6 @@ pub const App = struct {
             defer self.allocator.free(text);
             self.setWorkspaceError(text);
         }
-    }
-
-    const OwnedWorkspacePanelView = workspace_host_mod.OwnedWorkspacePanelView;
-
-    fn buildWorkspacePanelView(self: *App) OwnedWorkspacePanelView {
-        return workspace_host_mod.buildWorkspacePanelView(self);
     }
 
     pub fn performWorkspacePanelAction(self: *App, action: panels_bridge.WorkspacePanelAction) void {
@@ -13057,132 +12828,6 @@ pub const App = struct {
         }
     }
 
-    fn terminalPanelModel(self: *App) panels_bridge.TerminalPanelModel {
-        return .{
-            .connected = self.connection_state == .connected,
-            .has_session = self.terminal.terminal_session_id != null,
-            .auto_poll = self.terminal.terminal_auto_poll,
-            .has_input = std.mem.trim(u8, self.terminal.terminal_input.items, " \t\r\n").len > 0,
-            .has_output = self.terminal.terminal_backend.text().len > 0,
-        };
-    }
-
-    const OwnedTerminalPanelView = struct {
-        view: panels_bridge.TerminalPanelView,
-        backend_line: ?[]u8 = null,
-        session_line: ?[]u8 = null,
-
-        fn deinit(self: *OwnedTerminalPanelView, allocator: std.mem.Allocator) void {
-            if (self.backend_line) |value| allocator.free(value);
-            if (self.session_line) |value| allocator.free(value);
-            self.* = undefined;
-        }
-    };
-
-    fn terminalPanelViewOwned(self: *App) OwnedTerminalPanelView {
-        const backend_line = std.fmt.allocPrint(
-            self.allocator,
-            "Backend: {s} (selected: {s}, build default: {s})",
-            .{
-                self.terminal.terminal_backend.label(),
-                terminal_render_backend.Backend.kindName(self.terminal.terminal_backend_kind),
-                TERMINAL_BACKEND_KIND,
-            },
-        ) catch null;
-        const session_line = if (self.terminal.terminal_session_id) |id|
-            std.fmt.allocPrint(self.allocator, "Session: {s}", .{id}) catch null
-        else
-            self.allocator.dupe(u8, "Session: (not started)") catch null;
-        return .{
-            .view = .{
-                .title = "Terminal",
-                .backend_line = backend_line orelse "Backend: unknown",
-                .backend_detail = self.terminal.terminal_backend.statusDetail(),
-                .session_line = session_line orelse "Session: (unknown)",
-                .status_text = self.terminal.terminal_status,
-                .error_text = self.terminal.terminal_error,
-                .input_text = self.terminal.terminal_input.items,
-                .start_label = if (self.terminal.terminal_session_id == null) "Start" else "Restart",
-            },
-            .backend_line = backend_line,
-            .session_line = session_line,
-        };
-    }
-
-    fn performTerminalPanelAction(self: *App, action: panels_bridge.TerminalPanelAction) void {
-        switch (action) {
-            .start_or_restart => {
-                if (self.terminal.terminal_session_id != null) {
-                    self.closeTerminalSession() catch {};
-                }
-                self.ensureTerminalSession() catch |err| {
-                    const msg = self.formatFilesystemOpError("Terminal start failed", err);
-                    if (msg) |text| {
-                        defer self.allocator.free(text);
-                        self.setTerminalError(text);
-                    }
-                };
-            },
-            .stop => {
-                self.closeTerminalSession() catch |err| {
-                    const msg = self.formatFilesystemOpError("Terminal close failed", err);
-                    if (msg) |text| {
-                        defer self.allocator.free(text);
-                        self.setTerminalError(text);
-                    }
-                };
-            },
-            .read => {
-                self.terminalReadOnce(50) catch |err| {
-                    const msg = self.formatFilesystemOpError("Terminal read failed", err);
-                    if (msg) |text| {
-                        defer self.allocator.free(text);
-                        self.setTerminalError(text);
-                    }
-                };
-            },
-            .resize_default => {
-                self.resizeTerminalSession(120, 36) catch |err| {
-                    const msg = self.formatFilesystemOpError("Terminal resize failed", err);
-                    if (msg) |text| {
-                        defer self.allocator.free(text);
-                        self.setTerminalError(text);
-                    }
-                };
-            },
-            .clear_output => {
-                self.terminal.terminal_backend.clear(self.allocator);
-                self.clearTerminalError();
-                self.setTerminalStatus("Output cleared");
-            },
-            .toggle_auto_poll => {
-                self.terminal.terminal_auto_poll = !self.terminal.terminal_auto_poll;
-            },
-            .send_ctrl_c => {
-                self.sendTerminalControlC() catch |err| {
-                    const msg = self.formatFilesystemOpError("Terminal control failed", err);
-                    if (msg) |text| {
-                        defer self.allocator.free(text);
-                        self.setTerminalError(text);
-                    }
-                };
-            },
-            .send_input => {
-                self.sendTerminalInputFromUi() catch |err| {
-                    const msg = self.formatFilesystemOpError("Terminal send failed", err);
-                    if (msg) |text| {
-                        defer self.allocator.free(text);
-                        self.setTerminalError(text);
-                    }
-                };
-            },
-            .copy_output => {
-                self.copyTextToClipboard(self.terminal.terminal_backend.text()) catch {};
-                self.setTerminalStatus("Copied terminal output");
-            },
-        }
-    }
-
     fn drawFilesystemPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         filesystem_host_mod.drawFilesystemPanel(self, manager, rect);
     }
@@ -13195,118 +12840,6 @@ pub const App = struct {
         debug_host_mod.drawDebugPanel(self, manager, rect);
     }
 
-    const SparklinePointsCtx = struct {
-        points: []const f32,
-    };
-
-    fn sparklinePointAt(ctx: *const anyopaque, idx: usize) f32 {
-        const points_ctx: *const SparklinePointsCtx = @ptrCast(@alignCast(ctx));
-        return if (idx < points_ctx.points.len) points_ctx.points[idx] else 0.0;
-    }
-
-    fn drawDebugPerfCharts(
-        self: *App,
-        rect: Rect,
-        layout: PanelLayoutMetrics,
-        y_start: f32,
-        perf_charts: []const panels_bridge.DebugSparklineSeriesView,
-    ) f32 {
-        const pad = layout.inset;
-        const line_height = layout.line_height;
-        const row_height = layout.button_height;
-        const width = rect.max[0] - rect.min[0];
-        const content_width = @max(240.0, width - pad * 2.0);
-        var y = y_start;
-        if (perf_charts.len == 0) return y;
-        const spark_gap = @max(6.0 * self.ui_scale, layout.inner_inset * 0.8);
-        const spark_h = @max(52.0 * self.ui_scale, row_height * 1.9);
-        const spark_min_card_w = @max(150.0 * self.ui_scale, 90.0);
-        const spark_chart_count: usize = perf_charts.len;
-        const spark_cols_float = @floor((content_width + spark_gap) / (spark_min_card_w + spark_gap));
-        const spark_cols = std.math.clamp(@as(usize, @intFromFloat(@max(1.0, spark_cols_float))), 1, spark_chart_count);
-        const spark_rows = @divTrunc(spark_chart_count + spark_cols - 1, spark_cols);
-        const spark_card_w = @max(72.0 * self.ui_scale, (content_width - spark_gap * @as(f32, @floatFromInt(spark_cols - 1))) / @as(f32, @floatFromInt(spark_cols)));
-        const spark_label_h = line_height;
-        const spark_row_h = spark_label_h + spark_h + layout.row_gap * 0.35;
-        self.drawTextTrimmed(rect.min[0] + pad, y, content_width, "Perf sparkline charts (recent window)", self.theme.colors.text_secondary);
-        y += line_height;
-
-        for (perf_charts, 0..) |chart, idx| {
-            const row = @divTrunc(idx, spark_cols);
-            const col = idx % spark_cols;
-            const row_y = y + @as(f32, @floatFromInt(row)) * spark_row_h;
-            const x = rect.min[0] + pad + @as(f32, @floatFromInt(col)) * (spark_card_w + spark_gap);
-            const chart_rect = Rect.fromXYWH(x, row_y + spark_label_h, spark_card_w, spark_h);
-            self.drawTextCenteredTrimmed(
-                x + spark_card_w * 0.5,
-                row_y,
-                spark_card_w - @max(8.0 * self.ui_scale, 4.0),
-                chart.label,
-                self.theme.colors.text_secondary,
-            );
-            var points_ctx = SparklinePointsCtx{ .points = chart.points };
-            const charts = self.sharedStyleSheet().charts;
-            const stroke_color = self.chartSeriesThemeColor(idx);
-            widgets.sparkline.draw(
-                &self.ui_commands,
-                chart_rect,
-                .{ .ctx = @as(*const anyopaque, @ptrCast(&points_ctx)), .count = chart.points.len, .at = &sparklinePointAt },
-                .{
-                    .stroke_color = stroke_color,
-                    .fill_color = zcolors.withAlpha(stroke_color, charts.fill_alpha orelse 0.28),
-                    .background_color = charts.background orelse zcolors.withAlpha(self.theme.colors.surface, 0.96),
-                    .border_color = charts.border orelse self.theme.colors.border,
-                    .max_columns = PERF_SPARKLINE_MAX_COLUMNS,
-                },
-            );
-        }
-        return y + @as(f32, @floatFromInt(spark_rows)) * spark_row_h + layout.row_gap * 0.2;
-    }
-
-    fn drawDebugEventStream(self: *App, output_rect: Rect, view: panels_bridge.DebugEventStreamView) void {
-        const host = DebugEventStreamPanel.Host{
-            .ctx = @ptrCast(self),
-            .set_output_rect = App.debugEventStreamSetOutputRect,
-            .focus_panel = App.debugEventStreamFocusPanel,
-            .draw_surface_panel = App.filesystemDrawSurfacePanel,
-            .push_clip = App.debugEventStreamPushClip,
-            .pop_clip = App.debugEventStreamPopClip,
-            .draw_filled_rect = App.debugEventStreamDrawFilledRect,
-            .draw_button = App.launcherSettingsDrawButton,
-            .get_scroll_y = App.debugEventStreamGetScrollY,
-            .set_scroll_y = App.debugEventStreamSetScrollY,
-            .get_scrollbar_dragging = App.debugEventStreamGetScrollbarDragging,
-            .set_scrollbar_dragging = App.debugEventStreamSetScrollbarDragging,
-            .get_drag_start_y = App.debugEventStreamGetDragStartY,
-            .set_drag_start_y = App.debugEventStreamSetDragStartY,
-            .get_drag_start_scroll_y = App.debugEventStreamGetDragStartScrollY,
-            .set_drag_start_scroll_y = App.debugEventStreamSetDragStartScrollY,
-            .set_drag_capture = App.debugEventStreamSetDragCapture,
-            .release_drag_capture = App.debugEventStreamReleaseDragCapture,
-            .entry_height = App.debugEventStreamEntryHeight,
-            .draw_entry = App.debugEventStreamDrawEntry,
-            .select_entry = App.debugEventStreamSelectEntry,
-            .copy_selected_event = App.debugEventStreamCopySelectedEvent,
-            .selected_event_count = App.debugEventStreamSelectedEventCount,
-        };
-        DebugEventStreamPanel.draw(
-            host,
-            output_rect,
-            self.panelLayoutMetrics(),
-            self.ui_scale,
-            .{
-                .primary = self.theme.colors.primary,
-                .border = self.theme.colors.border,
-            },
-            view,
-            .{
-                .mouse_x = self.mouse_x,
-                .mouse_y = self.mouse_y,
-                .mouse_clicked = self.mouse_clicked,
-                .mouse_down = self.mouse_down,
-            },
-        );
-    }
     fn makeDebugFoldKey(event_id: u64, line_index: usize) DebugFoldKey {
         return .{
             .event_id = event_id,
