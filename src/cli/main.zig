@@ -15,6 +15,7 @@ const cmd_agent = @import("commands/agent.zig");
 const cmd_auth = @import("commands/auth.zig");
 const cmd_chat = @import("commands/chat.zig");
 const cmd_fs = @import("commands/fs.zig");
+const cmd_package = @import("commands/package.zig");
 const cmd_complete = @import("commands/complete.zig");
 const repl = @import("repl.zig");
 
@@ -114,6 +115,29 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
                 .handoff => try cmd_workspace.executeWorkspaceHandoffCommand(allocator, options, cmd),
                 else => {
                     logger.err("Unknown workspace verb", .{});
+                    return error.InvalidArguments;
+                },
+            }
+        },
+        .package => {
+            switch (cmd.verb) {
+                .list => try cmd_package.executePackageList(allocator, options, cmd),
+                .catalog => try cmd_package.executePackageCatalog(allocator, options, cmd),
+                .updates => try cmd_package.executePackageUpdates(allocator, options, cmd),
+                .update => try cmd_package.executePackageUpdate(allocator, options, cmd),
+                .update_all => try cmd_package.executePackageUpdateAll(allocator, options, cmd),
+                .info => try cmd_package.executePackageGet(allocator, options, cmd),
+                .install => try cmd_package.executePackageInstall(allocator, options, cmd),
+                .enable => try cmd_package.executePackageEnable(allocator, options, cmd),
+                .switch_release => try cmd_package.executePackageSwitch(allocator, options, cmd),
+                .disable => try cmd_package.executePackageDisable(allocator, options, cmd),
+                .rollback => try cmd_package.executePackageRollback(allocator, options, cmd),
+                .remove => try cmd_package.executePackageRemove(allocator, options, cmd),
+                .channel_get => try cmd_package.executePackageChannelGet(allocator, options, cmd),
+                .channel_set => try cmd_package.executePackageChannelSet(allocator, options, cmd),
+                .channel_clear => try cmd_package.executePackageChannelClear(allocator, options, cmd),
+                else => {
+                    logger.err("Unknown package verb", .{});
                     return error.InvalidArguments;
                 },
             }

@@ -32,12 +32,22 @@ spider --help
 - `workspace mount add <mount_path> <node_id> <export_name>` - Add a workspace mount
 - `workspace mount remove <mount_path> [node_id export_name]` - Remove a workspace mount
 - `workspace handoff show [generic|codex_app|spider_monkey]` - Print runtime handoff commands
-- `package list` - List installed and builtin packages from `/.spiderweb/control/packages`
-- `package info <package_id>` - Show one package definition
-- `package install <json_or_@file>` - Install a package definition
+- `package list` - List installed packages with active/latest release and channel state
+- `package catalog [package_id] [--channel <channel>]` - Show registry-visible packages/releases
+- `package updates` - Show available registry updates for installed packages
+- `package update <package_id> [--channel <channel>] [--release <version>] [--activate]` - Install one package update
+- `package update-all [package_id ...] [--apply] [--activate]` - Preview or apply multiple package updates
+- `package info|get <package_id>` - Show installed or registry package details
+- `package install <package_id> [--channel <channel>] [--release <version>]` - Install latest registry package
+- `package install <json_or_@file>` - Install a raw package/release JSON payload
+- `package channel-get [package_id]` - Show host default or package-specific channel policy
+- `package channel-set <channel> [package_id]` - Set host default channel or package override
+- `package channel-clear <package_id>` - Clear a package-specific channel override
 - `package enable <package_id>` - Re-enable an installed package
+- `package switch <package_id> <release_version>` - Switch the active installed release
 - `package disable <package_id>` - Disable an installed package from discovery/use
-- `package remove <package_id>` - Remove an installed package
+- `package rollback <package_id> [release_version]` - Roll back to a prior installed release
+- `package remove <package_id> [release_version]` - Remove an installed package or one installed release
 - `agent list` - List discoverable agents
 - `agent info <agent_id>` - Show one agent's metadata
 - `session list` - List known sessions for this connection

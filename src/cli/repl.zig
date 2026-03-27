@@ -29,6 +29,7 @@ const cmd_session = @import("commands/session.zig");
 const cmd_agent = @import("commands/agent.zig");
 const cmd_auth = @import("commands/auth.zig");
 const cmd_fs = @import("commands/fs.zig");
+const cmd_package = @import("commands/package.zig");
 const cmd_complete = @import("commands/complete.zig");
 
 // ── History ───────────────────────────────────────────────────────────────────
@@ -167,6 +168,24 @@ fn dispatchCommand(
             .rotate => try cmd_auth.executeAuthRotate(allocator, options, cmd),
             else => try stdout.print("Unknown auth verb\n", .{}),
         },
+        .package => switch (verb) {
+            .list => try cmd_package.executePackageList(allocator, options, cmd),
+            .catalog => try cmd_package.executePackageCatalog(allocator, options, cmd),
+            .updates => try cmd_package.executePackageUpdates(allocator, options, cmd),
+            .update => try cmd_package.executePackageUpdate(allocator, options, cmd),
+            .update_all => try cmd_package.executePackageUpdateAll(allocator, options, cmd),
+            .info => try cmd_package.executePackageGet(allocator, options, cmd),
+            .install => try cmd_package.executePackageInstall(allocator, options, cmd),
+            .enable => try cmd_package.executePackageEnable(allocator, options, cmd),
+            .switch_release => try cmd_package.executePackageSwitch(allocator, options, cmd),
+            .disable => try cmd_package.executePackageDisable(allocator, options, cmd),
+            .rollback => try cmd_package.executePackageRollback(allocator, options, cmd),
+            .remove => try cmd_package.executePackageRemove(allocator, options, cmd),
+            .channel_get => try cmd_package.executePackageChannelGet(allocator, options, cmd),
+            .channel_set => try cmd_package.executePackageChannelSet(allocator, options, cmd),
+            .channel_clear => try cmd_package.executePackageChannelClear(allocator, options, cmd),
+            else => try stdout.print("Unknown package verb\n", .{}),
+        },
         .fs => switch (verb) {
             .ls => try cmd_fs.executeFsLs(allocator, options, cmd),
             .read => try cmd_fs.executeFsRead(allocator, options, cmd),
@@ -192,6 +211,7 @@ fn printReplHelp(stdout: anytype) void {
         \\  /node list|info|pending|approve|deny|...
         \\  /session list|status|attach|close|history
         \\  /agent list|info
+        \\  /package list|catalog|updates|update|update-all|get|install|channel-get|channel-set|channel-clear|switch|rollback|enable|disable|remove
         \\  /auth status|rotate
         \\  /fs ls|read|write|stat|tree
         \\  /status          — show connection info

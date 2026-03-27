@@ -292,6 +292,16 @@ const PackageManagerEntry = struct {
     version: []u8,
     runtime_kind: []u8,
     enabled: bool = true,
+    active_release_version: ?[]u8 = null,
+    latest_release_version: ?[]u8 = null,
+    latest_release_channel: ?[]u8 = null,
+    effective_channel: ?[]u8 = null,
+    channel_override: ?[]u8 = null,
+    installed_release_count: usize = 0,
+    release_history_count: usize = 0,
+    update_available: bool = false,
+    last_release_action: ?[]u8 = null,
+    last_release_version: ?[]u8 = null,
     help_md: ?[]u8 = null,
 
     fn deinit(self: *PackageManagerEntry, allocator: std.mem.Allocator) void {
@@ -299,6 +309,13 @@ const PackageManagerEntry = struct {
         allocator.free(self.kind);
         allocator.free(self.version);
         allocator.free(self.runtime_kind);
+        if (self.active_release_version) |value| allocator.free(value);
+        if (self.latest_release_version) |value| allocator.free(value);
+        if (self.latest_release_channel) |value| allocator.free(value);
+        if (self.effective_channel) |value| allocator.free(value);
+        if (self.channel_override) |value| allocator.free(value);
+        if (self.last_release_action) |value| allocator.free(value);
+        if (self.last_release_version) |value| allocator.free(value);
         if (self.help_md) |value| allocator.free(value);
         self.* = undefined;
     }
@@ -1504,6 +1521,8 @@ const App = struct {
     package_manager_modal_open: bool = false,
     package_manager_packages: std.ArrayListUnmanaged(PackageManagerEntry) = .{},
     package_manager_selected_index: usize = 0,
+    package_manager_refresh_busy: bool = false,
+    package_manager_last_refresh_ms: i64 = 0,
     package_manager_install_payload: std.ArrayList(u8) = .empty,
     package_manager_modal_error: ?[]u8 = null,
     package_manager_modal_notice: ?[]u8 = null,
@@ -8177,17 +8196,7 @@ const App = struct {
             .{ .variant = .secondary, .disabled = self.connection_state != .connected },
         )) {
             self.clearPackageManagerModalNotice();
-            self.refreshPackageManagerPackages() catch |err| {
-                if (err != error.RemoteError) {
-                    const msg = self.formatControlOpError("Package list failed", err);
-                    if (msg) |text| {
-                        defer self.allocator.free(text);
-                        self.setPackageManagerModalError(text);
-                    } else {
-                        self.setPackageManagerModalError("Package list failed.");
-                    }
-                }
-            };
+            self.requestPackageManagerRefresh(true);
         }
 
         var right_y = right_rect.min[1] + layout.line_height + layout.row_gap * 0.6;
@@ -8783,7 +8792,7 @@ const App = struct {
                     row_y += row_h + row_gap;
                     if (self.drawButtonWidget(
                         Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                        if (self.ws.venom_manager_panel_id != null) "Venoms (Focus)" else "Venoms (Open)",
+                        if (self.ws.venom_manager_panel_id != null) "Packages (Focus)" else "Packages (Open)",
                         .{ .variant = .secondary },
                     )) {
                         _ = self.ensureVenomManagerPanel(&self.manager) catch {};
@@ -10877,7 +10886,7 @@ const App = struct {
             }
         }
         const panel_data = workspace.PanelData{ .VenomManager = {} };
-        const panel_id = try manager.openPanel(.VenomManager, "Venoms", panel_data);
+        const panel_id = try manager.openPanel(.VenomManager, "Packages", panel_data);
         self.ws.venom_manager_panel_id = panel_id;
         if (manager.workspace.syncDockLayout() catch false) {
             manager.workspace.markDirty();
@@ -16380,6 +16389,84 @@ const App = struct {
         self.package_manager_modal_notice = null;
     }
 
+    pub fn requestPackageManagerRefresh(self: *App, force: bool) void {
+        if (self.connection_state != .connected) return;
+        if (self.package_manager_refresh_busy) return;
+        const now = std.time.milliTimestamp();
+        if (!force and self.package_manager_last_refresh_ms != 0 and now - self.package_manager_last_refresh_ms < 10_000) return;
+        self.package_manager_refresh_busy = true;
+        defer self.package_manager_refresh_busy = false;
+        self.package_manager_last_refresh_ms = now;
+        self.refreshPackageManagerPackages() catch |err| {
+            if (err != error.RemoteError) {
+                const msg = self.formatControlOpError("Package list failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setPackageManagerModalError(text);
+                } else {
+                    self.setPackageManagerModalError("Package list failed.");
+                }
+            }
+        };
+    }
+
+    pub fn packageManagerUpdateSelected(self: *App, activate: bool) void {
+        const entry = self.selectedPackageManagerEntry() orelse return;
+        const escaped_id = jsonEscape(self.allocator, entry.package_id) catch return;
+        defer self.allocator.free(escaped_id);
+        const payload = std.fmt.allocPrint(
+            self.allocator,
+            "{{\"venom_id\":\"{s}\",\"activate\":{s}}}",
+            .{ escaped_id, if (activate) "true" else "false" },
+        ) catch return;
+        defer self.allocator.free(payload);
+        self.runPackageManagerOperation(
+            "update.json",
+            payload,
+            if (activate) "Package updated and switched." else "Package update installed.",
+        ) catch |err| {
+            if (err != error.RemoteError) {
+                const msg = self.formatControlOpError("Package update failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setPackageManagerModalError(text);
+                }
+            }
+        };
+    }
+
+    pub fn packageManagerRollbackSelected(self: *App) void {
+        const entry = self.selectedPackageManagerEntry() orelse return;
+        const payload = self.buildPackageManagerIdPayload(entry.package_id) catch return;
+        defer self.allocator.free(payload);
+        self.runPackageManagerOperation("rollback.json", payload, "Package rolled back.") catch |err| {
+            if (err != error.RemoteError) {
+                const msg = self.formatControlOpError("Package rollback failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setPackageManagerModalError(text);
+                }
+            }
+        };
+    }
+
+    pub fn packageManagerToggleSelectedEnabled(self: *App) void {
+        const entry = self.selectedPackageManagerEntry() orelse return;
+        const payload = self.buildPackageManagerIdPayload(entry.package_id) catch return;
+        defer self.allocator.free(payload);
+        const control_name = if (entry.enabled) "disable.json" else "enable.json";
+        const notice = if (entry.enabled) "Package disabled." else "Package enabled.";
+        self.runPackageManagerOperation(control_name, payload, notice) catch |err| {
+            if (err != error.RemoteError) {
+                const msg = self.formatControlOpError("Package update failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setPackageManagerModalError(text);
+                }
+            }
+        };
+    }
+
     fn setAboutModalNotice(self: *App, message: []const u8) void {
         if (self.about_modal_notice) |existing| self.allocator.free(existing);
         self.about_modal_notice = self.allocator.dupe(u8, message) catch null;
@@ -16401,17 +16488,7 @@ const App = struct {
         self.settings_panel.focused_field = .package_manager_install_payload;
         self.clearPackageManagerModalError();
         self.clearPackageManagerModalNotice();
-        self.refreshPackageManagerPackages() catch |err| {
-            if (err != error.RemoteError) {
-                const msg = self.formatControlOpError("Package list failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setPackageManagerModalError(text);
-                } else {
-                    self.setPackageManagerModalError("Package list failed.");
-                }
-            }
-        };
+        self.requestPackageManagerRefresh(true);
     }
 
     fn closePackageManagerModal(self: *App) void {
@@ -17801,9 +17878,43 @@ const App = struct {
             try next_packages.append(self.allocator, .{
                 .package_id = try self.allocator.dupe(u8, jsonObjectFirstString(obj, &.{ "package_id", "venom_id" }) orelse continue),
                 .kind = try self.allocator.dupe(u8, jsonObjectFirstString(obj, &.{"kind"}) orelse "(unknown)"),
-                .version = try self.allocator.dupe(u8, jsonObjectFirstString(obj, &.{"version"}) orelse "1"),
+                .version = try self.allocator.dupe(
+                    u8,
+                    jsonObjectFirstString(obj, &.{ "active_release_version", "release_version", "version" }) orelse "1",
+                ),
                 .runtime_kind = try self.allocator.dupe(u8, jsonObjectFirstString(obj, &.{"runtime_kind"}) orelse "native"),
                 .enabled = jsonObjectFirstBool(obj, &.{"enabled"}) orelse true,
+                .active_release_version = if (jsonObjectFirstString(obj, &.{"active_release_version"})) |value|
+                    try self.allocator.dupe(u8, value)
+                else
+                    null,
+                .latest_release_version = if (jsonObjectFirstString(obj, &.{"latest_release_version"})) |value|
+                    try self.allocator.dupe(u8, value)
+                else
+                    null,
+                .latest_release_channel = if (jsonObjectFirstString(obj, &.{"latest_release_channel"})) |value|
+                    try self.allocator.dupe(u8, value)
+                else
+                    null,
+                .effective_channel = if (jsonObjectFirstString(obj, &.{"effective_channel"})) |value|
+                    try self.allocator.dupe(u8, value)
+                else
+                    null,
+                .channel_override = if (jsonObjectFirstString(obj, &.{"channel_override"})) |value|
+                    try self.allocator.dupe(u8, value)
+                else
+                    null,
+                .installed_release_count = @intCast(jsonObjectFirstU64(obj, &.{"installed_release_count"}) orelse 0),
+                .release_history_count = @intCast(jsonObjectFirstU64(obj, &.{"release_history_count"}) orelse 0),
+                .update_available = jsonObjectFirstBool(obj, &.{"update_available"}) orelse false,
+                .last_release_action = if (jsonObjectFirstString(obj, &.{"last_release_action"})) |value|
+                    try self.allocator.dupe(u8, value)
+                else
+                    null,
+                .last_release_version = if (jsonObjectFirstString(obj, &.{"last_release_version"})) |value|
+                    try self.allocator.dupe(u8, value)
+                else
+                    null,
                 .help_md = if (jsonObjectFirstString(obj, &.{"help_md"})) |value|
                     try self.allocator.dupe(u8, value)
                 else
