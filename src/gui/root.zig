@@ -68,7 +68,35 @@ const ConnectionState = enum {
     error_state,
 };
 
+const LauncherRecipe = enum {
+    create_workspace,
+    add_second_device,
+    install_package,
+    run_remote_service,
+    connect_to_spiderweb,
+    workspace_tokens,
+    connect_another_machine,
+    contribute_this_mac,
+};
+
+const LauncherRecipeSpec = struct {
+    eyebrow: []const u8,
+    title: []const u8,
+    summary: []const u8,
+    steps: [3][]const u8,
+    primary_label: []const u8,
+    secondary_label: ?[]const u8 = null,
+};
+
+const LauncherRecipeProgress = enum {
+    guide,
+    ready,
+    done,
+};
+
 const UiStage = stage_machine.Stage;
+const OnboardingStage = stage_machine.OnboardingStage;
+const HomeRoute = stage_machine.HomeRoute;
 
 const IdeMenuDomain = enum {
     file,
@@ -1156,6 +1184,10 @@ const FilesystemState = struct {
     filesystem_hide_runtime_noise: bool = false,
     filesystem_selected_path: ?[]u8 = null,
     filesystem_entry_page: usize = 0,
+    filesystem_entry_scroll_y: f32 = 0.0,
+    filesystem_entry_scrollbar_dragging: bool = false,
+    filesystem_entry_scrollbar_drag_anchor: f32 = 0.0,
+    filesystem_entry_scrollbar_drag_scroll: f32 = 0.0,
     filesystem_last_clicked_entry_index: ?usize = null,
     filesystem_last_click_ms: i64 = 0,
     // Column widths (non-zero defaults — set by App.init)
@@ -1312,6 +1344,9 @@ const WorkspaceState = struct {
     launcher_create_template_page: usize = 0,
     launcher_create_templates: std.ArrayListUnmanaged(workspace_types.WorkspaceTemplate) = .{},
     launcher_create_modal_error: ?[]u8 = null,
+    launcher_recipe_modal: ?LauncherRecipe = null,
+    onboarding_stage: OnboardingStage = .connect,
+    home_route: HomeRoute = .workspace,
     workspace_recovery_blocked_until: u64 = 0,
     workspace_recovery_blocked_for_manager: usize = 0,
     workspace_recovery_suspended_until: u64 = 0,
@@ -5953,6 +5988,7 @@ pub const App = struct {
         self.ws.workspace_selected_mount_index = null;
         self.ws.workspace_selected_bind_index = null;
         try self.syncSettingsToConfig();
+        self.syncHomeOnboardingStage();
     }
 
     pub fn refreshWorkspaceData(self: *App) !void {
@@ -6056,6 +6092,7 @@ pub const App = struct {
                 self.setMissionDashboardError("Refresh missions failed");
             }
         };
+        self.syncHomeOnboardingStage();
     }
 
     fn refreshMissionDashboardData(self: *App) !void {
@@ -7472,11 +7509,12 @@ pub const App = struct {
 
         const launcher_modal_open = self.ws.launcher_create_modal_open;
         const about_modal_open = self.about_modal_open;
+        const recipe_modal_open = self.ws.launcher_recipe_modal != null;
         const saved_mouse_down = self.mouse_down;
         const saved_mouse_clicked = self.mouse_clicked;
         const saved_mouse_released = self.mouse_released;
         const saved_mouse_right_clicked = self.mouse_right_clicked;
-        if (launcher_modal_open or about_modal_open) {
+        if (launcher_modal_open or about_modal_open or recipe_modal_open) {
             // Keep launcher visible under the modal, but route pointer input only to modal widgets.
             self.mouse_down = false;
             self.mouse_clicked = false;
@@ -7510,7 +7548,7 @@ pub const App = struct {
         self.drawRect(right_rect, sidebar_border);
 
         var left_y = left_rect.min[1] + pad;
-        const title = "Spider Web Connections";
+        const title = "Spiderweb Connections";
         self.drawLabel(left_rect.min[0] + pad, left_y, title, self.theme.colors.text_primary);
         left_y += layout.line_height + layout.row_gap;
 
@@ -7694,8 +7732,22 @@ pub const App = struct {
         }
 
         var right_y = right_rect.min[1] + pad;
-        self.drawLabel(right_rect.min[0] + pad, right_y, "Workspaces", self.theme.colors.text_primary);
-        right_y += layout.line_height + layout.row_gap * 0.6;
+        self.drawLabel(right_rect.min[0] + pad, right_y, onboardingStageHeadline(self.ws.onboarding_stage), self.theme.colors.text_primary);
+        right_y += layout.line_height + layout.row_gap * 0.45;
+
+        const stage_detail = switch (self.ws.onboarding_stage) {
+            .connect => "Save a connection profile, add an access token, and connect to Spiderweb.",
+            .choose_workspace => "Choose the workspace you want to open first, or create a new one with strong defaults.",
+            .workspace_ready => "Open the workspace shell directly, or jump into Devices, Capabilities, Explore, or Settings.",
+        };
+        self.drawTextTrimmed(
+            right_rect.min[0] + pad,
+            right_y,
+            right_rect.width() - pad * 2.0,
+            stage_detail,
+            self.theme.colors.text_secondary,
+        );
+        right_y += layout.line_height + layout.row_gap * 0.7;
         if (self.ws.launcher_notice) |notice| {
             self.drawTextTrimmed(
                 right_rect.min[0] + pad,
@@ -7707,88 +7759,45 @@ pub const App = struct {
             right_y += layout.line_height + layout.row_gap * 0.7;
         }
 
-        const filter_rect = Rect.fromXYWH(
+        const route_gap = @max(6.0 * self.ui_scale, layout.row_gap * 0.4);
+        const route_rect_w = (right_rect.width() - pad * 2.0 - route_gap * 4.0) / 5.0;
+        var route_x = right_rect.min[0] + pad;
+        for ([_]HomeRoute{ .workspace, .devices, .capabilities, .explore, .settings }) |route| {
+            if (self.drawButtonWidget(
+                Rect.fromXYWH(route_x, right_y, route_rect_w, layout.button_height),
+                homeRouteLabel(route),
+                .{ .variant = if (self.ws.home_route == route) .primary else .secondary },
+            )) {
+                self.ws.home_route = route;
+            }
+            route_x += route_rect_w + route_gap;
+        }
+        right_y += layout.button_height + layout.row_gap * 0.8;
+
+        const home_content_rect = Rect.fromXYWH(
             right_rect.min[0] + pad,
             right_y,
             right_rect.width() - pad * 2.0,
-            layout.input_height,
+            @max(1.0, right_rect.max[1] - right_y - pad),
         );
-        const filter_focused = self.drawTextInputWidget(
-            filter_rect,
-            self.ws.launcher_project_filter.items,
-            self.settings_panel.focused_field == .launcher_project_filter,
-            .{ .placeholder = "Search workspaces" },
-        );
-        if (filter_focused) self.settings_panel.focused_field = .launcher_project_filter;
-        right_y += layout.input_height + layout.row_gap;
-
-        const project_row_h = @max(layout.button_height, 32.0 * self.ui_scale);
-        const list_h = @max(1.0, right_rect.max[1] - right_y - pad - project_row_h - layout.row_gap);
-        const list_rect = Rect.fromXYWH(right_rect.min[0] + pad, right_y, right_rect.width() - pad * 2.0, list_h);
-        self.drawSurfacePanel(list_rect);
-        self.drawRect(list_rect, self.theme.colors.border);
-
-        var project_row_y = list_rect.min[1] + layout.inner_inset;
-        for (self.ws.projects.items) |project| {
-            if (project_row_y + project_row_h > list_rect.max[1] - layout.inner_inset) break;
-            const matches_filter = self.ws.launcher_project_filter.items.len == 0 or
-                containsCaseInsensitive(project.name, self.ws.launcher_project_filter.items) or
-                containsCaseInsensitive(project.id, self.ws.launcher_project_filter.items);
-            if (!matches_filter) continue;
-            const is_selected = self.settings_panel.project_id.items.len > 0 and std.mem.eql(u8, self.settings_panel.project_id.items, project.id);
-            if (self.drawButtonWidget(
-                Rect.fromXYWH(list_rect.min[0] + layout.inner_inset, project_row_y, list_rect.width() - layout.inner_inset * 2.0, project_row_h),
-                project.name,
-                .{ .variant = if (is_selected) .primary else .secondary },
-            )) {
-                self.selectWorkspaceInSettings(project.id) catch {};
-            }
-            project_row_y += project_row_h + layout.row_gap * 0.5;
-        }
-
-        const open_rect = Rect.fromXYWH(
-            right_rect.min[0] + pad,
-            right_rect.max[1] - pad - project_row_h,
-            @max(160.0 * self.ui_scale, right_rect.width() * 0.4),
-            project_row_h,
-        );
-        if (self.drawButtonWidget(
-            open_rect,
-            "Open Workspace",
-            .{ .variant = .primary, .disabled = self.connection_state != .connected or self.selectedWorkspaceId() == null },
-        )) {
-            self.openSelectedWorkspaceFromLauncher() catch |err| {
-                const msg = self.formatControlOpError("Failed to open workspace", err);
-                if (msg) |value| {
-                    defer self.allocator.free(value);
-                    self.setLauncherNotice(value);
-                }
-            };
-        }
-
-        const create_rect = Rect.fromXYWH(
-            open_rect.max[0] + pad,
-            right_rect.max[1] - pad - project_row_h,
-            @max(160.0 * self.ui_scale, right_rect.width() * 0.4),
-            project_row_h,
-        );
-        if (self.drawButtonWidget(
-            create_rect,
-            "Create Workspace",
-            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
-        )) {
-            self.openLauncherCreateWorkspaceModal();
+        switch (self.ws.home_route) {
+            .workspace => self.drawLauncherWorkspaceRoute(home_content_rect),
+            .devices => self.drawLauncherDevicesRoute(home_content_rect),
+            .capabilities => self.drawLauncherCapabilitiesRoute(home_content_rect),
+            .explore => self.drawLauncherExploreRoute(home_content_rect),
+            .settings => self.drawLauncherSettingsRoute(home_content_rect),
         }
 
         _ = self.drawWindowMenuBar(ui_window, fb_width);
         self.drawStatusOverlay(fb_width, fb_height);
-        if (launcher_modal_open or about_modal_open) {
+        if (launcher_modal_open or about_modal_open or recipe_modal_open) {
             self.mouse_down = saved_mouse_down;
             self.mouse_clicked = saved_mouse_clicked;
             self.mouse_released = saved_mouse_released;
             self.mouse_right_clicked = saved_mouse_right_clicked;
             if (launcher_modal_open) self.drawLauncherCreateWorkspaceModal(fb_width, fb_height);
             if (about_modal_open) self.drawAboutModal(fb_width, fb_height);
+            if (recipe_modal_open) self.drawLauncherRecipeModal(fb_width, fb_height);
         }
         if (self.ws.workspace_wizard_open) {
             self.mouse_down = saved_mouse_down;
@@ -8018,11 +8027,11 @@ pub const App = struct {
         self.drawRect(detail_rect, self.theme.colors.border);
         if (self.selectedLauncherCreateWorkspaceTemplate()) |template| {
             const desc = if (template.description.len > 0) template.description else "(no description)";
-            const binds_line = std.fmt.allocPrint(
-                self.allocator,
-                "Selected: {s} | binds: {d}",
-                .{ template.id, template.binds.items.len },
-            ) catch null;
+        const binds_line = std.fmt.allocPrint(
+            self.allocator,
+            "Selected: {s} | packages: {d}",
+            .{ template.id, template.binds.items.len },
+        ) catch null;
             defer if (binds_line) |value| self.allocator.free(value);
             if (binds_line) |value| {
                 self.drawTextTrimmed(
@@ -8079,6 +8088,1162 @@ pub const App = struct {
 
         if (self.mouse_released and !modal_rect.contains(.{ self.mouse_x, self.mouse_y })) {
             self.closeLauncherCreateWorkspaceModal();
+        }
+    }
+
+    fn launcherLocalDeviceSummary(self: *App) []const u8 {
+        if (self.connection_state != .connected) return "Connect to check this Mac";
+
+        const local_node = self.config.appLocalNode(self.config.selectedProfileId()) orelse return "Not prepared yet";
+        const now_ms = std.time.milliTimestamp();
+        for (self.ws.nodes.items) |node| {
+            if (!std.mem.eql(u8, node.node_id, local_node.node_id)) continue;
+            return if (node.lease_expires_at_ms > now_ms) "Online" else "Needs attention";
+        }
+        return "Waiting to connect";
+    }
+
+    fn launcherDriveLabel(self: *App) []const u8 {
+        if (self.ws.workspace_state) |*status| {
+            if (status.workspace_root) |root| {
+                const trimmed = std.mem.trim(u8, root, " \t\r\n");
+                if (trimmed.len > 0) return root;
+            }
+            if (status.mounts.items.len > 0) return status.mounts.items[0].mount_path;
+        }
+        if (self.ws.selected_workspace_detail) |*detail| {
+            if (detail.mounts.items.len > 0) return detail.mounts.items[0].mount_path;
+        }
+        return "Mount a drive to begin";
+    }
+
+    fn drawLauncherActionCard(
+        self: *App,
+        rect: Rect,
+        title: []const u8,
+        body: []const u8,
+        button_label: []const u8,
+        enabled: bool,
+    ) bool {
+        const layout = self.panelLayoutMetrics();
+        const pad = @max(layout.inner_inset, 10.0 * self.ui_scale);
+        const button_h = @max(layout.button_height, 34.0 * self.ui_scale);
+        self.drawSurfacePanel(rect);
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            rect.min[1] + pad,
+            rect.width() - pad * 2.0,
+            title,
+            self.theme.colors.text_primary,
+        );
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            rect.min[1] + pad + layout.line_height + layout.row_gap * 0.3,
+            rect.width() - pad * 2.0,
+            body,
+            self.theme.colors.text_secondary,
+        );
+        return self.drawButtonWidget(
+            Rect.fromXYWH(
+                rect.min[0] + pad,
+                rect.max[1] - pad - button_h,
+                rect.width() - pad * 2.0,
+                button_h,
+            ),
+            button_label,
+            .{ .variant = .secondary, .disabled = !enabled },
+        );
+    }
+
+    fn drawLauncherRecipeCard(
+        self: *App,
+        rect: Rect,
+        eyebrow: []const u8,
+        title: []const u8,
+        body: []const u8,
+        progress: LauncherRecipeProgress,
+        button_label: []const u8,
+        enabled: bool,
+    ) bool {
+        const layout = self.panelLayoutMetrics();
+        const pad = @max(layout.inner_inset, 10.0 * self.ui_scale);
+        const button_h = @max(layout.button_height, 34.0 * self.ui_scale);
+        self.drawSurfacePanel(rect);
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            rect.min[1] + pad,
+            rect.width() - pad * 2.0 - 88.0 * self.ui_scale,
+            eyebrow,
+            self.theme.colors.text_secondary,
+        );
+        const progress_label = launcherRecipeProgressLabel(progress);
+        const progress_color = self.launcherRecipeProgressColor(progress);
+        const badge_w = @max(64.0 * self.ui_scale, self.measureText(progress_label) + pad * 1.2);
+        const badge_rect = Rect.fromXYWH(
+            rect.max[0] - pad - badge_w,
+            rect.min[1] + pad - 2.0 * self.ui_scale,
+            badge_w,
+            layout.button_height * 0.82,
+        );
+        self.drawFilledRect(badge_rect, zcolors.withAlpha(progress_color, 28));
+        self.drawRect(badge_rect, progress_color);
+        self.drawTextTrimmed(
+            badge_rect.min[0] + pad * 0.4,
+            badge_rect.min[1] + @max(0.0, (badge_rect.height() - layout.line_height) * 0.5),
+            badge_rect.width() - pad * 0.8,
+            progress_label,
+            progress_color,
+        );
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            rect.min[1] + pad + layout.line_height,
+            rect.width() - pad * 2.0,
+            title,
+            self.theme.colors.text_primary,
+        );
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            rect.min[1] + pad + layout.line_height * 2.0 + layout.row_gap * 0.25,
+            rect.width() - pad * 2.0,
+            body,
+            self.theme.colors.text_secondary,
+        );
+        return self.drawButtonWidget(
+            Rect.fromXYWH(
+                rect.min[0] + pad,
+                rect.max[1] - pad - button_h,
+                rect.width() - pad * 2.0,
+                button_h,
+            ),
+            button_label,
+            .{ .variant = .secondary, .disabled = !enabled },
+        );
+    }
+
+    fn launcherRecipeSpec(recipe: LauncherRecipe) LauncherRecipeSpec {
+        return switch (recipe) {
+            .create_workspace => .{
+                .eyebrow = "RECIPE",
+                .title = "Create a useful workspace",
+                .summary = "Start with one workspace that has a clear job. Keep the scope obvious, then enter the workspace shell before expanding into more devices or packages.",
+                .steps = .{
+                    "Pick a clear workspace name and short goal.",
+                    "Choose the smallest template that matches the job.",
+                    "Open the workspace shell, then add devices or packages only when needed.",
+                },
+                .primary_label = "Create Workspace",
+                .secondary_label = "Open Workspace",
+            },
+            .add_second_device => .{
+                .eyebrow = "RECIPE",
+                .title = "Add a second device",
+                .summary = "Once the first workspace is healthy, bring in another machine so the workspace can span more than one device and you can see distributed behavior directly.",
+                .steps = .{
+                    "Use Spiderweb on the host Mac to copy a network URL and access token.",
+                    "Connect from the second machine with that URL and token.",
+                    "Return to Devices and confirm the machine appears online in the workspace.",
+                },
+                .primary_label = "Open Devices",
+                .secondary_label = "Open Settings",
+            },
+            .install_package => .{
+                .eyebrow = "RECIPE",
+                .title = "Install a package",
+                .summary = "Add the next useful capability after first success. Start with tools or services you will actually use, not every package at once.",
+                .steps = .{
+                    "Open Capabilities for the selected workspace.",
+                    "Refresh packages and inspect what is already installed.",
+                    "Enable the next useful package, then return to the workspace to use it.",
+                },
+                .primary_label = "Open Capabilities",
+                .secondary_label = "Refresh Packages",
+            },
+            .run_remote_service => .{
+                .eyebrow = "RECIPE",
+                .title = "Run a remote service",
+                .summary = "After the workspace and devices are stable, use packages and topology together to expose one remote service you actually need.",
+                .steps = .{
+                    "Confirm the device that should host the service is online.",
+                    "Enable or install the package that provides the service.",
+                    "Open the workspace and topology views to confirm where it is running and how it is attached.",
+                },
+                .primary_label = "Open Workspace",
+                .secondary_label = "Open Capabilities",
+            },
+            .connect_to_spiderweb => .{
+                .eyebrow = "REMOTE CONNECTION",
+                .title = "Connect SpiderApp to another Spiderweb",
+                .summary = "Save a profile, paste the server URL and access token, connect, then choose the workspace you want to open first.",
+                .steps = .{
+                    "Create or select a connection profile on the left.",
+                    "Paste the Spiderweb server URL and access token.",
+                    "Connect, refresh, then choose the workspace you want to open.",
+                },
+                .primary_label = "Connect",
+                .secondary_label = "Refresh",
+            },
+            .workspace_tokens => .{
+                .eyebrow = "WORKSPACE TOKENS",
+                .title = "Share workspace-scoped access carefully",
+                .summary = "Use workspace tokens when a tool or user should access one workspace without holding the broader connection token.",
+                .steps = .{
+                    "Connect to Spiderweb and select the right workspace first.",
+                    "Open Settings to manage the workspace-scoped token surfaces.",
+                    "Share the narrowest token that matches the task instead of the broader connection token.",
+                },
+                .primary_label = "Open Settings",
+                .secondary_label = null,
+            },
+            .connect_another_machine => .{
+                .eyebrow = "RECIPE",
+                .title = "Connect another machine",
+                .summary = "Use Spiderweb on the host Mac to copy a network URL and access token, then connect from the second machine and confirm it joins the workspace.",
+                .steps = .{
+                    "On the host Mac, reveal a network URL and access token.",
+                    "Use those details on the second machine to connect back to Spiderweb.",
+                    "Return here and confirm the new device shows up online.",
+                },
+                .primary_label = "Open Settings",
+                .secondary_label = "Open Devices",
+            },
+            .contribute_this_mac => .{
+                .eyebrow = "RECIPE",
+                .title = "Contribute this Mac remotely",
+                .summary = "Use Spiderweb.app on this Mac to pair it with an invite token when another Spiderweb should see this machine as a device.",
+                .steps = .{
+                    "Open the host-side setup and switch to the pairing flow.",
+                    "Paste the remote control URL and invite token.",
+                    "Pair this Mac, then verify it appears in the remote workspace topology.",
+                },
+                .primary_label = "Advanced Setup",
+                .secondary_label = "Open Settings",
+            },
+        };
+    }
+
+    fn openLauncherRecipeModal(self: *App, recipe: LauncherRecipe) void {
+        self.ws.launcher_recipe_modal = recipe;
+    }
+
+    fn closeLauncherRecipeModal(self: *App) void {
+        self.ws.launcher_recipe_modal = null;
+    }
+
+    fn runLauncherRecipePrimaryAction(self: *App, recipe: LauncherRecipe) void {
+        self.closeLauncherRecipeModal();
+        switch (recipe) {
+            .create_workspace => self.openLauncherCreateWorkspaceModal(),
+            .add_second_device => {
+                self.ws.home_route = .devices;
+                self.openSelectedHomeRoute() catch {};
+            },
+            .install_package => {
+                self.ws.home_route = .capabilities;
+                self.openSelectedHomeRoute() catch {};
+            },
+            .run_remote_service => {
+                self.ws.home_route = .workspace;
+                self.openSelectedHomeRoute() catch {};
+            },
+            .connect_to_spiderweb => {
+                if (self.connection_state == .connected) {
+                    self.refreshWorkspaceData() catch {};
+                } else {
+                    self.persistLauncherConnectToken() catch {};
+                    self.tryConnect(&self.manager) catch {};
+                }
+            },
+            .workspace_tokens => {
+                self.ws.home_route = .settings;
+                self.openSelectedHomeRoute() catch {};
+            },
+            .connect_another_machine => {
+                self.ws.home_route = .settings;
+                self.openSelectedHomeRoute() catch {};
+            },
+            .contribute_this_mac => self.openWorkspaceWizard(),
+        }
+    }
+
+    fn runLauncherRecipeSecondaryAction(self: *App, recipe: LauncherRecipe) void {
+        self.closeLauncherRecipeModal();
+        switch (recipe) {
+            .create_workspace, .run_remote_service => {
+                self.ws.home_route = .workspace;
+                self.openSelectedHomeRoute() catch {};
+            },
+            .add_second_device, .connect_another_machine, .contribute_this_mac, .workspace_tokens => {
+                self.ws.home_route = .settings;
+                self.openSelectedHomeRoute() catch {};
+            },
+            .install_package => {
+                self.requestPackageManagerRefresh(true);
+                self.requestVenomRefresh(true);
+            },
+            .connect_to_spiderweb => {
+                if (self.connection_state == .connected) self.refreshWorkspaceData() catch {};
+            },
+        }
+    }
+
+    fn launcherRecipePrimaryEnabled(self: *const App, recipe: LauncherRecipe) bool {
+        const can_open = self.connection_state == .connected and (self.selectedWorkspaceId() != null or self.ws.projects.items.len == 1);
+        return switch (recipe) {
+            .create_workspace => self.connection_state == .connected,
+            .add_second_device => can_open,
+            .install_package => can_open,
+            .run_remote_service => can_open,
+            .connect_to_spiderweb => self.connection_state != .connecting,
+            .workspace_tokens => can_open,
+            .connect_another_machine => self.connection_state == .connected,
+            .contribute_this_mac => self.connection_state == .connected,
+        };
+    }
+
+    fn launcherRecipeSecondaryEnabled(self: *const App, recipe: LauncherRecipe) bool {
+        const can_open = self.connection_state == .connected and (self.selectedWorkspaceId() != null or self.ws.projects.items.len == 1);
+        return switch (recipe) {
+            .create_workspace => can_open,
+            .add_second_device => self.connection_state == .connected,
+            .install_package => self.connection_state == .connected,
+            .run_remote_service => can_open,
+            .connect_to_spiderweb => self.connection_state == .connected,
+            .workspace_tokens => can_open,
+            .connect_another_machine => can_open,
+            .contribute_this_mac => can_open,
+        };
+    }
+
+    fn launcherRecipeProgress(self: *App, recipe: LauncherRecipe) LauncherRecipeProgress {
+        const can_open = self.connection_state == .connected and (self.selectedWorkspaceId() != null or self.ws.projects.items.len == 1);
+        const package_count = @max(self.package_manager_packages.items.len, self.ws.venom_entries.items.len);
+        const selected_workspace_done = self.selectedWorkspaceId() != null or self.ws.projects.items.len == 1;
+        return switch (recipe) {
+            .create_workspace => if (self.ws.projects.items.len > 0) .done else if (self.connection_state == .connected) .ready else .guide,
+            .add_second_device => if (self.ws.nodes.items.len > 1) .done else if (can_open) .ready else .guide,
+            .install_package => if (package_count > 0) .done else if (can_open) .ready else .guide,
+            .run_remote_service => if (self.ws.nodes.items.len > 1 and package_count > 0) .done else if (can_open and package_count > 0) .ready else .guide,
+            .connect_to_spiderweb => if (self.connection_state == .connected) .done else if (self.settings_panel.server_url.items.len > 0 and self.ws.launcher_connect_token.items.len > 0) .ready else .guide,
+            .workspace_tokens => blk: {
+                const workspace_id = self.selectedWorkspaceId() orelse if (self.ws.projects.items.len == 1) self.ws.projects.items[0].id else null;
+                if (workspace_id) |id| {
+                    if (self.selectedWorkspaceToken(id)) |token| {
+                        if (token.len > 0) break :blk .done;
+                    }
+                    if (can_open) break :blk .ready;
+                }
+                break :blk .guide;
+            },
+            .connect_another_machine => if (self.ws.nodes.items.len > 1) .done else if (self.connection_state == .connected) .ready else .guide,
+            .contribute_this_mac => if (selected_workspace_done and self.ws.nodes.items.len > 1) .done else if (self.connection_state == .connected) .ready else .guide,
+        };
+    }
+
+    fn launcherRecipeProgressLabel(progress: LauncherRecipeProgress) []const u8 {
+        return switch (progress) {
+            .guide => "Guide",
+            .ready => "Ready",
+            .done => "Done",
+        };
+    }
+
+    fn launcherRecipeProgressColor(self: *App, progress: LauncherRecipeProgress) zcolors.Color {
+        return switch (progress) {
+            .guide => self.theme.colors.text_secondary,
+            .ready => zcolors.rgba(224, 145, 36, 255),
+            .done => zcolors.rgba(36, 174, 100, 255),
+        };
+    }
+
+    fn drawLauncherWorkspaceRoute(self: *App, rect: Rect) void {
+        const layout = self.panelLayoutMetrics();
+        const pad = @max(layout.inner_inset, 10.0 * self.ui_scale);
+        const gap = @max(layout.row_gap, 8.0 * self.ui_scale);
+        const card_h = @max(84.0 * self.ui_scale, layout.button_height * 2.4);
+        const card_w = (rect.width() - gap * 3.0) / 4.0;
+        const selected_workspace = self.selectedWorkspaceSummary();
+        const workspace_name = if (selected_workspace) |selected_ws| selected_ws.name else "Choose a workspace";
+        const workspace_status = if (selected_workspace) |selected_ws| selected_ws.status else "Pick or create your first workspace";
+        const drive_label = self.launcherDriveLabel();
+        const local_device_summary = self.launcherLocalDeviceSummary();
+        var device_count_buf: [32]u8 = undefined;
+        var package_count_buf: [32]u8 = undefined;
+        const package_count = @max(self.package_manager_packages.items.len, self.ws.venom_entries.items.len);
+        const device_count = std.fmt.bufPrint(&device_count_buf, "{d}", .{self.ws.nodes.items.len}) catch "0";
+        const package_count_text = std.fmt.bufPrint(&package_count_buf, "{d}", .{package_count}) catch "0";
+
+        self.drawMissionSummaryCard(
+            Rect.fromXYWH(rect.min[0], rect.min[1], card_w, card_h),
+            zcolors.rgba(64, 166, 255, 255),
+            "Workspace",
+            workspace_name,
+            workspace_status,
+        );
+        self.drawMissionSummaryCard(
+            Rect.fromXYWH(rect.min[0] + card_w + gap, rect.min[1], card_w, card_h),
+            zcolors.rgba(48, 189, 134, 255),
+            "Drive",
+            drive_label,
+            "The mounted path SpiderApp will work from",
+        );
+        self.drawMissionSummaryCard(
+            Rect.fromXYWH(rect.min[0] + (card_w + gap) * 2.0, rect.min[1], card_w, card_h),
+            zcolors.rgba(255, 166, 61, 255),
+            "Devices",
+            device_count,
+            local_device_summary,
+        );
+        self.drawMissionSummaryCard(
+            Rect.fromXYWH(rect.min[0] + (card_w + gap) * 3.0, rect.min[1], card_w, card_h),
+            zcolors.rgba(196, 111, 255, 255),
+            "Packages",
+            package_count_text,
+            "Installed capabilities ready for this workspace",
+        );
+
+        const body_y = rect.min[1] + card_h + gap;
+        const left_w = @max(260.0 * self.ui_scale, rect.width() * 0.45);
+        const right_w = @max(240.0 * self.ui_scale, rect.width() - left_w - gap);
+        const left_rect = Rect.fromXYWH(rect.min[0], body_y, left_w, @max(1.0, rect.max[1] - body_y));
+        const right_rect = Rect.fromXYWH(left_rect.max[0] + gap, body_y, right_w, @max(1.0, rect.max[1] - body_y));
+
+        self.drawSurfacePanel(left_rect);
+        self.drawTextTrimmed(
+            left_rect.min[0] + pad,
+            left_rect.min[1] + pad,
+            left_rect.width() - pad * 2.0,
+            "Workspace list",
+            self.theme.colors.text_primary,
+        );
+        const filter_focused = self.drawTextInputWidget(
+            Rect.fromXYWH(
+                left_rect.min[0] + pad,
+                left_rect.min[1] + pad + layout.line_height + layout.row_gap * 0.35,
+                left_rect.width() - pad * 2.0,
+                layout.input_height,
+            ),
+            self.ws.launcher_project_filter.items,
+            self.settings_panel.focused_field == .launcher_project_filter,
+            .{ .placeholder = "Filter by name or id" },
+        );
+        if (filter_focused) self.settings_panel.focused_field = .launcher_project_filter;
+
+        const list_top = left_rect.min[1] + pad + layout.line_height + layout.row_gap * 0.35 + layout.input_height + layout.row_gap * 0.5;
+        const list_rect = Rect.fromXYWH(
+            left_rect.min[0] + pad,
+            list_top,
+            left_rect.width() - pad * 2.0,
+            @max(80.0 * self.ui_scale, left_rect.max[1] - list_top - pad),
+        );
+        self.drawSurfacePanel(list_rect);
+        var row_y = list_rect.min[1] + layout.inner_inset;
+        const row_h = @max(layout.button_height, 34.0 * self.ui_scale);
+        const selected_workspace_id = self.selectedWorkspaceId();
+        const filter = std.mem.trim(u8, self.ws.launcher_project_filter.items, " \t\r\n");
+        var visible_count: usize = 0;
+        for (self.ws.projects.items) |project_summary| {
+            if (filter.len > 0 and
+                std.ascii.indexOfIgnoreCase(project_summary.name, filter) == null and
+                std.ascii.indexOfIgnoreCase(project_summary.id, filter) == null)
+            {
+                continue;
+            }
+            visible_count += 1;
+            if (row_y + row_h > list_rect.max[1] - layout.inner_inset) break;
+            var row_buf: [256]u8 = undefined;
+            const row_label = std.fmt.bufPrint(
+                &row_buf,
+                "{s}  [{s}]",
+                .{ project_summary.name, project_summary.status },
+            ) catch project_summary.name;
+            const is_selected = if (selected_workspace_id) |workspace_id|
+                std.mem.eql(u8, project_summary.id, workspace_id)
+            else
+                false;
+            if (self.drawButtonWidget(
+                Rect.fromXYWH(
+                    list_rect.min[0] + layout.inner_inset,
+                    row_y,
+                    list_rect.width() - layout.inner_inset * 2.0,
+                    row_h,
+                ),
+                row_label,
+                .{ .variant = if (is_selected) .primary else .secondary },
+            )) {
+                self.selectWorkspaceInSettings(project_summary.id) catch {};
+                self.refreshWorkspaceData() catch {};
+            }
+            row_y += row_h + layout.row_gap * 0.35;
+        }
+        if (visible_count == 0) {
+            self.drawTextTrimmed(
+                list_rect.min[0] + layout.inner_inset,
+                list_rect.min[1] + layout.inner_inset,
+                list_rect.width() - layout.inner_inset * 2.0,
+                if (self.ws.projects.items.len == 0) "No workspaces yet. Create one to get started." else "No workspaces match the current filter.",
+                self.theme.colors.text_secondary,
+            );
+        }
+
+        self.drawSurfacePanel(right_rect);
+        var detail_y = right_rect.min[1] + pad;
+        self.drawTextTrimmed(
+            right_rect.min[0] + pad,
+            detail_y,
+            right_rect.width() - pad * 2.0,
+            if (selected_workspace) |selected_ws| selected_ws.name else "Workspace details",
+            self.theme.colors.text_primary,
+        );
+        detail_y += layout.line_height + layout.row_gap * 0.35;
+        self.drawTextTrimmed(
+            right_rect.min[0] + pad,
+            detail_y,
+            right_rect.width() - pad * 2.0,
+            if (selected_workspace) |selected_ws| selected_ws.vision else "Select a workspace to see its drive, status, and next steps.",
+            self.theme.colors.text_secondary,
+        );
+        detail_y += layout.line_height * 2.0 + layout.row_gap * 0.25;
+
+        if (self.ws.selected_workspace_detail) |*detail| {
+            var summary_buf: [256]u8 = undefined;
+            const summary_text = std.fmt.bufPrint(
+                &summary_buf,
+                "Status: {s}  |  Drives: {d}  |  Packages: {d}",
+                .{ detail.status, detail.mounts.items.len, package_count },
+            ) catch detail.status;
+            self.drawTextTrimmed(
+                right_rect.min[0] + pad,
+                detail_y,
+                right_rect.width() - pad * 2.0,
+                summary_text,
+                self.theme.colors.text_secondary,
+            );
+            detail_y += layout.line_height + layout.row_gap * 0.35;
+        }
+
+        self.drawTextTrimmed(
+            right_rect.min[0] + pad,
+            detail_y,
+            right_rect.width() - pad * 2.0,
+            drive_label,
+            self.theme.colors.text_primary,
+        );
+        detail_y += layout.line_height + layout.row_gap * 0.35;
+        self.drawTextTrimmed(
+            right_rect.min[0] + pad,
+            detail_y,
+            right_rect.width() - pad * 2.0,
+            "SpiderApp will open into the workspace shell and keep Devices, Capabilities, Explore, and Settings close by after this first step.",
+            self.theme.colors.text_secondary,
+        );
+
+        const can_enter_workspace = self.connection_state == .connected and (self.selectedWorkspaceId() != null or self.ws.projects.items.len == 1);
+        const button_y = right_rect.max[1] - pad - row_h;
+        const button_gap = @max(layout.row_gap * 0.5, 8.0 * self.ui_scale);
+        const button_w = (right_rect.width() - pad * 2.0 - button_gap * 2.0) / 3.0;
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(right_rect.min[0] + pad, button_y, button_w, row_h),
+            "Enter Workspace",
+            .{ .variant = .primary, .disabled = !can_enter_workspace },
+        )) {
+            self.ws.home_route = .workspace;
+            self.openSelectedHomeRoute() catch |err| {
+                const msg = self.formatControlOpError("Open workspace", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setLauncherNotice(text);
+                } else {
+                    self.setLauncherNotice("Unable to open the workspace.");
+                }
+            };
+        }
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(right_rect.min[0] + pad + button_w + button_gap, button_y, button_w, row_h),
+            "Create Workspace",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            self.openLauncherCreateWorkspaceModal();
+        }
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(right_rect.min[0] + pad + (button_w + button_gap) * 2.0, button_y, button_w, row_h),
+            "Advanced",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            self.openWorkspaceWizard();
+        }
+    }
+
+    fn drawLauncherDevicesRoute(self: *App, rect: Rect) void {
+        const layout = self.panelLayoutMetrics();
+        const pad = @max(layout.inner_inset, 10.0 * self.ui_scale);
+        const gap = @max(layout.row_gap, 8.0 * self.ui_scale);
+        const card_h = @max(84.0 * self.ui_scale, layout.button_height * 2.4);
+        const card_w = (rect.width() - gap * 2.0) / 3.0;
+        var node_count_buf: [32]u8 = undefined;
+        var drive_count_buf: [32]u8 = undefined;
+        const drive_count = if (self.ws.selected_workspace_detail) |*detail| detail.mounts.items.len else 0;
+        const node_count_text = std.fmt.bufPrint(&node_count_buf, "{d}", .{self.ws.nodes.items.len}) catch "0";
+        const drive_count_text = std.fmt.bufPrint(&drive_count_buf, "{d}", .{drive_count}) catch "0";
+
+        self.drawMissionSummaryCard(
+            Rect.fromXYWH(rect.min[0], rect.min[1], card_w, card_h),
+            zcolors.rgba(255, 166, 61, 255),
+            "Local Device",
+            self.launcherLocalDeviceSummary(),
+            "This Mac powers the first workspace experience",
+        );
+        self.drawMissionSummaryCard(
+            Rect.fromXYWH(rect.min[0] + card_w + gap, rect.min[1], card_w, card_h),
+            zcolors.rgba(64, 166, 255, 255),
+            "Connected Devices",
+            node_count_text,
+            "Every device contributing to the current workspace",
+        );
+        self.drawMissionSummaryCard(
+            Rect.fromXYWH(rect.min[0] + (card_w + gap) * 2.0, rect.min[1], card_w, card_h),
+            zcolors.rgba(48, 189, 134, 255),
+            "Drives",
+            drive_count_text,
+            "Mounted workspace drives available right now",
+        );
+
+        const list_y = rect.min[1] + card_h + gap;
+        const list_rect = Rect.fromXYWH(rect.min[0], list_y, rect.width(), @max(1.0, rect.max[1] - list_y));
+        self.drawSurfacePanel(list_rect);
+        self.drawTextTrimmed(
+            list_rect.min[0] + pad,
+            list_rect.min[1] + pad,
+            list_rect.width() - pad * 2.0,
+            "Devices",
+            self.theme.colors.text_primary,
+        );
+        self.drawTextTrimmed(
+            list_rect.min[0] + pad,
+            list_rect.min[1] + pad + layout.line_height + layout.row_gap * 0.2,
+            list_rect.width() - pad * 2.0,
+            "Start with this Mac, then add another machine when you want the workspace to span devices.",
+            self.theme.colors.text_secondary,
+        );
+
+        var row_y = list_rect.min[1] + pad + layout.line_height * 2.0 + layout.row_gap * 0.55;
+        const row_h = @max(layout.button_height, 34.0 * self.ui_scale);
+        const now_ms = std.time.milliTimestamp();
+        if (self.ws.nodes.items.len == 0) {
+            self.drawTextTrimmed(
+                list_rect.min[0] + pad,
+                row_y,
+                list_rect.width() - pad * 2.0,
+                "No devices are connected yet. Use the follow-on flow to connect another machine or contribute this Mac to another Spiderweb.",
+                self.theme.colors.text_secondary,
+            );
+        } else {
+            for (self.ws.nodes.items, 0..) |node, idx| {
+                if (row_y + row_h > list_rect.max[1] - pad - row_h - layout.row_gap) break;
+                const row_rect = Rect.fromXYWH(list_rect.min[0] + pad, row_y, list_rect.width() - pad * 2.0, row_h);
+                if (idx % 2 == 1) {
+                    self.drawFilledRect(row_rect, zcolors.withAlpha(self.theme.colors.border, 20));
+                }
+                const status_color = if (node.lease_expires_at_ms > now_ms)
+                    zcolors.rgba(36, 174, 100, 255)
+                else
+                    zcolors.rgba(220, 80, 60, 255);
+                self.drawFilledRect(
+                    Rect.fromXYWH(
+                        row_rect.min[0] + 8.0 * self.ui_scale,
+                        row_rect.min[1] + (row_h - 10.0 * self.ui_scale) * 0.5,
+                        10.0 * self.ui_scale,
+                        10.0 * self.ui_scale,
+                    ),
+                    status_color,
+                );
+                var row_buf: [256]u8 = undefined;
+                const label = std.fmt.bufPrint(
+                    &row_buf,
+                    "{s}  ({s})",
+                    .{ node.node_name, if (node.lease_expires_at_ms > now_ms) "online" else "degraded" },
+                ) catch node.node_name;
+                self.drawTextTrimmed(
+                    row_rect.min[0] + 26.0 * self.ui_scale,
+                    row_rect.min[1] + (row_h - layout.line_height) * 0.5,
+                    row_rect.width() - 34.0 * self.ui_scale,
+                    label,
+                    self.theme.colors.text_primary,
+                );
+                row_y += row_h + layout.row_gap * 0.35;
+            }
+        }
+
+        const can_open = self.connection_state == .connected and (self.selectedWorkspaceId() != null or self.ws.projects.items.len == 1);
+        const button_y = list_rect.max[1] - pad - row_h;
+        const button_gap = @max(layout.row_gap * 0.5, 8.0 * self.ui_scale);
+        const button_w = (list_rect.width() - pad * 2.0 - button_gap * 2.0) / 3.0;
+        const recipe_y = button_y - gap - card_h;
+        if (recipe_y > row_y + gap) {
+            const recipe_w = (list_rect.width() - pad * 2.0 - gap) * 0.5;
+            if (self.drawLauncherRecipeCard(
+                Rect.fromXYWH(list_rect.min[0] + pad, recipe_y, recipe_w, card_h),
+                "RECIPE",
+                "Connect another machine",
+                "Use Spiderweb on the host Mac to copy a network URL and access token, then connect from the second machine and return here to confirm it joined the workspace.",
+                self.launcherRecipeProgress(.connect_another_machine),
+                "Open Settings",
+                self.connection_state == .connected,
+            )) {
+                self.openLauncherRecipeModal(.connect_another_machine);
+            }
+            if (self.drawLauncherRecipeCard(
+                Rect.fromXYWH(list_rect.min[0] + pad + recipe_w + gap, recipe_y, recipe_w, card_h),
+                "RECIPE",
+                "Contribute this Mac remotely",
+                "Use Spiderweb.app on this Mac to pair it with an invite token when another Spiderweb should see this machine as a device.",
+                self.launcherRecipeProgress(.contribute_this_mac),
+                "Advanced Setup",
+                self.connection_state == .connected,
+            )) {
+                self.openLauncherRecipeModal(.contribute_this_mac);
+            }
+        }
+
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(list_rect.min[0] + pad, button_y, button_w, row_h),
+            "Open Devices",
+            .{ .variant = .primary, .disabled = !can_open },
+        )) {
+            self.ws.home_route = .devices;
+            self.openSelectedHomeRoute() catch |err| {
+                const msg = self.formatControlOpError("Open devices", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setLauncherNotice(text);
+                } else {
+                    self.setLauncherNotice("Unable to open Devices.");
+                }
+            };
+        }
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(list_rect.min[0] + pad + button_w + button_gap, button_y, button_w, row_h),
+            "Refresh Devices",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            self.refreshWorkspaceData() catch |err| {
+                const msg = self.formatControlOpError("Refresh devices", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setLauncherNotice(text);
+                } else {
+                    self.setLauncherNotice("Unable to refresh devices.");
+                }
+            };
+        }
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(list_rect.min[0] + pad + (button_w + button_gap) * 2.0, button_y, button_w, row_h),
+            "Advanced Setup",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            self.openWorkspaceWizard();
+        }
+    }
+
+    fn drawLauncherCapabilitiesRoute(self: *App, rect: Rect) void {
+        const layout = self.panelLayoutMetrics();
+        const pad = @max(layout.inner_inset, 10.0 * self.ui_scale);
+        const gap = @max(layout.row_gap, 8.0 * self.ui_scale);
+        const card_h = @max(84.0 * self.ui_scale, layout.button_height * 2.4);
+        const card_w = (rect.width() - gap * 2.0) / 3.0;
+        const package_count = @max(self.package_manager_packages.items.len, self.ws.venom_entries.items.len);
+        var package_count_buf: [32]u8 = undefined;
+        var device_count_buf: [32]u8 = undefined;
+        const package_count_text = std.fmt.bufPrint(&package_count_buf, "{d}", .{package_count}) catch "0";
+        const device_count_text = std.fmt.bufPrint(&device_count_buf, "{d}", .{self.ws.nodes.items.len}) catch "0";
+
+        self.drawMissionSummaryCard(
+            Rect.fromXYWH(rect.min[0], rect.min[1], card_w, card_h),
+            zcolors.rgba(196, 111, 255, 255),
+            "Packages",
+            package_count_text,
+            "Install capabilities only after the workspace is ready",
+        );
+        self.drawMissionSummaryCard(
+            Rect.fromXYWH(rect.min[0] + card_w + gap, rect.min[1], card_w, card_h),
+            zcolors.rgba(64, 166, 255, 255),
+            "Workspace",
+            if (self.selectedWorkspaceSummary()) |selected_ws| selected_ws.name else "No workspace selected",
+            "Capabilities follow the selected workspace",
+        );
+        self.drawMissionSummaryCard(
+            Rect.fromXYWH(rect.min[0] + (card_w + gap) * 2.0, rect.min[1], card_w, card_h),
+            zcolors.rgba(255, 166, 61, 255),
+            "Devices",
+            device_count_text,
+            "Devices expose packages and services into the workspace",
+        );
+
+        const body_y = rect.min[1] + card_h + gap;
+        const body_rect = Rect.fromXYWH(rect.min[0], body_y, rect.width(), @max(1.0, rect.max[1] - body_y));
+        self.drawSurfacePanel(body_rect);
+        self.drawTextTrimmed(
+            body_rect.min[0] + pad,
+            body_rect.min[1] + pad,
+            body_rect.width() - pad * 2.0,
+            "Capabilities",
+            self.theme.colors.text_primary,
+        );
+        self.drawTextTrimmed(
+            body_rect.min[0] + pad,
+            body_rect.min[1] + pad + layout.line_height + layout.row_gap * 0.35,
+            body_rect.width() - pad * 2.0,
+            "Packages turn the workspace into something useful: coding tools, agents, local services, and other workspace behaviors. Older internal docs may still call them venoms, but the onboarding flow stays package-first.",
+            self.theme.colors.text_secondary,
+        );
+
+        var row_y = body_rect.min[1] + pad + layout.line_height * 3.0;
+        if (self.package_manager_packages.items.len == 0 and self.ws.venom_entries.items.len == 0) {
+            self.drawTextTrimmed(
+                body_rect.min[0] + pad,
+                row_y,
+                body_rect.width() - pad * 2.0,
+                "No packages loaded yet. Open Capabilities after the workspace is running to inspect what is installed or add more.",
+                self.theme.colors.text_secondary,
+            );
+        } else {
+            self.drawTextTrimmed(
+                body_rect.min[0] + pad,
+                row_y,
+                body_rect.width() - pad * 2.0,
+                "Recently seen packages",
+                self.theme.colors.text_primary,
+            );
+            row_y += layout.line_height + layout.row_gap * 0.35;
+            var shown: usize = 0;
+            for (self.package_manager_packages.items) |entry| {
+                if (shown >= 5) break;
+                var line_buf: [256]u8 = undefined;
+                const line = std.fmt.bufPrint(
+                    &line_buf,
+                    "{s}  [{s}]",
+                    .{ entry.package_id, if (entry.enabled) "enabled" else "disabled" },
+                ) catch entry.package_id;
+                self.drawTextTrimmed(
+                    body_rect.min[0] + pad,
+                    row_y,
+                    body_rect.width() - pad * 2.0,
+                    line,
+                    self.theme.colors.text_secondary,
+                );
+                row_y += layout.line_height + layout.row_gap * 0.25;
+                shown += 1;
+            }
+            if (shown == 0) {
+                for (self.ws.venom_entries.items) |entry| {
+                    if (shown >= 5) break;
+                    self.drawTextTrimmed(
+                        body_rect.min[0] + pad,
+                        row_y,
+                        body_rect.width() - pad * 2.0,
+                        entry.venom_id,
+                        self.theme.colors.text_secondary,
+                    );
+                    row_y += layout.line_height + layout.row_gap * 0.25;
+                    shown += 1;
+                }
+            }
+        }
+
+        const row_h = @max(layout.button_height, 34.0 * self.ui_scale);
+        const button_y = body_rect.max[1] - pad - row_h;
+        const button_gap = @max(layout.row_gap * 0.5, 8.0 * self.ui_scale);
+        const button_w = (body_rect.width() - pad * 2.0 - button_gap * 2.0) / 3.0;
+        const can_open = self.connection_state == .connected and (self.selectedWorkspaceId() != null or self.ws.projects.items.len == 1);
+        const recipe_h = @max(96.0 * self.ui_scale, layout.button_height * 2.8);
+        const recipe_gap = @max(layout.row_gap * 0.5, 8.0 * self.ui_scale);
+        const recipe_y = button_y - recipe_gap - recipe_h;
+        if (recipe_y > row_y + recipe_gap) {
+            const recipe_w = (body_rect.width() - pad * 2.0 - recipe_gap) * 0.5;
+            if (self.drawLauncherRecipeCard(
+                Rect.fromXYWH(body_rect.min[0] + pad, recipe_y, recipe_w, recipe_h),
+                "PACKAGE RECIPE",
+                "Make the workspace useful",
+                "Start with a small set of packages that match the job: coding tools, agents, or one service you actually need. Avoid turning everything on at once.",
+                self.launcherRecipeProgress(.install_package),
+                "Open Capabilities",
+                can_open,
+            )) {
+                self.openLauncherRecipeModal(.install_package);
+            }
+            if (self.drawLauncherRecipeCard(
+                Rect.fromXYWH(body_rect.min[0] + pad + recipe_w + recipe_gap, recipe_y, recipe_w, recipe_h),
+                "SERVICE RECIPE",
+                "Run a remote service",
+                "Packages can expose services into the workspace after the drive and devices are stable. Open Capabilities, refresh packages, then enable the specific service you need.",
+                self.launcherRecipeProgress(.run_remote_service),
+                "Refresh Packages",
+                self.connection_state == .connected,
+            )) {
+                self.openLauncherRecipeModal(.run_remote_service);
+            }
+        }
+
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(body_rect.min[0] + pad, button_y, button_w, row_h),
+            "Open Capabilities",
+            .{ .variant = .primary, .disabled = !can_open },
+        )) {
+            self.ws.home_route = .capabilities;
+            self.openSelectedHomeRoute() catch |err| {
+                const msg = self.formatControlOpError("Open capabilities", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setLauncherNotice(text);
+                } else {
+                    self.setLauncherNotice("Unable to open Capabilities.");
+                }
+            };
+        }
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(body_rect.min[0] + pad + button_w + button_gap, button_y, button_w, row_h),
+            "Refresh Packages",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            self.requestPackageManagerRefresh(true);
+            self.requestVenomRefresh(true);
+        }
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(body_rect.min[0] + pad + (button_w + button_gap) * 2.0, button_y, button_w, row_h),
+            "Advanced Setup",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            self.openWorkspaceWizard();
+        }
+    }
+
+    fn drawLauncherExploreRoute(self: *App, rect: Rect) void {
+        const layout = self.panelLayoutMetrics();
+        const gap = @max(layout.row_gap, 8.0 * self.ui_scale);
+        const card_h = (rect.height() - gap) * 0.5;
+        const card_w = (rect.width() - gap) * 0.5;
+        const can_open = self.connection_state == .connected and (self.selectedWorkspaceId() != null or self.ws.projects.items.len == 1);
+
+        if (self.drawLauncherRecipeCard(
+            Rect.fromXYWH(rect.min[0], rect.min[1], card_w, card_h),
+            "RECIPE",
+            "Create a useful workspace",
+            "Create or pick one workspace with a clear purpose first. Keep the name obvious, keep the scope small, then enter the workspace shell before expanding further.",
+            self.launcherRecipeProgress(.create_workspace),
+            "Create Workspace",
+            self.connection_state == .connected,
+        )) {
+            self.openLauncherRecipeModal(.create_workspace);
+        }
+        if (self.drawLauncherRecipeCard(
+            Rect.fromXYWH(rect.min[0] + card_w + gap, rect.min[1], card_w, card_h),
+            "RECIPE",
+            "Add a second device",
+            "Once the first workspace is healthy, bring in another machine so the workspace can span more than one device and you can see distributed behavior directly.",
+            self.launcherRecipeProgress(.add_second_device),
+            "Open Devices",
+            can_open,
+        )) {
+            self.openLauncherRecipeModal(.add_second_device);
+        }
+        if (self.drawLauncherRecipeCard(
+            Rect.fromXYWH(rect.min[0], rect.min[1] + card_h + gap, card_w, card_h),
+            "RECIPE",
+            "Install a package",
+            "Add the next useful capability after first success. Start with tools or services you will actually use, not every package at once.",
+            self.launcherRecipeProgress(.install_package),
+            "Open Capabilities",
+            can_open,
+        )) {
+            self.openLauncherRecipeModal(.install_package);
+        }
+        if (self.drawLauncherRecipeCard(
+            Rect.fromXYWH(rect.min[0] + card_w + gap, rect.min[1] + card_h + gap, card_w, card_h),
+            "RECIPE",
+            "Run a remote service",
+            "After the workspace and devices are stable, use Capabilities and Workspace together: enable the package, confirm the device is online, then inspect the workspace and topology.",
+            self.launcherRecipeProgress(.run_remote_service),
+            "Open Workspace",
+            can_open,
+        )) {
+            self.openLauncherRecipeModal(.run_remote_service);
+        }
+    }
+
+    fn drawLauncherSettingsRoute(self: *App, rect: Rect) void {
+        const layout = self.panelLayoutMetrics();
+        const pad = @max(layout.inner_inset, 10.0 * self.ui_scale);
+        const gap = @max(layout.row_gap, 8.0 * self.ui_scale);
+        const selected_profile = self.config.selectedProfile();
+        const selected_workspace = self.selectedWorkspaceSummary();
+        const row_h = @max(layout.button_height, 34.0 * self.ui_scale);
+        self.drawSurfacePanel(rect);
+
+        var y = rect.min[1] + pad;
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            y,
+            rect.width() - pad * 2.0,
+            "Settings",
+            self.theme.colors.text_primary,
+        );
+        y += layout.line_height + layout.row_gap * 0.35;
+
+        var profile_buf: [512]u8 = undefined;
+        const profile_line = std.fmt.bufPrint(
+            &profile_buf,
+            "Profile: {s}  |  Server: {s}",
+            .{ selected_profile.name, selected_profile.server_url },
+        ) catch selected_profile.name;
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            y,
+            rect.width() - pad * 2.0,
+            profile_line,
+            self.theme.colors.text_secondary,
+        );
+        y += layout.line_height + layout.row_gap * 0.25;
+
+        const role_label = if (self.config.active_role == .admin) "Admin" else "User";
+        var workspace_buf: [512]u8 = undefined;
+        const workspace_line = std.fmt.bufPrint(
+            &workspace_buf,
+            "Role: {s}  |  Workspace: {s}",
+            .{ role_label, if (selected_workspace) |selected_ws| selected_ws.name else "Not selected" },
+        ) catch role_label;
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            y,
+            rect.width() - pad * 2.0,
+            workspace_line,
+            self.theme.colors.text_secondary,
+        );
+        y += layout.line_height + layout.row_gap * 0.35;
+
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            y,
+            rect.width() - pad * 2.0,
+            "Manual controls still live here: connection profile management, role changes, workspace tokens, and advanced setup tools.",
+            self.theme.colors.text_secondary,
+        );
+        y += layout.line_height * 2.0 + layout.row_gap * 0.45;
+
+        const can_open = self.connection_state == .connected and (self.selectedWorkspaceId() != null or self.ws.projects.items.len == 1);
+        const recipe_h = @max(96.0 * self.ui_scale, row_h * 2.8);
+        const recipe_w = (rect.width() - pad * 2.0 - gap) * 0.5;
+        if (self.drawLauncherRecipeCard(
+            Rect.fromXYWH(rect.min[0] + pad, y, recipe_w, recipe_h),
+            "REMOTE CONNECTION",
+            "Connect SpiderApp to another Spiderweb",
+            "Save a profile, paste the server URL and access token, connect, then pick the workspace you want to open first.",
+            self.launcherRecipeProgress(.connect_to_spiderweb),
+            if (self.connection_state == .connected) "Refresh" else "Connect",
+            self.connection_state != .connecting,
+        )) {
+            self.openLauncherRecipeModal(.connect_to_spiderweb);
+        }
+        if (self.drawLauncherRecipeCard(
+            Rect.fromXYWH(rect.min[0] + pad + recipe_w + gap, y, recipe_w, recipe_h),
+            "WORKSPACE TOKENS",
+            "Share workspace-scoped access carefully",
+            "Use workspace tokens when a tool or user should access one workspace without holding the broader connection token. Settings is where those manual controls stay.",
+            self.launcherRecipeProgress(.workspace_tokens),
+            "Open Settings",
+            can_open,
+        )) {
+            self.openLauncherRecipeModal(.workspace_tokens);
+        }
+
+        const button_y = rect.max[1] - pad - row_h;
+        const button_w = (rect.width() - pad * 2.0 - gap * 2.0) / 3.0;
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(rect.min[0] + pad, button_y, button_w, row_h),
+            "Open Settings",
+            .{ .variant = .primary, .disabled = !can_open },
+        )) {
+            self.ws.home_route = .settings;
+            self.openSelectedHomeRoute() catch |err| {
+                const msg = self.formatControlOpError("Open settings", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setLauncherNotice(text);
+                } else {
+                    self.setLauncherNotice("Unable to open Settings.");
+                }
+            };
+        }
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(rect.min[0] + pad + button_w + gap, button_y, button_w, row_h),
+            "Advanced Setup",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            self.openWorkspaceWizard();
+        }
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(rect.min[0] + pad + (button_w + gap) * 2.0, button_y, button_w, row_h),
+            if (self.connection_state == .connected) "Refresh" else "Connect",
+            .{ .variant = .secondary, .disabled = self.connection_state == .connecting },
+        )) {
+            if (self.connection_state == .connected) {
+                self.refreshWorkspaceData() catch |err| {
+                    const msg = self.formatControlOpError("Refresh settings", err);
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setLauncherNotice(text);
+                    } else {
+                        self.setLauncherNotice("Unable to refresh settings.");
+                    }
+                };
+            } else {
+                self.persistLauncherConnectToken() catch |err| {
+                    const msg = std.fmt.allocPrint(self.allocator, "Unable to persist token: {s}", .{@errorName(err)}) catch null;
+                    defer if (msg) |value| self.allocator.free(value);
+                    if (msg) |value| self.setLauncherNotice(value);
+                    return;
+                };
+                self.tryConnect(&self.manager) catch |err| {
+                    const msg = self.formatControlOpError("Connect", err);
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setLauncherNotice(text);
+                    }
+                };
+            }
+        }
+    }
+
+    fn openSelectedHomeRoute(self: *App) !void {
+        if (self.selectedWorkspaceId() == null and self.ws.projects.items.len == 1) {
+            try self.selectWorkspaceInSettings(self.ws.projects.items[0].id);
+        }
+
+        try self.openSelectedWorkspaceFromLauncher();
+
+        switch (self.ws.home_route) {
+            .workspace => {
+                _ = self.ensureWorkspacePanel(&self.manager) catch {};
+                _ = self.ensureDashboardPanel(&self.manager) catch {};
+                _ = self.ensureFilesystemPanel(&self.manager) catch {};
+            },
+            .devices => {
+                _ = self.ensureWorkspacePanel(&self.manager) catch {};
+                _ = self.ensureNodeTopologyPanel(&self.manager) catch {};
+            },
+            .capabilities => {
+                _ = self.ensureWorkspacePanel(&self.manager) catch {};
+                self.requestVenomRefresh(true);
+                self.requestPackageManagerRefresh(true);
+                _ = self.ensureVenomManagerPanel(&self.manager) catch {};
+            },
+            .explore => {
+                _ = self.ensureWorkspacePanel(&self.manager) catch {};
+                _ = self.ensureDashboardPanel(&self.manager) catch {};
+                _ = self.ensureFilesystemPanel(&self.manager) catch {};
+            },
+            .settings => {
+                _ = self.ensureWorkspacePanel(&self.manager) catch {};
+                self.ensureSettingsPanel(&self.manager);
+            },
         }
     }
 
@@ -8317,6 +9482,124 @@ pub const App = struct {
         }
     }
 
+    fn drawLauncherRecipeModal(self: *App, fb_width: u32, fb_height: u32) void {
+        const recipe = self.ws.launcher_recipe_modal orelse return;
+        const spec = launcherRecipeSpec(recipe);
+        const progress = self.launcherRecipeProgress(recipe);
+        const layout = self.panelLayoutMetrics();
+        const pad = @max(layout.inset, 12.0 * self.ui_scale);
+        const row_h = @max(layout.button_height, 34.0 * self.ui_scale);
+        const screen_rect = Rect.fromXYWH(0, 0, @floatFromInt(fb_width), @floatFromInt(fb_height));
+
+        self.drawFilledRect(screen_rect, zcolors.withAlpha(self.theme.colors.background, 0.68));
+
+        const modal_w = std.math.clamp(
+            screen_rect.width() * 0.46,
+            440.0 * self.ui_scale,
+            760.0 * self.ui_scale,
+        );
+        const modal_h = std.math.clamp(
+            screen_rect.height() * 0.52,
+            320.0 * self.ui_scale,
+            520.0 * self.ui_scale,
+        );
+        const modal_rect = Rect.fromXYWH(
+            screen_rect.min[0] + (screen_rect.width() - modal_w) * 0.5,
+            screen_rect.min[1] + (screen_rect.height() - modal_h) * 0.5,
+            modal_w,
+            modal_h,
+        );
+
+        self.drawSurfacePanel(modal_rect);
+        self.drawRect(modal_rect, self.theme.colors.border);
+
+        var y = modal_rect.min[1] + pad;
+        const content_w = modal_rect.width() - pad * 2.0;
+        self.drawTextTrimmed(modal_rect.min[0] + pad, y, content_w - 88.0 * self.ui_scale, spec.eyebrow, self.theme.colors.text_secondary);
+        const progress_label = launcherRecipeProgressLabel(progress);
+        const progress_color = self.launcherRecipeProgressColor(progress);
+        const badge_w = @max(64.0 * self.ui_scale, self.measureText(progress_label) + pad * 1.2);
+        const badge_rect = Rect.fromXYWH(
+            modal_rect.max[0] - pad - badge_w,
+            y - 2.0 * self.ui_scale,
+            badge_w,
+            layout.button_height * 0.82,
+        );
+        self.drawFilledRect(badge_rect, zcolors.withAlpha(progress_color, 28));
+        self.drawRect(badge_rect, progress_color);
+        self.drawTextTrimmed(
+            badge_rect.min[0] + pad * 0.4,
+            badge_rect.min[1] + @max(0.0, (badge_rect.height() - layout.line_height) * 0.5),
+            badge_rect.width() - pad * 0.8,
+            progress_label,
+            progress_color,
+        );
+        y += layout.line_height + layout.row_gap * 0.25;
+        self.drawTextTrimmed(modal_rect.min[0] + pad, y, content_w, spec.title, self.theme.colors.text_primary);
+        y += layout.line_height + layout.row_gap * 0.45;
+        self.drawTextTrimmed(modal_rect.min[0] + pad, y, content_w, spec.summary, self.theme.colors.text_secondary);
+        y += layout.line_height * 3.0 + layout.row_gap * 0.35;
+
+        self.drawLabel(modal_rect.min[0] + pad, y, "What to do", self.theme.colors.text_primary);
+        y += layout.line_height + layout.row_gap * 0.35;
+        for (spec.steps, 0..) |step, idx| {
+            const line = std.fmt.allocPrint(self.allocator, "{d}. {s}", .{ idx + 1, step }) catch null;
+            defer if (line) |value| self.allocator.free(value);
+            self.drawTextTrimmed(
+                modal_rect.min[0] + pad,
+                y,
+                content_w,
+                line orelse step,
+                self.theme.colors.text_secondary,
+            );
+            y += layout.line_height * 1.4 + layout.row_gap * 0.1;
+        }
+
+        const button_y = modal_rect.max[1] - pad - row_h;
+        const close_w = @max(90.0 * self.ui_scale, self.measureText("Close") + pad * 1.2);
+        const secondary_w = if (spec.secondary_label != null)
+            @max(150.0 * self.ui_scale, self.measureText(spec.secondary_label.?) + pad * 1.4)
+        else
+            0.0;
+        const secondary_gap = if (spec.secondary_label != null) pad * 0.5 else 0.0;
+        const primary_w = modal_rect.width() - pad * 2.0 - close_w - secondary_w - secondary_gap;
+
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(modal_rect.min[0] + pad, button_y, primary_w, row_h),
+            spec.primary_label,
+            .{ .variant = .primary, .disabled = !self.launcherRecipePrimaryEnabled(recipe) },
+        )) {
+            self.runLauncherRecipePrimaryAction(recipe);
+            return;
+        }
+
+        var trailing_x = modal_rect.max[0] - pad - close_w;
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(trailing_x, button_y, close_w, row_h),
+            "Close",
+            .{ .variant = .secondary },
+        )) {
+            self.closeLauncherRecipeModal();
+            return;
+        }
+
+        if (spec.secondary_label) |secondary_label| {
+            trailing_x -= pad * 0.5 + secondary_w;
+            if (self.drawButtonWidget(
+                Rect.fromXYWH(trailing_x, button_y, secondary_w, row_h),
+                secondary_label,
+                .{ .variant = .secondary, .disabled = !self.launcherRecipeSecondaryEnabled(recipe) },
+            )) {
+                self.runLauncherRecipeSecondaryAction(recipe);
+                return;
+            }
+        }
+
+        if (self.mouse_released and !modal_rect.contains(.{ self.mouse_x, self.mouse_y })) {
+            self.closeLauncherRecipeModal();
+        }
+    }
+
     fn drawAboutModal(self: *App, fb_width: u32, fb_height: u32) void {
         const layout = self.panelLayoutMetrics();
         const pad = @max(layout.inset, 12.0 * self.ui_scale);
@@ -8534,6 +9817,24 @@ pub const App = struct {
         };
     }
 
+    fn homeRouteLabel(route: HomeRoute) []const u8 {
+        return switch (route) {
+            .workspace => "Workspace",
+            .devices => "Devices",
+            .capabilities => "Capabilities",
+            .explore => "Explore",
+            .settings => "Settings",
+        };
+    }
+
+    fn onboardingStageHeadline(stage: OnboardingStage) []const u8 {
+        return switch (stage) {
+            .connect => "Connect to Spiderweb",
+            .choose_workspace => "Choose a workspace",
+            .workspace_ready => "Workspace ready",
+        };
+    }
+
     fn ideMenuRowCount(domain: IdeMenuDomain, stage: UiStage) usize {
         return switch (domain) {
             .file => if (stage == .launcher) 1 else 2,
@@ -8689,7 +9990,7 @@ pub const App = struct {
                     row_y += row_h + row_gap;
                     if (self.drawButtonWidget(
                         Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                        if (self.ws.node_topology_panel_id != null) "Node Topology (Focus)" else "Node Topology (Open)",
+                        if (self.ws.node_topology_panel_id != null) "Devices (Focus)" else "Devices (Open)",
                         .{ .variant = .secondary },
                     )) {
                         _ = self.ensureNodeTopologyPanel(&self.manager) catch {};
@@ -8699,7 +10000,7 @@ pub const App = struct {
                 .project => {
                     if (self.drawButtonWidget(
                         Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                        "Workspace Wizard...",
+                        "Advanced Workspace Setup...",
                         .{ .variant = .secondary, .disabled = self.connection_state != .connected },
                     )) {
                         self.openWorkspaceWizard();
@@ -9328,6 +10629,21 @@ pub const App = struct {
                     const started_ns = std.time.nanoTimestamp();
                     self.drawTerminalPanel(manager, rect);
                     self.perf_frame_panel_ns.terminal += std.time.nanoTimestamp() - started_ns;
+                } else if (std.mem.eql(u8, panel.title, "Devices")) {
+                    const started_ns = std.time.nanoTimestamp();
+                    self.ws.node_topology_panel_id = panel.id;
+                    self.drawNodeTopologyPanel(&self.manager, rect);
+                    self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
+                } else if (std.mem.eql(u8, panel.title, "Packages")) {
+                    const started_ns = std.time.nanoTimestamp();
+                    self.ws.venom_manager_panel_id = panel.id;
+                    self.drawVenomManagerPanel(&self.manager, rect);
+                    self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
+                } else if (std.mem.eql(u8, panel.title, "MCP Servers")) {
+                    const started_ns = std.time.nanoTimestamp();
+                    self.ws.mcp_config_panel_id = panel.id;
+                    self.drawMcpConfigPanel(&self.manager, rect);
+                    self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
                 } else {
                     const started_ns = std.time.nanoTimestamp();
                     self.drawText(
@@ -9338,30 +10654,6 @@ pub const App = struct {
                     );
                     self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
                 }
-            },
-            .Dashboard => {
-                const started_ns = std.time.nanoTimestamp();
-                self.ws.dashboard_panel_id = panel.id;
-                self.drawDashboardPanel(&self.manager, rect);
-                self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
-            },
-            .VenomManager => {
-                const started_ns = std.time.nanoTimestamp();
-                self.ws.venom_manager_panel_id = panel.id;
-                self.drawVenomManagerPanel(&self.manager, rect);
-                self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
-            },
-            .NodeTopology => {
-                const started_ns = std.time.nanoTimestamp();
-                self.ws.node_topology_panel_id = panel.id;
-                self.drawNodeTopologyPanel(&self.manager, rect);
-                self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
-            },
-            .McpConfig => {
-                const started_ns = std.time.nanoTimestamp();
-                self.ws.mcp_config_panel_id = panel.id;
-                self.drawMcpConfigPanel(&self.manager, rect);
-                self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
             },
             else => {
                 // Draw placeholder for other panel types
@@ -10249,7 +11541,7 @@ pub const App = struct {
         const current_step_name = if (self.ws.workspace_wizard_step < step_names.len) step_names[self.ws.workspace_wizard_step] else "?";
         const title_str = std.fmt.allocPrint(
             self.allocator,
-            "Workspace Wizard — Step {d}/5: {s}",
+            "Advanced Workspace Setup — Step {d}/5: {s}",
             .{ self.ws.workspace_wizard_step + 1, current_step_name },
         ) catch null;
         defer if (title_str) |v| self.allocator.free(v);
@@ -10257,7 +11549,7 @@ pub const App = struct {
         self.drawText(
             modal_rect.min[0] + pad,
             y,
-            title_str orelse "Workspace Wizard",
+            title_str orelse "Advanced Workspace Setup",
             self.theme.colors.text_primary,
         );
         y += layout.line_height + layout.row_gap * 0.5;
@@ -10604,14 +11896,13 @@ pub const App = struct {
             self.ws.mcp_config_panel_id = null;
         }
         for (manager.workspace.panels.items) |*panel| {
-            if (panel.kind == .McpConfig) {
+            if (panel.kind == .ToolOutput and std.mem.eql(u8, panel.title, "MCP Servers")) {
                 self.ws.mcp_config_panel_id = panel.id;
                 manager.focusPanel(panel.id);
                 return panel.id;
             }
         }
-        const panel_data = workspace.PanelData{ .McpConfig = {} };
-        const panel_id = try manager.openPanel(.McpConfig, "MCP Servers", panel_data);
+        const panel_id = try self.openHostToolOutputPanel(manager, "MCP Servers", "Spiderweb MCP Servers");
         self.ws.mcp_config_panel_id = panel_id;
         if (manager.workspace.syncDockLayout() catch false) {
             manager.workspace.markDirty();
@@ -10629,14 +11920,13 @@ pub const App = struct {
             self.ws.node_topology_panel_id = null;
         }
         for (manager.workspace.panels.items) |*panel| {
-            if (panel.kind == .NodeTopology) {
+            if (panel.kind == .ToolOutput and std.mem.eql(u8, panel.title, "Devices")) {
                 self.ws.node_topology_panel_id = panel.id;
                 manager.focusPanel(panel.id);
                 return panel.id;
             }
         }
-        const panel_data = workspace.PanelData{ .NodeTopology = {} };
-        const panel_id = try manager.openPanel(.NodeTopology, "Node Topology", panel_data);
+        const panel_id = try self.openHostToolOutputPanel(manager, "Devices", "Spiderweb Devices");
         self.ws.node_topology_panel_id = panel_id;
         if (manager.workspace.syncDockLayout() catch false) {
             manager.workspace.markDirty();
@@ -10654,14 +11944,13 @@ pub const App = struct {
             self.ws.venom_manager_panel_id = null;
         }
         for (manager.workspace.panels.items) |*panel| {
-            if (panel.kind == .VenomManager) {
+            if (panel.kind == .ToolOutput and std.mem.eql(u8, panel.title, "Packages")) {
                 self.ws.venom_manager_panel_id = panel.id;
                 manager.focusPanel(panel.id);
                 return panel.id;
             }
         }
-        const panel_data = workspace.PanelData{ .VenomManager = {} };
-        const panel_id = try manager.openPanel(.VenomManager, "Packages", panel_data);
+        const panel_id = try self.openHostToolOutputPanel(manager, "Packages", "Spiderweb Packages");
         self.ws.venom_manager_panel_id = panel_id;
         if (manager.workspace.syncDockLayout() catch false) {
             manager.workspace.markDirty();
@@ -10671,27 +11960,8 @@ pub const App = struct {
     }
 
     fn ensureDashboardPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
-        if (self.ws.dashboard_panel_id) |panel_id| {
-            if (self.findPanelById(manager, panel_id) != null) {
-                manager.focusPanel(panel_id);
-                return panel_id;
-            }
-            self.ws.dashboard_panel_id = null;
-        }
-        for (manager.workspace.panels.items) |*panel| {
-            if (panel.kind == .Dashboard) {
-                self.ws.dashboard_panel_id = panel.id;
-                manager.focusPanel(panel.id);
-                return panel.id;
-            }
-        }
-        const panel_data = workspace.PanelData{ .Dashboard = {} };
-        const panel_id = try manager.openPanel(.Dashboard, "Dashboard", panel_data);
+        const panel_id = try self.ensureWorkspacePanel(manager);
         self.ws.dashboard_panel_id = panel_id;
-        if (manager.workspace.syncDockLayout() catch false) {
-            manager.workspace.markDirty();
-        }
-        manager.focusPanel(panel_id);
         return panel_id;
     }
 
@@ -11534,72 +12804,6 @@ pub const App = struct {
             .copy_auth_user => {
                 self.copyAuthTokenFromPanel("user") catch |err| {
                     self.handleWorkspacePanelError("Copy user token failed", err);
-                };
-            },
-            .select_mount_index => |idx| {
-                self.ws.workspace_selected_mount_index = idx;
-                if (self.ws.selected_workspace_detail) |*detail| {
-                    if (idx < detail.mounts.items.len) {
-                        const mount = detail.mounts.items[idx];
-                        self.settings_panel.project_mount_path.clearRetainingCapacity();
-                        self.settings_panel.project_mount_path.appendSlice(self.allocator, mount.mount_path) catch {};
-                        self.settings_panel.project_mount_node_id.clearRetainingCapacity();
-                        self.settings_panel.project_mount_node_id.appendSlice(self.allocator, mount.node_id) catch {};
-                        self.settings_panel.project_mount_export_name.clearRetainingCapacity();
-                        self.settings_panel.project_mount_export_name.appendSlice(self.allocator, mount.export_name) catch {};
-                    }
-                }
-            },
-            .remove_selected_mount => {
-                if (self.ws.workspace_selected_mount_index) |idx| {
-                    self.removeWorkspaceMountByView(idx) catch |err| {
-                        self.handleWorkspacePanelError("Mount remove failed", err);
-                    };
-                }
-            },
-            .select_bind_index => |idx| {
-                self.ws.workspace_selected_bind_index = idx;
-                if (self.ws.selected_workspace_detail) |*detail| {
-                    if (idx < detail.binds.items.len) {
-                        const bind = detail.binds.items[idx];
-                        self.settings_panel.workspace_bind_path.clearRetainingCapacity();
-                        self.settings_panel.workspace_bind_path.appendSlice(self.allocator, bind.bind_path) catch {};
-                        self.settings_panel.workspace_bind_target_path.clearRetainingCapacity();
-                        self.settings_panel.workspace_bind_target_path.appendSlice(self.allocator, bind.target_path) catch {};
-                    }
-                }
-            },
-            .remove_selected_bind => {
-                if (self.ws.workspace_selected_bind_index) |idx| {
-                    self.removeWorkspaceBindByView(idx) catch |err| {
-                        self.handleWorkspacePanelError("Bind remove failed", err);
-                    };
-                }
-            },
-            .select_node_for_mount => |idx| {
-                if (idx < self.ws.nodes.items.len) {
-                    const node = self.ws.nodes.items[idx];
-                    self.settings_panel.project_mount_node_id.clearRetainingCapacity();
-                    self.settings_panel.project_mount_node_id.appendSlice(self.allocator, node.node_id) catch {};
-                    self.ws.node_browser_selected_index = idx;
-                    self.ws.node_browser_open = false;
-                }
-            },
-            .rotate_workspace_token => {
-                self.rotateWorkspaceTokenFromPanel() catch |err| {
-                    self.handleWorkspacePanelError("Workspace token rotate failed", err);
-                };
-            },
-            .open_node_browser => {
-                self.ws.node_browser_open = !self.ws.node_browser_open;
-            },
-            .rebootstrap_local_node => {
-                const client = if (self.ws_client) |*value| value else {
-                    self.setWorkspaceError("Not connected");
-                    return;
-                };
-                self.ensureAppLocalNodeBootstrap(client) catch |err| {
-                    self.handleWorkspacePanelError("Local node bootstrap failed", err);
                 };
             },
         }
@@ -15418,7 +16622,7 @@ pub const App = struct {
         const metadata_trimmed = std.mem.trim(u8, self.ws.launcher_profile_metadata.items, " \t\r\n");
         if (server_url.len == 0) return error.ServerUrlRequired;
 
-        const display_name = if (profile_name.len > 0) profile_name else "Spider Web";
+        const display_name = if (profile_name.len > 0) profile_name else "Spiderweb";
         const profile_id = try self.nextConnectionProfileId(display_name);
         defer self.allocator.free(profile_id);
 
@@ -15827,7 +17031,7 @@ pub const App = struct {
         switch (reason) {
             .switched_workspace => self.setLauncherNotice("Switched back to launcher. Select another workspace."),
             .connection_lost => self.setLauncherNotice("Connection lost. Reconnect to continue."),
-            .disconnected => self.setLauncherNotice("Disconnected from Spider Web."),
+            .disconnected => self.setLauncherNotice("Disconnected from Spiderweb."),
             .none => self.clearLauncherNotice(),
         }
 
@@ -18979,6 +20183,27 @@ pub const App = struct {
         return panel_id;
     }
 
+    fn openHostToolOutputPanel(
+        self: *App,
+        manager: *panel_manager.PanelManager,
+        title: []const u8,
+        tool_name_label: []const u8,
+    ) !workspace.PanelId {
+        const tool_name = try self.allocator.dupe(u8, tool_name_label);
+        errdefer self.allocator.free(tool_name);
+        var stdout_buf = try text_buffer.TextBuffer.init(self.allocator, "");
+        errdefer stdout_buf.deinit(self.allocator);
+        var stderr_buf = try text_buffer.TextBuffer.init(self.allocator, "");
+        errdefer stderr_buf.deinit(self.allocator);
+        const panel_data = workspace.PanelData{ .ToolOutput = .{
+            .tool_name = tool_name,
+            .stdout = stdout_buf,
+            .stderr = stderr_buf,
+            .exit_code = 0,
+        } };
+        return manager.openPanel(.ToolOutput, title, panel_data);
+    }
+
     fn ensureTerminalPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
         if (self.terminal.terminal_panel_id) |panel_id| {
             if (self.findPanelById(manager, panel_id) != null) {
@@ -19150,6 +20375,16 @@ pub const App = struct {
         const copy = self.allocator.dupe(u8, text) catch return;
         self.allocator.free(self.status_text);
         self.status_text = copy;
+        self.syncHomeOnboardingStage();
+    }
+
+    fn syncHomeOnboardingStage(self: *App) void {
+        self.ws.onboarding_stage = if (self.connection_state != .connected)
+            .connect
+        else if (self.selectedWorkspaceId() == null)
+            .choose_workspace
+        else
+            .workspace_ready;
     }
 
     // Drawing helpers
