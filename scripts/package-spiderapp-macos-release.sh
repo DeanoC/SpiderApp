@@ -197,7 +197,7 @@ build_app_bundle() {
     "$bundle_dir"
 }
 
-version="${VERSION_DEFAULT:-0.1.0}"
+version="${VERSION_DEFAULT:-0.2.0}"
 out_dir="$OUT_DIR_DEFAULT"
 skip_notarize=0
 skip_build=0

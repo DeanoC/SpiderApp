@@ -61,7 +61,7 @@ command -v swiftc >/dev/null 2>&1 || { echo "Missing swiftc" >&2; exit 1; }
 
 APP_VERSION="$(sed -n 's/.*\.version = "\([^"]*\)".*/\1/p' "$ROOT_DIR/build.zig.zon" | head -n 1)"
 if [ -z "$APP_VERSION" ]; then
-    APP_VERSION="0.1.0"
+    APP_VERSION="0.2.0"
 fi
 
 BUILD_VERSION="$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"

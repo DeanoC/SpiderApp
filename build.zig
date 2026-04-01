@@ -308,7 +308,7 @@ pub fn build(b: *std.Build) void {
         "GUI terminal renderer backend: plain | ghostty-vt (dynamic/fallback)",
     ) orelse "plain";
     const build_options = b.addOptions();
-    build_options.addOption([]const u8, "app_version", "0.1.0");
+    build_options.addOption([]const u8, "app_version", "0.2.0");
     build_options.addOption([]const u8, "git_revision", git_revision);
     build_options.addOption([]const u8, "terminal_backend", terminal_backend_option);
     const build_options_module = build_options.createModule();
