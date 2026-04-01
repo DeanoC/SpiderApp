@@ -14,6 +14,7 @@ GUI_BINARY_NAME="spider-gui"
 APP_BUNDLE_ID="com.deanocalver.spiderapp"
 PKG_ID="com.deanocalver.spiderapp.pkg"
 ICON_SOURCE_DEFAULT="$REPO_ROOT/android/res/drawable/app_icon.png"
+SHELL_SOURCES=("$MACOS_DIR/SpiderAppShellSupport.swift" "$MACOS_DIR/SpiderAppShellApp.swift")
 VERSION_DEFAULT="$(sed -n 's/.*\.version = \"\(.*\)\".*/\1/p' "$REPO_ROOT/build.zig.zon" | head -n 1)"
 
 usage() {
@@ -164,11 +165,20 @@ build_app_bundle() {
   rm -rf "$bundle_dir"
   mkdir -p "$macos_dir" "$resources_dir"
 
-  cp "$REPO_ROOT/zig-out/bin/$GUI_BINARY_NAME" "$macos_dir/$EXECUTABLE_NAME"
-  chmod 755 "$macos_dir/$EXECUTABLE_NAME"
-
+  cp "$REPO_ROOT/zig-out/bin/$GUI_BINARY_NAME" "$resources_dir/$GUI_BINARY_NAME"
+  chmod 755 "$resources_dir/$GUI_BINARY_NAME"
   cp "$REPO_ROOT/zig-out/bin/$CLI_BINARY_NAME" "$resources_dir/$CLI_BINARY_NAME"
   chmod 755 "$resources_dir/$CLI_BINARY_NAME"
+
+  swiftc \
+    -O \
+    -framework AppKit \
+    -framework Foundation \
+    -framework Security \
+    -framework SwiftUI \
+    "${SHELL_SOURCES[@]}" \
+    -o "$macos_dir/$EXECUTABLE_NAME"
+  chmod 755 "$macos_dir/$EXECUTABLE_NAME"
 
   render_info_plist "$info_plist" "$app_version" "$build_version"
   build_icon "$resources_dir" "$info_plist" "$icon_source" "$app_tmp_dir"
@@ -176,6 +186,8 @@ build_app_bundle() {
 
   codesign --force --sign "$app_identity" --timestamp --options runtime \
     "$macos_dir/$EXECUTABLE_NAME"
+  codesign --force --sign "$app_identity" --timestamp --options runtime \
+    "$resources_dir/$GUI_BINARY_NAME"
   codesign --force --sign "$app_identity" --timestamp --options runtime \
     "$resources_dir/$CLI_BINARY_NAME"
   codesign --force --sign "$app_identity" --timestamp --options runtime \
@@ -225,6 +237,7 @@ require_command sips
 require_command iconutil
 require_command python3
 require_command xattr
+require_command swiftc
 
 app_identity="$(resolve_signing_identity \
   SPIDERAPP_MACOS_DEVELOPER_ID_APPLICATION \
