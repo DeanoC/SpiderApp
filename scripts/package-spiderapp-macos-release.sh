@@ -16,6 +16,7 @@ PKG_ID="com.deanocalver.spiderapp.pkg"
 ICON_SOURCE_DEFAULT="$REPO_ROOT/android/res/drawable/app_icon.png"
 SHELL_SOURCES=("$MACOS_DIR/SpiderAppShellSupport.swift" "$MACOS_DIR/SpiderAppShellApp.swift")
 VERSION_DEFAULT="$(sed -n 's/.*\.version = \"\(.*\)\".*/\1/p' "$REPO_ROOT/build.zig.zon" | head -n 1)"
+CLANG_RT_PATH_DEFAULT="$(find /Library/Developer/CommandLineTools /Applications/Xcode.app -name 'libclang_rt.osx.a' 2>/dev/null | head -n 1)"
 
 usage() {
   cat <<'EOF'
@@ -161,14 +162,16 @@ build_app_bundle() {
   local macos_dir="$contents_dir/MacOS"
   local resources_dir="$contents_dir/Resources"
   local info_plist="$contents_dir/Info.plist"
+  local core_lib_path="$REPO_ROOT/zig-out/lib/libspider_core.a"
+  local clang_rt_path="${CLANG_RT_PATH:-$CLANG_RT_PATH_DEFAULT}"
 
   rm -rf "$bundle_dir"
   mkdir -p "$macos_dir" "$resources_dir"
 
-  cp "$REPO_ROOT/zig-out/bin/$GUI_BINARY_NAME" "$resources_dir/$GUI_BINARY_NAME"
-  chmod 755 "$resources_dir/$GUI_BINARY_NAME"
   cp "$REPO_ROOT/zig-out/bin/$CLI_BINARY_NAME" "$resources_dir/$CLI_BINARY_NAME"
   chmod 755 "$resources_dir/$CLI_BINARY_NAME"
+  [[ -f "$core_lib_path" ]] || fail "missing Spider core library at $core_lib_path"
+  [[ -f "$clang_rt_path" ]] || fail "missing libclang_rt.osx.a"
 
   swiftc \
     -O \
@@ -176,6 +179,8 @@ build_app_bundle() {
     -framework Foundation \
     -framework Security \
     -framework SwiftUI \
+    "$core_lib_path" \
+    "$clang_rt_path" \
     "${SHELL_SOURCES[@]}" \
     -o "$macos_dir/$EXECUTABLE_NAME"
   chmod 755 "$macos_dir/$EXECUTABLE_NAME"
@@ -186,8 +191,6 @@ build_app_bundle() {
 
   codesign --force --sign "$app_identity" --timestamp --options runtime \
     "$macos_dir/$EXECUTABLE_NAME"
-  codesign --force --sign "$app_identity" --timestamp --options runtime \
-    "$resources_dir/$GUI_BINARY_NAME"
   codesign --force --sign "$app_identity" --timestamp --options runtime \
     "$resources_dir/$CLI_BINARY_NAME"
   codesign --force --sign "$app_identity" --timestamp --options runtime \
@@ -259,7 +262,6 @@ if [[ $skip_build -eq 0 ]]; then
 fi
 
 [[ -x "$REPO_ROOT/zig-out/bin/$CLI_BINARY_NAME" ]] || fail "missing CLI binary at zig-out/bin/$CLI_BINARY_NAME"
-[[ -x "$REPO_ROOT/zig-out/bin/$GUI_BINARY_NAME" ]] || fail "missing GUI binary at zig-out/bin/$GUI_BINARY_NAME"
 
 mkdir -p "$out_dir"
 work_root="$(mktemp -d /tmp/spiderapp-macos-release.XXXXXX)"
