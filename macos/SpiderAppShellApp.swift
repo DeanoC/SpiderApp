@@ -3,6 +3,8 @@ import SwiftUI
 
 @main
 struct SpiderAppShellApp: App {
+    @NSApplicationDelegateAdaptor(SpiderAppSingleInstanceDelegate.self)
+    private var singleInstanceDelegate
     @StateObject private var model = SpiderAppShellModel()
 
     var body: some Scene {
@@ -20,6 +22,25 @@ struct SpiderAppShellApp: App {
                 }
                 .keyboardShortcut(",", modifiers: .command)
             }
+        }
+    }
+}
+
+final class SpiderAppSingleInstanceDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        guard let bundleID = Bundle.main.bundleIdentifier else { return }
+
+        let otherInstances = NSRunningApplication
+            .runningApplications(withBundleIdentifier: bundleID)
+            .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+
+        guard let existing = otherInstances.first else { return }
+
+        existing.unhide()
+        existing.activate(options: [.activateAllWindows])
+
+        DispatchQueue.main.async {
+            NSApp.terminate(nil)
         }
     }
 }
@@ -91,35 +112,41 @@ private struct ShellHomeView: View {
     }
 
     private var sidebar: some View {
-        List {
-            Section("Spiderwebs") {
-                ForEach(model.profiles) { profile in
-                    Button {
-                        model.selectProfile(profile.id)
-                    } label: {
-                        HStack(spacing: 10) {
-                            Circle()
-                                .fill(profile.id == model.snapshot.selectedProfileID ? Color.accentColor : Color.secondary.opacity(0.25))
-                                .frame(width: 10, height: 10)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(profile.name)
-                                    .font(.headline)
-                                Text(profile.serverURL)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .padding(.vertical, 4)
-                    }
-                    .buttonStyle(.plain)
-                }
+        VStack(spacing: 0) {
+            Color.clear
+                .frame(height: 14)
 
-                Button {
-                    model.addProfile()
-                } label: {
-                    Label("Add Spiderweb", systemImage: "plus")
+            List {
+                Section("Spiderwebs") {
+                    ForEach(model.profiles) { profile in
+                        Button {
+                            model.selectProfile(profile.id)
+                        } label: {
+                            HStack(spacing: 10) {
+                                Circle()
+                                    .fill(profile.id == model.snapshot.selectedProfileID ? Color.accentColor : Color.secondary.opacity(0.25))
+                                    .frame(width: 10, height: 10)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(profile.name)
+                                        .font(.headline)
+                                    Text(profile.serverURL)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .padding(.vertical, 4)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    Button {
+                        model.addProfile()
+                    } label: {
+                        Label("Add Spiderweb", systemImage: "plus")
+                    }
                 }
             }
+            .listStyle(.sidebar)
         }
         .navigationSplitViewColumnWidth(min: 250, ideal: 290)
         .toolbar {
