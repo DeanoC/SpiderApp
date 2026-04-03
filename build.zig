@@ -301,6 +301,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const android_targets = android.standardTargets(b, target);
     const build_android = android_targets.len > 0;
+    const cli_only = b.option(bool, "cli-only", "Build only the spider CLI and skip GUI dependencies") orelse false;
     const git_revision = detectGitRevision(b);
     const terminal_backend_option = b.option(
         []const u8,
@@ -339,40 +340,6 @@ pub fn build(b: *std.Build) void {
     const os_tag = target.result.os.tag;
     const spider_protocol_module = spider_node.module("spider-protocol");
 
-    const ziggy_ui = b.dependency("ziggy_ui", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const zgpu = ziggy_ui.builder.dependency("zgpu", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    const freetype = b.dependency("freetype", .{
-        .target = target,
-        .optimize = optimize,
-        .enable_brotli = false,
-    });
-
-    const sdl3 = b.dependency("sdl3", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const ziggy_ui_module = ziggy_ui.module("ziggy-ui");
-    const ziggy_ui_src = ziggy_ui.path("src");
-    ziggy_ui_module.addIncludePath(ziggy_ui_src);
-    ziggy_ui_module.addImport("zgpu", zgpu.module("root"));
-
-    const zsc_bridge_module = b.createModule(.{
-        .root_source_file = b.path("src/gui/zsc_bridge.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    zsc_bridge_module.addIncludePath(sdl3.path("include"));
-    ziggy_ui_module.addImport("zsc", zsc_bridge_module);
-    ziggy_ui_module.addIncludePath(freetype.path("include"));
-
     // ---------------------------------------------------------------------
     // CLI executable (default build)
     // ---------------------------------------------------------------------
@@ -404,6 +371,8 @@ pub fn build(b: *std.Build) void {
     const cli_step = b.step("cli", "Build the CLI executable");
     cli_step.dependOn(&cli_install.step);
 
+    if (cli_only) return;
+
     const run_cmd = b.addRunArtifact(cli_exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
@@ -417,13 +386,15 @@ pub fn build(b: *std.Build) void {
     const gui_step = b.step("gui", "Build GUI executable for host target");
     const run_gui_step = b.step("run-gui", "Run the GUI app");
 
-    if (addGuiArtifact(b, target, optimize, build_options_module)) |host_gui| {
-        gui_step.dependOn(&host_gui.install.step);
+    if (!cli_only) {
+        if (addGuiArtifact(b, target, optimize, build_options_module)) |host_gui| {
+            gui_step.dependOn(&host_gui.install.step);
 
-        const run_gui_cmd = b.addRunArtifact(host_gui.exe);
-        run_gui_cmd.step.dependOn(&host_gui.install.step);
-        if (b.args) |args| run_gui_cmd.addArgs(args);
-        run_gui_step.dependOn(&run_gui_cmd.step);
+            const run_gui_cmd = b.addRunArtifact(host_gui.exe);
+            run_gui_cmd.step.dependOn(&host_gui.install.step);
+            if (b.args) |args| run_gui_cmd.addArgs(args);
+            run_gui_step.dependOn(&run_gui_cmd.step);
+        }
     }
 
     if (build_android) {

@@ -21,6 +21,8 @@ pub const Noun = enum {
     agent,
     session,
     node,
+    server,
+    local_node,
     workspace,
     package,
     auth,
@@ -34,6 +36,7 @@ pub const Noun = enum {
 
 pub const Verb = enum {
     send,
+    connect,
     read,
     write,
     stat,
@@ -49,6 +52,7 @@ pub const Verb = enum {
     resume_job,
     list,
     pending,
+    invite_create,
     attach,
     close,
     approve,
@@ -98,6 +102,7 @@ pub const Options = struct {
     operator_token: ?[]const u8 = null,
     role: ?Role = null,
     interactive: bool = false,
+    interactive_explicit: bool = false,
     verbose: bool = false,
     json: bool = false,
     show_help: bool = false,
@@ -154,6 +159,7 @@ pub fn printHelpForNoun(noun: Noun) void {
         .agent => help_agent,
         .session => help_session,
         .node => help_node,
+        .server, .local_node => help_connection,
         .workspace => help_workspace,
         .package => help_package,
         .auth => help_auth,
@@ -186,6 +192,8 @@ pub fn parseNoun(arg: []const u8) ?Noun {
     if (std.mem.eql(u8, arg, "agent")) return .agent;
     if (std.mem.eql(u8, arg, "session")) return .session;
     if (std.mem.eql(u8, arg, "node")) return .node;
+    if (std.mem.eql(u8, arg, "server")) return .server;
+    if (std.mem.eql(u8, arg, "local-node")) return .local_node;
     if (std.mem.eql(u8, arg, "workspace")) return .workspace;
     if (std.mem.eql(u8, arg, "package")) return .package;
     if (std.mem.eql(u8, arg, "auth")) return .auth;
@@ -229,6 +237,7 @@ pub fn parseVerb(noun: Noun, arg: []const u8) ?Verb {
             if (std.mem.eql(u8, arg, "list")) return .list;
             if (std.mem.eql(u8, arg, "info")) return .info;
             if (std.mem.eql(u8, arg, "pending")) return .pending;
+            if (std.mem.eql(u8, arg, "invite-create")) return .invite_create;
             if (std.mem.eql(u8, arg, "approve")) return .approve;
             if (std.mem.eql(u8, arg, "deny")) return .deny;
             if (std.mem.eql(u8, arg, "join-request")) return .join_request;
@@ -236,6 +245,18 @@ pub fn parseVerb(noun: Noun, arg: []const u8) ?Verb {
             if (std.mem.eql(u8, arg, "service-upsert")) return .service_upsert;
             if (std.mem.eql(u8, arg, "service-runtime")) return .service_runtime;
             if (std.mem.eql(u8, arg, "watch")) return .watch;
+        },
+        .server => {
+            if (std.mem.eql(u8, arg, "install")) return .install;
+            if (std.mem.eql(u8, arg, "status")) return .status;
+            if (std.mem.eql(u8, arg, "doctor")) return .doctor;
+            if (std.mem.eql(u8, arg, "remove")) return .remove;
+        },
+        .local_node => {
+            if (std.mem.eql(u8, arg, "install")) return .install;
+            if (std.mem.eql(u8, arg, "connect")) return .connect;
+            if (std.mem.eql(u8, arg, "status")) return .status;
+            if (std.mem.eql(u8, arg, "remove")) return .remove;
         },
         .workspace => {
             if (std.mem.eql(u8, arg, "list")) return .list;
@@ -292,6 +313,7 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Options {
 
     if (args.len <= 1) {
         options.interactive = true;
+        options.interactive_explicit = false;
         std.process.argsFree(allocator, args);
         return options;
     }
@@ -368,6 +390,7 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Options {
         }
         if (std.mem.eql(u8, arg, "--interactive") or std.mem.eql(u8, arg, "-i")) {
             options.interactive = true;
+            options.interactive_explicit = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--verbose")) {

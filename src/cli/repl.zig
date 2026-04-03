@@ -31,6 +31,8 @@ const cmd_auth = @import("commands/auth.zig");
 const cmd_fs = @import("commands/fs.zig");
 const cmd_package = @import("commands/package.zig");
 const cmd_complete = @import("commands/complete.zig");
+const cmd_server = @import("commands/server.zig");
+const cmd_local_node = @import("commands/local_node.zig");
 
 // ── History ───────────────────────────────────────────────────────────────────
 
@@ -139,6 +141,7 @@ fn dispatchCommand(
             .list => try cmd_node.executeNodeList(allocator, options, cmd),
             .info => try cmd_node.executeNodeInfo(allocator, options, cmd),
             .pending => try cmd_node.executeNodePendingList(allocator, options, cmd),
+            .invite_create => try cmd_node.executeNodeInviteCreate(allocator, options, cmd),
             .approve => try cmd_node.executeNodeApprove(allocator, options, cmd),
             .deny => try cmd_node.executeNodeDeny(allocator, options, cmd),
             .join_request => try cmd_node.executeNodeJoinRequest(allocator, options, cmd),
@@ -147,6 +150,20 @@ fn dispatchCommand(
             .service_runtime => try cmd_node.executeNodeServiceRuntime(allocator, options, cmd),
             .watch => try cmd_node.executeNodeServiceWatch(allocator, options, cmd),
             else => try stdout.print("Unknown node verb\n", .{}),
+        },
+        .server => switch (verb) {
+            .install => try cmd_server.executeServerInstall(allocator, options, cmd),
+            .status => try cmd_server.executeServerStatus(allocator, options, cmd),
+            .doctor => try cmd_server.executeServerDoctor(allocator, options, cmd),
+            .remove => try cmd_server.executeServerRemove(allocator, options, cmd),
+            else => try stdout.print("Unknown server verb\n", .{}),
+        },
+        .local_node => switch (verb) {
+            .install => try cmd_local_node.executeLocalNodeInstall(allocator, options, cmd),
+            .connect => try cmd_local_node.executeLocalNodeConnect(allocator, options, cmd),
+            .status => try cmd_local_node.executeLocalNodeStatus(allocator, options, cmd),
+            .remove => try cmd_local_node.executeLocalNodeRemove(allocator, options, cmd),
+            else => try stdout.print("Unknown local-node verb\n", .{}),
         },
         .session => switch (verb) {
             .list => try cmd_session.executeSessionList(allocator, options, cmd),
@@ -209,6 +226,8 @@ fn printReplHelp(stdout: anytype) void {
     stdout.writeAll(
         \\  /workspace list|use|up|status|doctor|info|...
         \\  /node list|info|pending|approve|deny|...
+        \\  /server install|status|doctor|remove
+        \\  /local-node install|connect|status|remove
         \\  /session list|status|attach|close|history
         \\  /agent list|info
         \\  /package list|catalog|updates|update|update-all|get|install|channel-get|channel-set|channel-clear|switch|rollback|enable|disable|remove

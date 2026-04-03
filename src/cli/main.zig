@@ -2,6 +2,7 @@
 // Parses arguments and dispatches to per-noun command modules.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const args = @import("args.zig");
 const logger = @import("ziggy-core").utils.logger;
 const ctx = @import("client_context.zig");
@@ -17,7 +18,10 @@ const cmd_chat = @import("commands/chat.zig");
 const cmd_fs = @import("commands/fs.zig");
 const cmd_package = @import("commands/package.zig");
 const cmd_complete = @import("commands/complete.zig");
+const cmd_server = @import("commands/server.zig");
+const cmd_local_node = @import("commands/local_node.zig");
 const repl = @import("repl.zig");
+const linux_onboarding = @import("wizards/linux_onboarding.zig");
 
 // ── Interactive REPL ──────────────────────────────────────────────────────────
 
@@ -87,6 +91,7 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
                 .list => try cmd_node.executeNodeList(allocator, options, cmd),
                 .info => try cmd_node.executeNodeInfo(allocator, options, cmd),
                 .pending => try cmd_node.executeNodePendingList(allocator, options, cmd),
+                .invite_create => try cmd_node.executeNodeInviteCreate(allocator, options, cmd),
                 .approve => try cmd_node.executeNodeApprove(allocator, options, cmd),
                 .deny => try cmd_node.executeNodeDeny(allocator, options, cmd),
                 .join_request => try cmd_node.executeNodeJoinRequest(allocator, options, cmd),
@@ -96,6 +101,30 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
                 .watch => try cmd_node.executeNodeServiceWatch(allocator, options, cmd),
                 else => {
                     logger.err("Unknown node verb", .{});
+                    return error.InvalidArguments;
+                },
+            }
+        },
+        .server => {
+            switch (cmd.verb) {
+                .install => try cmd_server.executeServerInstall(allocator, options, cmd),
+                .status => try cmd_server.executeServerStatus(allocator, options, cmd),
+                .doctor => try cmd_server.executeServerDoctor(allocator, options, cmd),
+                .remove => try cmd_server.executeServerRemove(allocator, options, cmd),
+                else => {
+                    logger.err("Unknown server verb", .{});
+                    return error.InvalidArguments;
+                },
+            }
+        },
+        .local_node => {
+            switch (cmd.verb) {
+                .install => try cmd_local_node.executeLocalNodeInstall(allocator, options, cmd),
+                .connect => try cmd_local_node.executeLocalNodeConnect(allocator, options, cmd),
+                .status => try cmd_local_node.executeLocalNodeStatus(allocator, options, cmd),
+                .remove => try cmd_local_node.executeLocalNodeRemove(allocator, options, cmd),
+                else => {
+                    logger.err("Unknown local-node verb", .{});
                     return error.InvalidArguments;
                 },
             }
@@ -231,7 +260,15 @@ pub fn run(allocator: std.mem.Allocator) !void {
     if (options.command) |cmd| {
         try executeCommand(allocator, options, cmd);
     } else if (options.interactive) {
-        try runInteractive(allocator, options);
+        if (!options.interactive_explicit) {
+            if (builtin.os.tag == .linux and std.fs.File.stdin().isTty() and std.fs.File.stdout().isTty()) {
+                try linux_onboarding.run(allocator);
+            } else {
+                args.printHelp();
+            }
+        } else {
+            try runInteractive(allocator, options);
+        }
     } else {
         args.printHelp();
     }
