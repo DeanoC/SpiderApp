@@ -42,7 +42,10 @@ fi
 
 CLI_BIN_PATH="$ROOT_DIR/zig-out/bin/spider"
 CORE_LIB_PATH="$ROOT_DIR/zig-out/lib/libspider_core.a"
-SHELL_SOURCES="$ROOT_DIR/macos/SpiderAppShellSupport.swift $ROOT_DIR/macos/SpiderAppShellApp.swift"
+SHELL_SOURCES=(
+    "$ROOT_DIR/macos/SpiderAppShellSupport.swift"
+    "$ROOT_DIR/macos/SpiderAppShellApp.swift"
+)
 BUNDLE_DIR="$ROOT_DIR/zig-out/$APP_NAME.app"
 CONTENTS_DIR="$BUNDLE_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
@@ -80,7 +83,7 @@ swiftc \
     -framework SwiftUI \
     "$CORE_LIB_PATH" \
     "$CLANG_RT_PATH" \
-    $SHELL_SOURCES \
+    "${SHELL_SOURCES[@]}" \
     -o "$MACOS_DIR/$EXECUTABLE_NAME"
 chmod +x "$MACOS_DIR/$EXECUTABLE_NAME"
 

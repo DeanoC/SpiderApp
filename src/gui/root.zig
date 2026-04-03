@@ -17727,6 +17727,11 @@ pub const App = struct {
             self.clearNodeServiceReloadDiagnostics();
         }
 
+        if (reason == .switched_workspace) {
+            self.clearTerminalState();
+            self.clearTerminalTarget();
+        }
+
         if (reason == .switched_workspace and self.connection_state == .connected and self.ws_client != null) {
             self.refreshWorkspaceData() catch |err| {
                 const msg = std.fmt.allocPrint(self.allocator, "Workspace refresh failed: {s}", .{@errorName(err)}) catch null;

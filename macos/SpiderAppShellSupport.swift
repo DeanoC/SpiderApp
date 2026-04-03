@@ -1515,7 +1515,10 @@ final class SpiderAppShellModel: ObservableObject {
     func handleIncomingURL(_ url: URL) {
         guard url.scheme?.lowercased() == "spiderapp" else { return }
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return }
-        let queryItems = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+        let queryItems = Dictionary(
+            (components.queryItems ?? []).map { ($0.name, $0.value ?? "") },
+            uniquingKeysWith: { _, latest in latest }
+        )
         var changedProfile = false
 
         if let profileID = trimmed(queryItems["profile_id"]),
