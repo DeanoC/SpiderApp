@@ -44,7 +44,7 @@ const bash_completion =
     \\  words=("${COMP_WORDS[@]}")
     \\
     \\  # Top-level nouns
-    \\  local nouns="chat fs agent session node workspace package auth connect disconnect status help complete"
+    \\  local nouns="chat fs agent session node server local-node workspace package auth connect disconnect status help complete"
     \\
     \\  if [[ ${COMP_CWORD} -eq 1 ]]; then
     \\    COMPREPLY=( $(compgen -W "${nouns}" -- "${cur}") )
@@ -54,7 +54,7 @@ const bash_completion =
     \\  local noun="${words[1]}"
     \\
     \\  # Global flags always available
-    \\  local global_flags="--url --workspace --token --operator-token --role --verbose --json --help --version --interactive"
+    \\  local global_flags="--url --workspace --workspace-token --operator-token --role --verbose --json --help --version --interactive"
     \\
     \\  if [[ ${COMP_CWORD} -eq 2 ]]; then
     \\    case "${noun}" in
@@ -62,7 +62,9 @@ const bash_completion =
     \\      fs)         COMPREPLY=( $(compgen -W "ls read write stat tree ${global_flags}" -- "${cur}") ) ;;
     \\      agent)      COMPREPLY=( $(compgen -W "list info ${global_flags}" -- "${cur}") ) ;;
     \\      session)    COMPREPLY=( $(compgen -W "list status attach resume close history restore ${global_flags}" -- "${cur}") ) ;;
-    \\      node)       COMPREPLY=( $(compgen -W "list info pending approve deny join-request service-get service-upsert service-runtime watch ${global_flags}" -- "${cur}") ) ;;
+    \\      node)       COMPREPLY=( $(compgen -W "list info pending invite-create approve deny join-request service-get service-upsert service-runtime watch ${global_flags}" -- "${cur}") ) ;;
+    \\      server)     COMPREPLY=( $(compgen -W "install status doctor remove ${global_flags}" -- "${cur}") ) ;;
+    \\      local-node) COMPREPLY=( $(compgen -W "install connect status remove ${global_flags}" -- "${cur}") ) ;;
     \\      workspace)  COMPREPLY=( $(compgen -W "list use create up doctor info status template bind mount handoff ${global_flags}" -- "${cur}") ) ;;
     \\      package)    COMPREPLY=( $(compgen -W "list catalog updates update update-all info get install channel-get channel-set channel-clear enable switch disable rollback remove ${global_flags}" -- "${cur}") ) ;;
     \\      auth)       COMPREPLY=( $(compgen -W "status rotate ${global_flags}" -- "${cur}") ) ;;
@@ -134,7 +136,9 @@ const zsh_completion =
     \\        fs)         _arguments '1: :(ls read write stat tree)' ;;
     \\        agent)      _arguments '1: :(list info)' ;;
     \\        session)    _arguments '1: :(list status attach resume close history restore)' ;;
-    \\        node)       _arguments '1: :(list info pending approve deny join-request service-get service-upsert service-runtime watch)' ;;
+    \\        node)       _arguments '1: :(list info pending invite-create approve deny join-request service-get service-upsert service-runtime watch)' ;;
+    \\        server)     _arguments '1: :(install status doctor remove)' ;;
+    \\        local-node) _arguments '1: :(install connect status remove)' ;;
     \\        workspace)  _spider_workspace ;;
     \\        package)    _spider_package ;;
     \\        auth)       _arguments '1: :(status rotate)' ;;
@@ -152,6 +156,8 @@ const zsh_completion =
     \\    'agent:Agent management'
     \\    'session:Session management'
     \\    'node:Node management'
+    \\    'server:Linux Spiderweb host management'
+    \\    'local-node:Linux node onboarding'
     \\    'workspace:Workspace management'
     \\    'package:Package and registry management'
     \\    'auth:Authentication'
@@ -221,7 +227,7 @@ const fish_completion =
     \\# Global flags
     \\complete -c spider -l url           -d 'Server URL' -r
     \\complete -c spider -l workspace     -d 'Workspace ID' -r
-    \\complete -c spider -l token         -d 'Auth token' -r
+    \\complete -c spider -l workspace-token -d 'Workspace token' -r
     \\complete -c spider -l operator-token -d 'Operator token' -r
     \\complete -c spider -l role          -d 'Role (admin|user)' -r -a 'admin user'
     \\complete -c spider -l verbose       -d 'Verbose output'
@@ -236,6 +242,8 @@ const fish_completion =
     \\complete -c spider -n '__fish_use_subcommand' -a agent      -d 'Agent management'
     \\complete -c spider -n '__fish_use_subcommand' -a session    -d 'Session management'
     \\complete -c spider -n '__fish_use_subcommand' -a node       -d 'Node management'
+    \\complete -c spider -n '__fish_use_subcommand' -a server     -d 'Linux Spiderweb host management'
+    \\complete -c spider -n '__fish_use_subcommand' -a local-node -d 'Linux node onboarding'
     \\complete -c spider -n '__fish_use_subcommand' -a workspace  -d 'Workspace management'
     \\complete -c spider -n '__fish_use_subcommand' -a package    -d 'Package and registry management'
     \\complete -c spider -n '__fish_use_subcommand' -a auth       -d 'Authentication'
@@ -274,6 +282,7 @@ const fish_completion =
     \\complete -c spider -n '__fish_seen_subcommand_from node' -a list             -d 'List nodes'
     \\complete -c spider -n '__fish_seen_subcommand_from node' -a info             -d 'Node info'
     \\complete -c spider -n '__fish_seen_subcommand_from node' -a pending          -d 'List pending join requests'
+    \\complete -c spider -n '__fish_seen_subcommand_from node' -a invite-create    -d 'Create Linux node invite'
     \\complete -c spider -n '__fish_seen_subcommand_from node' -a approve          -d 'Approve join request'
     \\complete -c spider -n '__fish_seen_subcommand_from node' -a deny             -d 'Deny join request'
     \\complete -c spider -n '__fish_seen_subcommand_from node' -a join-request     -d 'Show join request'
@@ -281,6 +290,18 @@ const fish_completion =
     \\complete -c spider -n '__fish_seen_subcommand_from node' -a service-upsert   -d 'Upsert node service'
     \\complete -c spider -n '__fish_seen_subcommand_from node' -a service-runtime  -d 'Node service runtime'
     \\complete -c spider -n '__fish_seen_subcommand_from node' -a watch            -d 'Watch node events'
+    \\
+    \\# server verbs
+    \\complete -c spider -n '__fish_seen_subcommand_from server' -a install -d 'Install Spiderweb host'
+    \\complete -c spider -n '__fish_seen_subcommand_from server' -a status  -d 'Show Spiderweb host status'
+    \\complete -c spider -n '__fish_seen_subcommand_from server' -a doctor  -d 'Check Spiderweb host health'
+    \\complete -c spider -n '__fish_seen_subcommand_from server' -a remove  -d 'Remove Spiderweb host service'
+    \\
+    \\# local-node verbs
+    \\complete -c spider -n '__fish_seen_subcommand_from local-node' -a install -d 'Install Linux node scaffolding'
+    \\complete -c spider -n '__fish_seen_subcommand_from local-node' -a connect -d 'Connect this Linux machine'
+    \\complete -c spider -n '__fish_seen_subcommand_from local-node' -a status  -d 'Show Linux node status'
+    \\complete -c spider -n '__fish_seen_subcommand_from local-node' -a remove  -d 'Remove Linux node service'
     \\
     \\# workspace verbs
     \\complete -c spider -n '__fish_seen_subcommand_from workspace' -a list     -d 'List workspaces'

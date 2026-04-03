@@ -59,6 +59,7 @@ spider --help
 - `session restore [agent_id]` - Attach the latest persisted session
 - `node list` - List registered nodes
 - `node info <node_id>` - Show node details
+- `node invite-create` - Create an invite token for a Linux node
 - `node join-request <node_name> [fs_url]` - Submit pending node join request
 - `node pending` - List pending node join requests
 - `node approve <request_id>` - Approve pending node join request
@@ -66,6 +67,14 @@ spider --help
 - `node service-get <node_id>` - Show node service catalog
 - `node service-upsert <node_id> <node_secret>` - Update node service catalog metadata
 - `node service-runtime <node_id> <service_id> <action>` - Read/write runtime control files for a service mount
+- `server install` - Install or update Spiderweb as a Linux service
+- `server status` - Show Linux Spiderweb status
+- `server doctor` - Show Linux Spiderweb health and next step
+- `server remove` - Remove the Linux Spiderweb service
+- `local-node install` - Install Linux node scaffolding
+- `local-node connect` - Connect this Linux machine to another Spiderweb
+- `local-node status` - Show Linux node status
+- `local-node remove` - Remove the Linux node service and local config
 - `workspace status [workspace_id]` - Show active workspace mounts
 - `auth status` - Show Spiderweb auth token status (admin only)
 - `auth rotate <admin|user>` - Rotate Spiderweb auth token (admin only)
@@ -92,15 +101,22 @@ spider --help
 
 ## Interactive Mode
 
-Interactive mode entry exists, but the REPL is not implemented yet.
+On Linux, running `spider` with no subcommand from a real terminal opens the guided Linux home.
+
+That guided home offers:
+
+- `Host Spiderweb Here`
+- `Connect This Linux Machine`
+- `Status / Repair`
+
+Use `spider --interactive` only when you explicitly want the REPL path.
 
 Current behavior:
 
 ```
-spider --url ws://100.101.192.123:18790
+spider
 
-Interactive mode not yet implemented.
-Use command mode for now.
+Spider Linux Home
 ```
 
 ## Design Philosophy

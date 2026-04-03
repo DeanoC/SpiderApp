@@ -54,7 +54,7 @@ spider --operator-token op-secret workspace create "Game AI"
 ### `--interactive`
 Start interactive REPL mode instead of running a single command.
 
-Note: the interactive REPL is not implemented yet; command mode is currently required.
+On Linux, running `spider` with no subcommand opens the guided onboarding home by default. Use `--interactive` when you explicitly want the REPL instead.
 
 **Examples:**
 ```bash

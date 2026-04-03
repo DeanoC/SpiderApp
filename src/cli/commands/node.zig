@@ -445,6 +445,93 @@ pub fn executeNodePendingList(allocator: std.mem.Allocator, options: args.Option
     }
 }
 
+pub fn executeNodeInviteCreate(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    var expires_in_ms: ?u64 = null;
+    var node_name: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < cmd.args.len) : (i += 1) {
+        const arg = cmd.args[i];
+        if (std.mem.eql(u8, arg, "--expires-in-ms")) {
+            i += 1;
+            if (i >= cmd.args.len) return error.InvalidArguments;
+            expires_in_ms = try std.fmt.parseInt(u64, cmd.args[i], 10);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--node-name")) {
+            i += 1;
+            if (i >= cmd.args.len) return error.InvalidArguments;
+            node_name = cmd.args[i];
+            continue;
+        }
+        return error.InvalidArguments;
+    }
+
+    var cfg = try ctx.loadCliConfig(allocator);
+    defer cfg.deinit();
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try ctx.getOrCreateClient(allocator, options);
+    try ctx.ensureUnifiedV2Control(allocator, client);
+
+    var payload = std.ArrayListUnmanaged(u8){};
+    defer payload.deinit(allocator);
+    try payload.append(allocator, '{');
+    var appended = false;
+    if (expires_in_ms) |value| {
+        try payload.writer(allocator).print("\"expires_in_ms\":{d}", .{value});
+        appended = true;
+    }
+    if (node_name) |value| {
+        const escaped_name = try unified.jsonEscape(allocator, value);
+        defer allocator.free(escaped_name);
+        if (appended) try payload.append(allocator, ',');
+        try payload.writer(allocator).print("\"node_name\":\"{s}\"", .{escaped_name});
+        appended = true;
+    }
+    if (resolveOperatorToken(options, &cfg)) |token| {
+        const escaped_token = try unified.jsonEscape(allocator, token);
+        defer allocator.free(escaped_token);
+        if (appended) try payload.append(allocator, ',');
+        try payload.writer(allocator).print("\"operator_token\":\"{s}\"", .{escaped_token});
+    }
+    try payload.append(allocator, '}');
+
+    const payload_json = try control_plane.requestControlPayloadJson(
+        allocator,
+        client,
+        &ctx.g_control_request_counter,
+        "control.node_invite_create",
+        payload.items,
+    );
+    defer allocator.free(payload_json);
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{}) catch {
+        try stdout.print("{s}\n", .{payload_json});
+        return;
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) {
+        try stdout.print("{s}\n", .{payload_json});
+        return;
+    }
+
+    const root = parsed.value.object;
+    const invite_token = jsonObjectStringOr(root, "invite_token", "(missing)");
+    try stdout.print("Linux node invite created\n", .{});
+    try stdout.print("  Invite ID: {s}\n", .{jsonObjectStringOr(root, "invite_id", "(unknown)")});
+    try stdout.print("  Invite token: {s}\n", .{invite_token});
+    try stdout.print("  Expires at: {d}\n", .{jsonObjectI64Or(root, "expires_at_ms", 0)});
+    try stdout.print(
+        "  Connect command: spider local-node connect --control-url {s} --invite-token {s}\n",
+        .{ options.url, invite_token },
+    );
+    try stdout.print(
+        "  If Spiderweb auth is enabled, also add: --control-auth-token <server-access-token>\n",
+        .{},
+    );
+}
+
 pub fn executeNodeApprove(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     if (cmd.args.len == 0) {
         logger.err("node approve requires <request_id>", .{});
