@@ -416,21 +416,6 @@ pub fn build(b: *std.Build) void {
     client_websocket_module.addImport("websocket", websocket.module("websocket"));
     client_websocket_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
 
-    const namespace_client_module = b.createModule(.{
-        .root_source_file = b.path("../Spiderweb/src/acheron/namespace_client.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    namespace_client_module.addImport("spider-protocol", spider_protocol_module);
-    namespace_client_module.addImport(
-        "spiderweb_mount_provider",
-        b.createModule(.{
-            .root_source_file = b.path("../Spiderweb/src/acheron/mount_provider.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    );
-
     const spider_core_module = b.createModule(.{
         .root_source_file = b.path("src/lib/spider_core.zig"),
         .target = target,
@@ -442,7 +427,6 @@ pub fn build(b: *std.Build) void {
     spider_core_module.addImport("control_plane", control_plane_module);
     spider_core_module.addImport("client_websocket", client_websocket_module);
     spider_core_module.addImport("cli_bridge", cli_bridge_module);
-    spider_core_module.addImport("namespace_client", namespace_client_module);
     spider_core_module.addImport("build_options", build_options_module);
     spider_core_module.addImport("platform_storage", platform_storage_module);
     if (os_tag != .windows) {
